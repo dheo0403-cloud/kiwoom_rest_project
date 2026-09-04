@@ -9,3 +9,6 @@ __pycache__
 *.zip
 venv
 .venv
+.git
+legacy/
+test_*.py
