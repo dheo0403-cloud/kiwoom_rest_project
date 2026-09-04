@@ -17,6 +17,8 @@ from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
 from database import AsyncDatabase
 from market_data_buffer import MarketDataBuffer
+from strategy import AdaptiveVolatilityBreakoutStrategy
+from indicators import TechnicalIndicators
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -26,10 +28,9 @@ class AsyncTradingBot:
     """
     완전 비동기(asyncio/aiohttp) 키움증권 퀀트 트레이딩 봇 데몬
     - 4단계 선점형 우선순위 큐(CRITICAL/HIGH/MEDIUM/LOW) 연동
-    - 동시성 안전 포트폴리오 관리자(AsyncPortfolioManager)
+    - 동시성 안전 포트폴리오 관리자(AsyncPortfolioManager) + 프랙셔널 켈리 자산 배분
     - 인메모리 링버퍼(MarketDataBuffer) 및 비동기 배치 DB 영속화
-    - 피보나치 눌림목 매수 전략 (0.382 / 0.5 / 0.618)
-    - 스마트 호가 기반 3단계 분할 익절 및 긴급 스탑로스 선점 매도
+    - ATR 적응형 변동성 돌파 & 샹들리에 엑시트(Chandelier Exit) 트레일링 스탑
     - KODEX 200 지수 급락 필터 & MDD -5% 계좌 서킷 브레이커
     - 수동 주문 비동기 처리 및 DB 영속화
     """
@@ -37,12 +38,14 @@ class AsyncTradingBot:
                  client: Optional[AsyncKiwoomClient] = None,
                  portfolio: Optional[AsyncPortfolioManager] = None,
                  db: Optional[AsyncDatabase] = None,
-                 buffer: Optional[MarketDataBuffer] = None):
+                 buffer: Optional[MarketDataBuffer] = None,
+                 strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None):
         self.is_demo = is_demo
         self.client = client or AsyncKiwoomClient(is_demo=is_demo)
         self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=5)
         self.db = db or AsyncDatabase()
         self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
+        self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer)
 
         self.market_filter_passed = True
         self.kodex200_change_rate = 0.0
@@ -321,31 +324,25 @@ class AsyncTradingBot:
             self.buffer.update_tick(code, cur_price, cur_volume)
             await self.portfolio.update_current_price(code, cur_price)
 
-            yield_rate = (cur_price - buy_price) / buy_price if buy_price > 0 else 0.0
-            peak_drop = (cur_price - highest_price) / highest_price if highest_price > 0 else 0.0
+            # 지표 산출 (인메모리 버퍼 기반 0.1ms 처리)
+            candle_df = self.buffer.get_dataframe(code, limit=20)
+            ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
 
-            # 1. 🚨 하드 스탑로스 (-4.0% 이하) -> CRITICAL 우선순위 긴급 전량 매도
-            if yield_rate <= self.stop_loss_rate:
-                print(f"🚨 [STOP_LOSS] {name}({code}) 손절 조건 도달 (수익률: {yield_rate*100:.2f}%) -> 긴급 시장가/매수2호가 매도 발주!")
-                await self._execute_emergency_sell(code, name, qty, cur_price, reason=f"하드 스탑로스 ({yield_rate*100:.2f}%)")
-                continue
+            # 퀀트 전략 출구 시그널 검증 (ATR 샹들리에 엑시트 + R-배수 분할 익절)
+            action, reason = await self.strategy.check_sell_signal(
+                code=code, buy_price=buy_price, current_price=cur_price,
+                ind=ind, sell_stage=stage, highest_price=highest_price
+            )
 
-            # 2. 🚨 트레일링 스탑 (수익권 진입 후 최고점 대비 -2.5% 반락) -> CRITICAL 긴급 매도
-            if (stage >= 1 or highest_price >= buy_price * 1.03) and peak_drop <= -self.trailing_stop_drop:
-                print(f"🚨 [TRAILING_STOP] {name}({code}) 최고가({highest_price:,.0f}원) 대비 {peak_drop*100:.2f}% 반락 -> 잔여 전량 매도!")
-                await self._execute_emergency_sell(code, name, qty, cur_price, reason=f"트레일링 스탑 ({peak_drop*100:.2f}%)")
-                continue
-
-            # 3. 🎯 3단계 분할 익절 (+3%, +5%, +8%) -> HIGH 우선순위 매수 1호가 지정가 매도
-            for target_profit, sell_ratio, next_stage in self.take_profit_stages:
-                if yield_rate >= target_profit and stage < next_stage:
-                    sell_qty = max(1, int(qty * sell_ratio))
-                    if next_stage == 3:
-                        sell_qty = qty  # 최종 3차는 전량 청산
-
-                    print(f"🎯 [TAKE_PROFIT Stage {next_stage}] {name}({code}) 목표 수익률({target_profit*100:.1f}%) 달성! {sell_qty}주 분할 매도 발주")
-                    await self._execute_profit_sell(code, name, sell_qty, cur_price, next_stage, reason=f"{next_stage}차 분할익절 ({yield_rate*100:.2f}%)")
-                    break
+            if action == "SELL_ALL":
+                print(f"🚨 [EXIT_SIGNAL/SELL_ALL] {name}({code}) -> {reason}")
+                await self._execute_emergency_sell(code, name, qty, cur_price, reason=reason)
+            elif action == "SELL_PARTIAL":
+                sell_ratio = 0.33 if stage == 0 else 0.50
+                sell_qty = max(1, int(qty * sell_ratio))
+                next_stage = stage + 1
+                print(f"🎯 [EXIT_SIGNAL/SELL_PARTIAL] {name}({code}) -> {reason} ({sell_qty}주 매도)")
+                await self._execute_profit_sell(code, name, sell_qty, cur_price, next_stage, reason=reason)
 
     async def _execute_emergency_sell(self, code: str, name: str, qty: int, cur_price: float, reason: str):
         """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스 주문"""
@@ -436,35 +433,27 @@ class AsyncTradingBot:
             self.buffer.update_tick(code, cur_price, cur_volume)
             info['current_price'] = cur_price
 
-            # 피보나치 눌림목 조건: 0.382 이하 ~ 0.618 이상 구간에 위치
-            if fib_618 <= cur_price <= fib_382:
-                # 1분봉 반등 시그널 확인
-                today_str = datetime.now().strftime('%Y%m%d')
-                min_chart, _ = await self.client.get_minute_chart(code, base_dt=today_str, priority=RequestPriority.LOW)
-                if not min_chart:
+            # 지표 산출
+            candle_df = self.buffer.get_dataframe(code, limit=20)
+            ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
+            ind['avg_vol'] = info.get('avg_volume', 0)
+            ind['high10'] = info.get('high_price', cur_price)
+            ind['open'] = float(out.get('oprn', cur_price) or cur_price)
+
+            # 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀)
+            buy_signal, reason = await self.strategy.check_buy_signal(
+                code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
+            )
+
+            if buy_signal:
+                atr14 = ind.get('atr14', 0)
+                # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산
+                order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
+                if order_qty <= 0:
                     continue
 
-                candles = min_chart.get('output2', min_chart.get('output', []))
-                if not candles or len(candles) < 3:
-                    continue
-
-                # 직전 분봉 양봉 및 거래량 증가 확인 (간이 반등 필터)
-                last_candle = candles[0]
-                prev_candle = candles[1]
-                last_open = float(last_candle.get('oprn', 0) or last_candle.get('open_price', 0))
-                last_close = float(last_candle.get('clpr', 0) or last_candle.get('close_price', 0))
-                last_vol = float(last_candle.get('cntg_vol', 0) or last_candle.get('volume', 0))
-                prev_vol = float(prev_candle.get('cntg_vol', 0) or prev_candle.get('volume', 1))
-
-                is_rebound = (last_close >= last_open) and (last_vol >= prev_vol * 0.8)
-                if is_rebound:
-                    # 안전 자산 배분 수량 계산
-                    order_qty = await self.portfolio.get_order_qty(cur_price)
-                    if order_qty <= 0:
-                        continue
-
-                    print(f"🔥 [BUY_SIGNAL] {name}({code}) 피보나치 눌림목 반등 확인! (현재가: {cur_price:,.0f}원, 목표수량: {order_qty}주)")
-                    await self._execute_smart_buy(code, name, order_qty, cur_price)
+                print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
+                await self._execute_smart_buy(code, name, order_qty, cur_price)
 
     async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float):
         """HIGH 우선순위로 매도 1호가 지정가 매수 발주"""

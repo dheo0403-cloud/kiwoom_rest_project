@@ -191,6 +191,91 @@ class TechnicalIndicators:
             'adx': adx
         }, index=df_std.index)
 
+    @staticmethod
+    def calculate_chandelier_exit(df: pd.DataFrame, period: int = 14, multiplier: float = 2.5) -> pd.DataFrame:
+        """
+        Chandelier Exit (샹들리에 출구 - 변동성 기반 동적 트레일링 스탑)
+        - Long Stop = Highest High(period) - (multiplier * ATR(period))
+        - Short Stop = Lowest Low(period) + (multiplier * ATR(period))
+        """
+        df_std = TechnicalIndicators._standardize_columns(df)
+        high = df_std['high']
+        low = df_std['low']
+        atr = TechnicalIndicators.calculate_atr(df_std, period=period)
+
+        highest_high = high.rolling(window=period, min_periods=1).max()
+        lowest_low = low.rolling(window=period, min_periods=1).min()
+
+        long_stop = highest_high - (multiplier * atr)
+        short_stop = lowest_low + (multiplier * atr)
+
+        return pd.DataFrame({
+            'chandelier_long': long_stop,
+            'chandelier_short': short_stop,
+            'highest_high': highest_high,
+            'lowest_low': lowest_low,
+            'atr': atr
+        }, index=df_std.index)
+
+    @staticmethod
+    def calculate_keltner_channels(df: pd.DataFrame, ema_period: int = 20, atr_period: int = 10, multiplier: float = 1.5) -> pd.DataFrame:
+        """
+        Keltner Channels (켈트너 채널)
+        - Upper = EMA(close, 20) + (multiplier * ATR(10))
+        - Middle = EMA(close, 20)
+        - Lower = EMA(close, 20) - (multiplier * ATR(10))
+        """
+        df_std = TechnicalIndicators._standardize_columns(df)
+        close = df_std['close']
+        atr = TechnicalIndicators.calculate_atr(df_std, period=atr_period)
+
+        middle = close.ewm(span=ema_period, adjust=False).mean()
+        upper = middle + (multiplier * atr)
+        lower = middle - (multiplier * atr)
+
+        return pd.DataFrame({
+            'kc_upper': upper,
+            'kc_middle': middle,
+            'kc_lower': lower
+        }, index=df_std.index)
+
+    @staticmethod
+    def calculate_squeeze_momentum(df: pd.DataFrame, bb_period: int = 20, bb_mult: float = 2.0,
+                                   kc_period: int = 20, kc_mult: float = 1.5) -> pd.DataFrame:
+        """
+        John Carter's Squeeze Momentum Indicator (볼린저 밴드 + 켈트너 채널 스퀴즈)
+        - Squeeze On: BB가 KC 내부로 압축 수축된 상태 (폭발적 변동성 예고)
+        - Squeeze Off: BB가 KC 밖으로 확장 돌파한 상태 (모멘텀 분출)
+        """
+        df_std = TechnicalIndicators._standardize_columns(df)
+        close = df_std['close']
+        high = df_std['high']
+        low = df_std['low']
+
+        bb = TechnicalIndicators.calculate_bollinger_bands(close, period=bb_period, nbdev=bb_mult)
+        kc = TechnicalIndicators.calculate_keltner_channels(df_std, ema_period=kc_period, atr_period=kc_period, multiplier=kc_mult)
+
+        # Squeeze 판정: BB 상단 < KC 상단 and BB 하단 > KC 하단
+        squeeze_on = (bb['bb_upper'] < kc['kc_upper']) & (bb['bb_lower'] > kc['kc_lower'])
+
+        # 모멘텀 값 산출: Linear Regression of (close - average(highest_high, lowest_low, sma))
+        highest = high.rolling(window=kc_period, min_periods=1).max()
+        lowest = low.rolling(window=kc_period, min_periods=1).min()
+        sma = close.rolling(window=kc_period, min_periods=1).mean()
+        hl_avg = (highest + lowest) / 2.0
+        delta = close - ((hl_avg + sma) / 2.0)
+
+        # 20 기간 선형회귀 근사 (간이 모멘텀)
+        momentum = delta.rolling(window=kc_period, min_periods=1).mean()
+
+        return pd.DataFrame({
+            'squeeze_on': squeeze_on,
+            'squeeze_off': ~squeeze_on,
+            'momentum': momentum,
+            'momentum_positive': momentum > 0,
+            'momentum_increasing': momentum > momentum.shift(1).fillna(0)
+        }, index=df_std.index)
+
     @classmethod
     def compute_all_indicators(cls, df: pd.DataFrame) -> pd.DataFrame:
         """
@@ -242,6 +327,17 @@ class TechnicalIndicators:
         df_res['minus_di'] = adx_df['minus_di']
         df_res['adx14'] = adx_df['adx']
 
+        # 9. Chandelier Exit (14, 2.5)
+        ch_df = cls.calculate_chandelier_exit(df_res, period=14, multiplier=2.5)
+        df_res['chandelier_long'] = ch_df['chandelier_long']
+        df_res['chandelier_short'] = ch_df['chandelier_short']
+
+        # 10. Squeeze Momentum
+        sq_df = cls.calculate_squeeze_momentum(df_res)
+        df_res['squeeze_on'] = sq_df['squeeze_on']
+        df_res['squeeze_off'] = sq_df['squeeze_off']
+        df_res['squeeze_momentum'] = sq_df['momentum']
+
         return df_res
 
     @classmethod
@@ -256,24 +352,33 @@ class TechnicalIndicators:
 
         return {
             'close': float(latest.get('close', 0)),
+            'open': float(latest.get('open', 0)),
+            'high': float(latest.get('high', 0)),
+            'low': float(latest.get('low', 0)),
+            'volume': float(latest.get('volume', 0)),
             'ma5': float(latest.get('ma5', 0)),
             'ma20': float(latest.get('ma20', 0)),
             'ma60': float(latest.get('ma60', 0)),
+            'vol_ma5': float(latest.get('vol_ma5', 0)),
+            'vol_ma20': float(latest.get('vol_ma20', 0)),
             'rsi14': float(latest.get('rsi14', 50)),
             'prev_rsi14': float(prev.get('rsi14', 50)),
             'macd': float(latest.get('macd', 0)),
             'macd_signal': float(latest.get('macd_signal', 0)),
             'macd_hist': float(latest.get('macd_hist', 0)),
-            'prev_macd_hist': float(prev.get('macd_hist', 0)),
             'bb_upper': float(latest.get('bb_upper', 0)),
+            'bb_middle': float(latest.get('bb_middle', 0)),
             'bb_lower': float(latest.get('bb_lower', 0)),
             'bb_bandwidth': float(latest.get('bb_bandwidth', 0)),
             'bb_percent_b': float(latest.get('bb_percent_b', 0.5)),
             'atr14': float(latest.get('atr14', 0)),
             'vwap': float(latest.get('vwap', 0)),
             'adx14': float(latest.get('adx14', 0)),
+            'chandelier_long': float(latest.get('chandelier_long', 0)),
+            'chandelier_short': float(latest.get('chandelier_short', 0)),
+            'squeeze_on': bool(latest.get('squeeze_on', False)),
+            'squeeze_off': bool(latest.get('squeeze_off', True)),
+            'squeeze_momentum': float(latest.get('squeeze_momentum', 0)),
             'plus_di': float(latest.get('plus_di', 0)),
-            'minus_di': float(latest.get('minus_di', 0)),
-            'volume': float(latest.get('volume', 0)),
-            'vol_ma20': float(latest.get('vol_ma20', 0)),
+            'minus_di': float(latest.get('minus_di', 0))
         }

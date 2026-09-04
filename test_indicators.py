@@ -106,6 +106,32 @@ def test_adx_calculation(sample_ohlcv_df):
     assert (adx_df['adx'] >= 0.0).all()
 
 
+def test_chandelier_exit_calculation(sample_ohlcv_df):
+    """Chandelier Exit (14, 2.5) 동적 트레일링 스탑 산출 검증"""
+    ch_df = TechnicalIndicators.calculate_chandelier_exit(sample_ohlcv_df, period=14, multiplier=2.5)
+    assert 'chandelier_long' in ch_df.columns
+    assert 'chandelier_short' in ch_df.columns
+    assert 'highest_high' in ch_df.columns
+    # 롱 스탑은 최고가보다 항상 낮아야 함 (multiplier * atr 차감)
+    assert (ch_df['chandelier_long'] <= ch_df['highest_high']).all()
+    # 숏 스탑은 최저가보다 항상 높아야 함
+    assert (ch_df['chandelier_short'] >= ch_df['lowest_low']).all()
+
+
+def test_keltner_and_squeeze_momentum(sample_ohlcv_df):
+    """켈트너 채널 및 Squeeze Momentum 검증"""
+    kc_df = TechnicalIndicators.calculate_keltner_channels(sample_ohlcv_df)
+    assert (kc_df['kc_upper'] >= kc_df['kc_middle']).all()
+    assert (kc_df['kc_middle'] >= kc_df['kc_lower']).all()
+
+    sq_df = TechnicalIndicators.calculate_squeeze_momentum(sample_ohlcv_df)
+    assert 'squeeze_on' in sq_df.columns
+    assert 'squeeze_off' in sq_df.columns
+    assert 'momentum' in sq_df.columns
+    # squeeze_on과 squeeze_off는 상호 배타적이어야 함
+    assert (sq_df['squeeze_on'] == ~sq_df['squeeze_off']).all()
+
+
 def test_compute_all_and_latest_indicators(sample_ohlcv_df):
     """일괄 계산 및 최신 1건 딕셔너리 추출 검증"""
     computed = TechnicalIndicators.compute_all_indicators(sample_ohlcv_df)
@@ -115,10 +141,14 @@ def test_compute_all_and_latest_indicators(sample_ohlcv_df):
     assert 'atr14' in computed.columns
     assert 'adx14' in computed.columns
     assert 'ma20' in computed.columns
+    assert 'chandelier_long' in computed.columns
+    assert 'squeeze_on' in computed.columns
 
     latest = TechnicalIndicators.get_latest_indicators(sample_ohlcv_df)
     assert isinstance(latest, dict)
     assert 'rsi14' in latest
     assert 'atr14' in latest
     assert 'adx14' in latest
+    assert 'chandelier_long' in latest
+    assert 'squeeze_on' in latest
     assert latest['close'] > 0

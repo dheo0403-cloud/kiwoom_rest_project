@@ -1,25 +1,47 @@
-import pandas as pd
+"""
+적응형 퀀트 매매 전략 모듈 (Adaptive Quant Strategy Engine)
+- ATR 기반 동적 변동성 돌파 진입 (Adaptive Volatility Breakout)
+- 샹들리에 엑시트(Chandelier Exit) 동적 트레일링 스탑 & R-배수 다단계 분할 익절
+- 볼린저 밴드 + 켈트너 채널 스퀴즈 모멘텀(Squeeze Momentum) 필터
+- 인메모리 링버퍼(MarketDataBuffer) 초고속 피보나치 눌림목 판정
+"""
 from datetime import datetime
+from typing import Dict, Any, Tuple, Optional
+import pandas as pd
+import numpy as np
 
-class LiquidityBreakoutStrategy:
-    def __init__(self, db_manager=None, buffer_manager=None):
+
+class AdaptiveVolatilityBreakoutStrategy:
+    """
+    ATR 기반 적응형 변동성 돌파 및 샹들리에 출구 전략
+    """
+    def __init__(self, db_manager=None, buffer_manager=None,
+                 k_breakout: float = 0.5,
+                 atr_hard_stop_mult: float = 2.0,
+                 atr_trailing_stop_mult: float = 2.5):
         self.db = db_manager
         self.buffer = buffer_manager
+        self.k_breakout = k_breakout
+        self.atr_hard_stop_mult = atr_hard_stop_mult
+        self.atr_trailing_stop_mult = atr_trailing_stop_mult
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
         self.buffer = buffer_manager
 
-    async def check_buy_signal(self, code, current_price, current_volume, ind):
+    async def check_buy_signal(self, code: str, current_price: float, current_volume: float,
+                               ind: Dict[str, Any]) -> Tuple[bool, str]:
         """
-        돌파 매수 로직 검증 (비동기)
-        ind: DataCollector.get_calculated_indicators 에서 넘어온 딕셔너리
+        ATR 동적 변동성 돌파 및 피보나치 눌림목 매수 시그널 검증
         """
         if not ind:
             return False, ""
 
-        # [필터 1] 14:30 이후 신규 매수 차단 (장 마감 리스크 회피)
         now = datetime.now()
+
+        # [필터 1] 거래 시간 필터 (09:10 이전 장초반 휩소 차단 & 14:30 이후 신규 매수 차단)
+        if now.hour < 9 or (now.hour == 9 and now.minute < 10):
+            return False, "장초반_안정화대기"
         if now.hour > 14 or (now.hour == 14 and now.minute >= 30):
             return False, "시간외_매수차단"
 
@@ -27,41 +49,41 @@ class LiquidityBreakoutStrategy:
         if current_price < 1000:
             return False, ""
 
-        ma5 = ind['ma5']
+        ma5 = ind.get('ma5', 0)
         ma20 = ind.get('ma20', 0)
-        high10 = ind['high10']
-        high3 = ind.get('high3', high10)   # ★ 3일 고가 (없으면 high10 폴백)
-        avg_vol = ind['avg_vol']
+        high3 = ind.get('high3', ind.get('high10', current_price))
+        avg_vol = ind.get('avg_vol', 0)
+        atr14 = ind.get('atr14', 0)
+        open_price = ind.get('open', current_price)
+        squeeze_off = ind.get('squeeze_off', True)
+        squeeze_momentum = ind.get('squeeze_momentum', 0.0)
 
-        # [추세 필터] 20일선(MA20) 역배열 하락장 매수 차단
-        if current_price < ma20:
+        # [추세 필터] 20일선(MA20) 역배열 하락 추세 매수 차단
+        if ma20 > 0 and current_price < ma20:
             return False, ""
 
-        # [핵심 조건] 3일 고가의 97% 이상 + 5일선 위 (돌파 직전 종목도 포함)
-        if current_price < high3 * 0.97 or current_price < ma5:
+        # [핵심 조건 1] ATR 동적 변동성 돌파 기준가
+        # Breakout Level = Open + (k * ATR)
+        breakout_level = open_price + (self.k_breakout * atr14) if atr14 > 0 else high3 * 0.97
+        is_breakout = (current_price >= breakout_level) or (current_price >= high3 * 0.98 and current_price >= ma5)
+        if not is_breakout:
             return False, ""
 
-        # [핵심 조건] 당일 거래대금(추정치) 100억 이상 & 거래량 3.0배 이상 급증
-        # ★ 장중 누적 거래량을 하루 전체로 환산(projection)하여 avg_vol과 비교
+        # [핵심 조건 2] 당일 거래대금 100억 이상 & 종일 환산 거래량 3.0배 급증
         if (current_price * current_volume) < 10_000_000_000:
             return False, ""
 
         market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
         total_seconds = (market_close - market_open).total_seconds()   # 23,400초
-        elapsed_seconds = max(600, (now - market_open).total_seconds())  # 최소 10분
-        day_progress = min(1.0, elapsed_seconds / total_seconds)         # 0.0 ~ 1.0
-
-        # 현재 누적 거래량 → 종일 환산 거래량 추정
+        elapsed_seconds = max(600, (now - market_open).total_seconds())
+        day_progress = min(1.0, elapsed_seconds / total_seconds)
         projected_volume = current_volume / day_progress
 
-        if projected_volume < (avg_vol * 3.0):
+        if avg_vol > 0 and projected_volume < (avg_vol * 3.0):
             return False, ""
 
-        print(f"  ✅ [DEBUG/{code}] 핵심조건 통과! 현재가={current_price:,} / 분봉 피보나치 판단 진입")
-
-        # [보조 조건] 피보나치 23.6% 눌림목(Pullback) 및 반등 확인
-        # ★ 인메모리 링버퍼(MarketDataBuffer) 우선 조회 (SQL 쿼리 제거, 0.1ms 처리)
+        # [핵심 조건 3] 인메모리 링버퍼 기반 피보나치 눌림목 또는 스퀴즈 모멘텀 반등 확인
         try:
             if self.buffer:
                 df = self.buffer.get_dataframe(code, limit=10)
@@ -80,36 +102,25 @@ class LiquidityBreakoutStrategy:
 
                 if highest > lowest:
                     fibo_236 = highest - (highest - lowest) * 0.236
-
+                    # 23.6% 눌림목 구간 반등
                     if current_price <= fibo_236:
                         prev_candle = df.iloc[-1]
-                        # 반등 양봉 확인
                         if current_price > prev_candle['open'] or prev_candle['close'] > prev_candle['open']:
-                            return True, f"피보나치_23.6%눌림목_지속반등"
-                        else:
-                            print(f"  ❌ [DEBUG/{code}] 피보나치 눌림목이나 반등 양봉 미확인")
+                            return True, f"ATR돌파_피보나치23.6%눌림목반등"
                     else:
-                        # 조정 없이 강한 상승 → 환산 거래량 3배 이상이면 추격 허용
-                        if projected_volume >= (avg_vol * 3.0):
-                            return True, f"강한돌파_거래량3배_추격매수허용"
-                        print(f"  ❌ [DEBUG/{code}] 조정없는 상승인데 환산거래량 미달: {projected_volume:,.0f} < {avg_vol*3:,.0f}")
-                        return False, ""
-        except Exception as e:
+                        # 조정 없는 강력한 돌파 + 스퀴즈 모멘텀 양수 전환
+                        if squeeze_off and squeeze_momentum >= 0 and projected_volume >= (avg_vol * 3.0):
+                            return True, f"ATR강한돌파_스퀴즈모멘텀_추격매수"
+        except Exception:
             pass
 
-        # 분봉 데이터가 없거나 조건 미충족 → 진입 보류
         return False, ""
 
-
-
-    async def check_sell_signal(self, code, buy_price, current_price, ind,
-                                sell_stage=0, highest_price=None):
+    async def check_sell_signal(self, code: str, buy_price: float, current_price: float,
+                                ind: Dict[str, Any], sell_stage: int = 0,
+                                highest_price: Optional[float] = None) -> Tuple[str, str]:
         """
-        다단계 익절 + 트레일링 스탑 매도 시그널 생성
-
-        sell_stage: 0=미매도, 1=1차익절완료, 2=2차익절완료
-        highest_price: 매수 이후 최고가 (트레일링 스탑용)
-        
+        ATR 샹들리에 엑시트 + R-배수 분할 익절 매도 시그널 생성
         Returns: (action, reason)
           action: "WAIT" / "SELL_ALL" / "SELL_PARTIAL"
         """
@@ -117,27 +128,54 @@ class LiquidityBreakoutStrategy:
             return "WAIT", ""
 
         profit_rate = (current_price - buy_price) / buy_price
+        highest_p = highest_price or current_price
+        atr14 = float(ind.get('atr14', 0) if ind else 0)
 
-        # [1] 하드 스탑로스 (-4%) — 무조건 최우선 (대규모 손실 방지)
-        if profit_rate <= -0.04:
-            return "SELL_ALL", f"하드_스탑로스_시장가투매_{profit_rate:.1%}"
+        # 1. 🚨 하드 스탑로스 (ATR 2.0배 또는 -5% 하드 캡)
+        hard_stop_distance = (self.atr_hard_stop_mult * atr14) if atr14 > 0 else (buy_price * 0.04)
+        hard_stop_price = buy_price - hard_stop_distance
+        if current_price <= hard_stop_price or profit_rate <= -0.05:
+            return "SELL_ALL", f"ATR_하드스탑로스_긴급투매({profit_rate:.1%}, 스탑가:{hard_stop_price:,.0f}원)"
 
-        # [2] 트레일링 스탑 (수익 보존)
-        #     최소 +3% 이상 올랐을 때만 작동. 최고가 대비 -2% 하락하면 전량 매도
-        if highest_price and highest_price > buy_price * 1.03:
-            trailing_drop = (current_price - highest_price) / highest_price
-            if trailing_drop <= -0.02:
-                return "SELL_ALL", f"트레일링_스탑_최고{highest_price:,}→현재{current_price:,}({trailing_drop:.1%})"
+        # 2. 🚨 샹들리에 트레일링 스탑 (Chandelier Exit)
+        #    스탑가 = max(본절가(Stage>=1시), 최고가 - 2.5*ATR)
+        if atr14 > 0:
+            chandelier_stop = highest_p - (self.atr_trailing_stop_mult * atr14)
+            # 1차 익절(Stage 1) 이상 달성 시에는 손절선을 최소 본절가(buy_price)로 상향 고정 (Risk-Free)
+            if sell_stage >= 1:
+                chandelier_stop = max(buy_price, chandelier_stop)
 
-        # [3] 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
+            if current_price <= chandelier_stop and highest_p >= buy_price * 1.02:
+                return "SELL_ALL", f"샹들리에_트레일링스탑_최고{highest_p:,.0f}원→스탑{chandelier_stop:,.0f}원({profit_rate:.1%})"
+        else:
+            # ATR 부재 시 폴백: 최고가 대비 -2.5% 반락 시 매도
+            if highest_p >= buy_price * 1.03 and (current_price - highest_p) / highest_p <= -0.025:
+                return "SELL_ALL", f"폴백_트레일링스탑({profit_rate:.1%})"
+
+        # 3. 🎯 ATR R-배수 기반 다단계 분할 익절 (Take-Profit Stages)
+        #    1R = 1.5 * ATR (약 +3~4%), 2R = 2.5 * ATR (약 +5~7%)
+        if atr14 > 0:
+            r1_target = buy_price + (1.5 * atr14)
+            r2_target = buy_price + (2.5 * atr14)
+
+            if sell_stage == 0 and current_price >= r1_target:
+                return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_33%({profit_rate:.1%}, 목표가:{r1_target:,.0f}원)"
+            if sell_stage == 1 and current_price >= r2_target:
+                return "SELL_PARTIAL", f"2차_ATR_R2_분할익절_50%({profit_rate:.1%}, 목표가:{r2_target:,.0f}원)"
+        else:
+            # 폴백 고정 % 익절
+            if sell_stage == 0 and profit_rate >= 0.03:
+                return "SELL_PARTIAL", f"1차_고정_분할익절_33%({profit_rate:.1%})"
+            if sell_stage == 1 and profit_rate >= 0.05:
+                return "SELL_PARTIAL", f"2차_고정_분할익절_50%({profit_rate:.1%})"
+
+        # 4. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
         now = datetime.now()
         if now.hour == 15 and now.minute >= 15:
-            return "SELL_ALL", f"장마감_오버나잇_방지_강제청산({profit_rate:.1%})"
-
-        # [4] 추세 이탈 (MA5 붕괴) — 어느정도 수익권(+1% 이상)일 때 5일선을 깨면 전량 매도
-        if profit_rate >= 0.01 and ind:
-            ma5 = ind['ma5']
-            if current_price < ma5:
-                return "SELL_ALL", "수익권_추세이탈_5일선붕괴"
+            return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.1%})"
 
         return "WAIT", ""
+
+
+# 하위 호환성을 위한 별칭 제공
+LiquidityBreakoutStrategy = AdaptiveVolatilityBreakoutStrategy
