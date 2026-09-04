@@ -69,19 +69,19 @@
 
 ---
 
-### Phase 2. 적응형 퀀트 매매 전략 및 리스크 관리 고도화 (Priority 2)
+### Phase 2. 적응형 퀀트 매매 전략 및 리스크 관리 고도화 (Priority 2 - 완료)
 
-- [ ] **Task 2.1: 기술적 지표 모듈 확장 (`indicators.py`)**
+- [x] **Task 2.1: 기술적 지표 모듈 확장 (`indicators.py`)**
   - **설명:** ATR(Average True Range, 14), 샹들리에 엑시트 스탑선, 볼린저 밴드 + 켈트너 채널 스퀴즈 지표 수식 추가.
   - **수정 파일:** `indicators.py`, `test_indicators.py`
   - **검증 기준:** TA-Lib 표준 수식 대비 오차율 0.01% 미만 단위 테스트 통과.
 
-- [ ] **Task 2.2: ATR 변동성 돌파 진입 및 샹들리에 트레일링 스탑 적용 (`strategy.py`)**
+- [x] **Task 2.2: ATR 변동성 돌파 진입 및 샹들리에 트레일링 스탑 적용 (`strategy.py`)**
   - **설명:** 고정 -4% 손절 / 2.5% 트레일링을 종목별 ATR 기반 동적 샹들리에 엑시트($\text{Peak} - 2.5 \times \text{ATR}$)로 전면 개편.
   - **수정 파일:** `strategy.py`
   - **검증 기준:** 변동성 구간별(저변동/고변동) 동적 손절선 자동 조정 검증.
 
-- [ ] **Task 2.3: 프랙셔널 켈리(Fractional Kelly) 자산 배분 알고리즘 (`async_portfolio.py`)**
+- [x] **Task 2.3: 프랙셔널 켈리(Fractional Kelly) 자산 배분 알고리즘 (`async_portfolio.py`)**
   - **설명:** 최근 $N$회 승률과 손익비를 추적하여 1회 주문 수량을 가변적으로 배정 ($0.05 \le \text{Alloc} \le 0.25$).
   - **수정 파일:** `async_portfolio.py`
   - **검증 기준:** 연패 시 베팅 비중 자동 축소, 승률 상승 시 점진적 비중 확대 검증.
