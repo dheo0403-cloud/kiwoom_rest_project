@@ -37,9 +37,9 @@
 
 ## 🛠️ 세부 작업 분할 (Task Breakdown)
 
-### Phase 1. 아키텍처 리팩토링 및 인메모리 링버퍼 구축 (Priority 1 - 현재 즉시 실행)
+### Phase 1. 아키텍처 리팩토링 및 인메모리 링버퍼 구축 (Priority 1 - 완료)
 
-- [ ] **Task 1.1: 레거시 동기식 코드 격리 및 비동기 진입점 단일화**
+- [x] **Task 1.1: 레거시 동기식 코드 격리 및 비동기 진입점 단일화**
   - **설명:** 과거 동기식 파일(`main_rest.py`, `kiwoom_rest.py`, `portfolio.py`)을 `legacy/` 디렉터리로 안전하게 이동 격리.
   - **수정/생성 파일:**
     - `legacy/` 디렉터리 신설 및 구버전 파일 이동
@@ -47,20 +47,20 @@
     - `EXECUTION_GUIDE.md`: 비동기 봇 구동 단일 명령어로 최신화
   - **검증 기준:** `python start.py` 및 가상 환경에서 레거시 참조 없이 데몬 정상 부팅.
 
-- [ ] **Task 1.2: 인메모리 링버퍼(`market_data_buffer.py`) 및 비동기 배치 DB 영속화 구현**
+- [x] **Task 1.2: 인메모리 링버퍼(`market_data_buffer.py`) 및 비동기 배치 DB 영속화 구현**
   - **설명:** 매 루프마다 MariaDB를 직접 조회하던 `SELECT * FROM minute_ohlcv` 쿼리를 제거하고, 최근 60개 분봉 및 틱 데이터를 메모리에 상주시켜 0.1ms 내에 지표 연산 처리.
   - **수정/생성 파일:**
     - `market_data_buffer.py` (신규): `CircularCandleBuffer` 클래스 (`collections.deque(maxlen=60)` 활용)
     - `database.py`: `asyncio.Queue` 기반의 비동기 백그라운드 배치 인서트 워커 (`batch_insert_candles`) 구현
   - **검증 기준:** 10개 종목 동시 틱 유입 시 DB 쿼리 수 90% 이상 절감 및 메모리 버퍼 슬라이싱 테스트 통과.
 
-- [ ] **Task 1.3: 비동기 봇 코어(`main_rest_async.py`)에 링버퍼 연동 및 Graceful Shutdown 완성**
+- [x] **Task 1.3: 비동기 봇 코어(`main_rest_async.py`)에 링버퍼 연동 및 Graceful Shutdown 완성**
   - **설명:** `AsyncTradingBot`의 시세 수신 루프를 링버퍼 구조로 전환하고, `SIGINT`/`SIGTERM` 수신 시 메모리 잔여 데이터 DB Flush 및 안전 종료 보장.
   - **수정/생성 파일:**
     - `main_rest_async.py`: `MarketDataBuffer` 주입 및 셧다운 훅 연결
   - **검증 기준:** 비정상 강제 종료 시그널 전송 시 버퍼 데이터의 정상 DB 반영 및 소켓/풀 안전 해제.
 
-- [ ] **Task 1.4: Phase 1 단위/통합 테스트 스위트 작성 및 검증**
+- [x] **Task 1.4: Phase 1 단위/통합 테스트 스위트 작성 및 검증**
   - **설명:** 신규 링버퍼와 비동기 봇의 정상 동작을 검증하는 테스트 코드 작성.
   - **수정/생성 파일:**
     - `test_market_data_buffer.py` (신규)
