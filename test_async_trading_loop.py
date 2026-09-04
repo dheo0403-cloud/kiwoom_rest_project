@@ -1,0 +1,345 @@
+"""
+Gate Info:
+- Importers/callers: Direct execution (`python test_async_trading_loop.py`)
+- Affected API: None (Async Trading Loop Simulation & Quantitative Strategy Validation)
+- Data schemas: Fibonacci Pullback, Smart Orderbook Execution, Multi-stage Exit, CRITICAL Stop-Loss
+- User's verbatim instruction: "승인할께"
+"""
+import asyncio
+import time
+from typing import Dict, Any, Optional, List
+from async_kiwoom_client import RequestPriority
+from async_portfolio import AsyncPortfolioManager
+from main_rest_async import AsyncTradingBot
+
+class MockKiwoomClient:
+    """테스트 시뮬레이션용 Mock 비동기 키움 클라이언트"""
+    def __init__(self):
+        self.sent_orders: List[Dict[str, Any]] = []
+        self.prices: Dict[str, float] = {}
+        self.orderbooks: Dict[str, Dict[str, Any]] = {}
+        self.minute_candles: Dict[str, List[Dict[str, Any]]] = {}
+        self.holdings: Dict[str, Dict[str, Any]] = {}
+        self.kodex200_change_rate: float = 0.5
+        self.is_demo = True
+        self.mode = "MOCK"
+
+    async def start(self):
+        pass
+
+    async def stop(self):
+        pass
+
+    async def send_order(self, code: str, qty: int, price: int,
+                         order_type: str = "00", side: str = "BUY",
+                         priority: RequestPriority = RequestPriority.HIGH) -> Dict[str, Any]:
+        order_record = {
+            "code": code,
+            "qty": qty,
+            "price": price,
+            "order_type": order_type,
+            "side": side,
+            "priority": priority,
+            "timestamp": time.time()
+        }
+        self.sent_orders.append(order_record)
+        if side == "BUY":
+            if code in self.holdings:
+                self.holdings[code]["qty"] += qty
+            else:
+                self.holdings[code] = {"qty": qty, "buy_price": price, "name": code}
+        elif side == "SELL":
+            if code in self.holdings:
+                self.holdings[code]["qty"] -= qty
+                if self.holdings[code]["qty"] <= 0:
+                    del self.holdings[code]
+        return {"rt_cd": "0", "msg1": "주문접수성공"}
+
+    async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        price = self.prices.get(code, 70000)
+        return {
+            "output": [{
+                "stk_cd": code,
+                "prpr": str(int(price)),
+                "current_price": str(int(price)),
+                "fluct_rate": "+1.5"
+            }]
+        }
+
+    async def get_orderbook(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        price = self.prices.get(code, 70000)
+        return {
+            "output": [{
+                "stk_cd": code,
+                "sel_fpr_bid": str(int(price + 100)),     # 매도 1호가
+                "buy_fpr_bid": str(int(price)),           # 매수 1호가
+                "buy_fpr_bid2": str(int(price - 100))     # 매수 2호가
+            }]
+        }
+
+    async def get_minute_chart(self, code: str, base_dt: str, next_key: Optional[str] = None,
+                               priority: RequestPriority = RequestPriority.LOW):
+        candles = self.minute_candles.get(code, [
+            {"oprn": "74800", "clpr": "75000", "cntg_vol": "1500"},  # 직전봉 양봉 반등
+            {"oprn": "75000", "clpr": "74800", "cntg_vol": "1200"},
+            {"oprn": "75200", "clpr": "75000", "cntg_vol": "1000"}
+        ])
+        return {"output2": candles}, None
+
+    async def get_top_trading_value(self, mrkt_tp: str = "000", limit: int = 30, priority: RequestPriority = RequestPriority.LOW):
+        return [
+            {"code": "005930", "name": "삼성전자", "price": 70000.0, "volume": 10000000, "trading_value": 700000000000},
+            {"code": "000660", "name": "SK하이닉스", "price": 145000.0, "volume": 5000000, "trading_value": 725000000000}
+        ]
+
+    async def get_daily_chart(self, code: str, base_dt: str, priority: RequestPriority = RequestPriority.LOW):
+        candles = [
+            {"hgpr": 75000, "lwpr": 69000, "clpr": 74500, "oprc": 70000, "vol": 1000000}
+            for _ in range(25)
+        ]
+        return {"output2": candles}
+
+    async def get_market_daily_ohlcv(self, code: str, start_date: str = "", end_date: str = "", priority: RequestPriority = RequestPriority.LOW):
+        import pandas as pd
+        return pd.DataFrame([
+            {"date": "20260302", "open": 70000, "high": 75000, "low": 69000, "close": 74500, "volume": 1000000, "value": 74500000000}
+        ])
+
+    async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        out2 = []
+        for code, info in self.holdings.items():
+            out2.append({
+                "stk_cd": code,
+                "stk_nm": info.get("name", code),
+                "hldg_qty": str(info["qty"]),
+                "pchs_avg_pric": str(info["buy_price"]),
+                "prpr": str(int(self.prices.get(code, info["buy_price"]))),
+                "evlu_pfls_amt": "0",
+                "evlu_pfls_rt": "0.0"
+            })
+        return {
+            "output1": [{
+                "tot_evlu_amt": "10000000",
+                "dnca_tot_amt": "10000000",
+                "tot_evlu_pfls_amt": "0",
+                "tot_pnl_rt": "0.0"
+            }],
+            "output2": out2
+        }
+
+class MockDatabaseManager:
+    """테스트 시뮬레이션용 Mock 비동기 DB 매니저"""
+    def __init__(self):
+        self.logs: List[Dict[str, Any]] = []
+        self.order_history: List[Dict[str, Any]] = []
+        self.watchlist_db: Dict[str, Any] = {}
+        self.portfolio_db: Dict[str, Any] = {}
+        self.manual_orders: List[Dict[str, Any]] = []
+
+    async def init_pool(self):
+        pass
+
+    async def close_pool(self):
+        pass
+
+    async def log_message(self, level: str, message: str):
+        self.logs.append({"level": level, "message": message, "timestamp": time.time()})
+
+    async def log_order(self, code: str, name: str, side: str, qty: int, price: float):
+        self.order_history.append({
+            "code": code,
+            "name": name,
+            "side": side,
+            "qty": qty,
+            "price": price,
+            "timestamp": time.time()
+        })
+
+    async def update_balance(self, total_asset: float, deposit: float, profit_loss: float, yield_rate: float):
+        pass
+
+    async def save_watchlist(self, codes: List[str], name_map: Optional[Dict[str, str]] = None):
+        name_map = name_map or {}
+        for c in codes:
+            self.watchlist_db[c] = name_map.get(c, c)
+
+    async def update_watchlist_price(self, code: str, name: str, price: float, volume: int = 0):
+        pass
+
+    async def save_portfolio(self, positions_dict: Dict[str, Any], current_prices: Optional[Dict[str, float]] = None):
+        self.portfolio_db = positions_dict.copy()
+
+    async def get_pending_manual_orders(self) -> List[Dict[str, Any]]:
+        return [o for o in self.manual_orders if o.get("status") == "PENDING"]
+
+    async def complete_manual_order(self, order_id: int, status: str = "COMPLETED"):
+        for o in self.manual_orders:
+            if o.get("id") == order_id:
+                o["status"] = status
+
+# ================= 단위 및 시뮬레이션 테스트 =================
+
+async def test_fibonacci_pullback_entry():
+    """1. 피보나치 눌림목 매수 진입 및 HIGH 우선순위 발주 검증"""
+    print("▶ [Test 1] 피보나치 눌림목 매수 진입 시뮬레이션...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 20일 고점 80,000원, 저점 70,000원 -> fib_382=76,180원, fib_618=73,820원
+    bot.watchlist["005930"] = {
+        "name": "삼성전자",
+        "high_20d": 80000.0,
+        "low_20d": 70000.0,
+        "fib_382": 76180.0,
+        "fib_500": 75000.0,
+        "fib_618": 73820.0,
+        "current_price": 75000.0
+    }
+    mock_client.prices["005930"] = 75000.0  # 눌림목 구간(73,820 ~ 76,180)에 진입
+
+    # 매수 기회 감시 실행
+    await bot.monitor_watchlist_and_enter()
+
+    # 검증: 포지션 편입 및 주문 발송 여부
+    assert "005930" in portfolio.positions, "삼성전자가 포트폴리오에 편입되어야 합니다."
+    assert len(mock_client.sent_orders) == 1, "매수 주문이 1건 발송되어야 합니다."
+
+    last_order = mock_client.sent_orders[0]
+    assert last_order["code"] == "005930"
+    assert last_order["side"] == "BUY"
+    assert last_order["priority"] == RequestPriority.HIGH, "정규 매수는 HIGH 우선순위여야 합니다."
+    assert last_order["price"] == 75100, "매도 1호가(75,100원)로 스마트 매수 발주되어야 합니다."
+    print(f"  ✅ 피보나치 매수 성공: {last_order['code']} {last_order['qty']}주 @ {last_order['price']}원 (Priority: HIGH)")
+
+async def test_three_stage_profit_taking():
+    """2. 스마트 3단계 분할 익절(+3%, +5%, +8%) 검증"""
+    print("▶ [Test 2] 스마트 3단계 분할 익절 시뮬레이션...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 매수가 100,000원, 100주 보유 포지션 설정
+    await portfolio.add_position("000660", "SK하이닉스", qty=100, buy_price=100000.0)
+    mock_client.holdings["000660"] = {"name": "SK하이닉스", "qty": 100, "buy_price": 100000.0}
+
+    # 1단계 익절 테스트 (+3.5% 상승: 103,500원 -> 33% 매도)
+    mock_client.prices["000660"] = 103500.0
+    await bot.monitor_positions_and_exit()
+    pos = portfolio.positions["000660"]
+    assert pos["sell_stage"] == 1, "1단계 익절 완료 상태여야 합니다."
+    assert pos["qty"] == 67, f"33주 매도 후 67주가 남아야 합니다. (실제: {pos['qty']}주)"
+    print(f"  ✅ 1단계 익절(+3%) 완료: 잔여 {pos['qty']}주, 다음 단계: Stage {pos['sell_stage']}")
+
+    # 2단계 익절 테스트 (+5.5% 상승: 105,500원 -> 남은 수량의 50%인 33주 매도)
+    mock_client.prices["000660"] = 105500.0
+    await bot.monitor_positions_and_exit()
+    pos = portfolio.positions["000660"]
+    assert pos["sell_stage"] == 2, "2단계 익절 완료 상태여야 합니다."
+    assert pos["qty"] == 34, f"33주 추가 매도 후 34주가 남아야 합니다. (실제: {pos['qty']}주)"
+    print(f"  ✅ 2단계 익절(+5%) 완료: 잔여 {pos['qty']}주, 다음 단계: Stage {pos['sell_stage']}")
+
+    # 3단계 익절 테스트 (+8.5% 상승: 108,500원 -> 잔여 전량 매도 및 청산)
+    mock_client.prices["000660"] = 108500.0
+    await bot.monitor_positions_and_exit()
+    assert "000660" not in portfolio.positions, "3단계 전량 익절 후 포지션이 청산되어야 합니다."
+    print("  ✅ 3단계 익절(+8%) 완료: 전량 청산 완료")
+
+async def test_hard_stop_loss_preemption():
+    """3. 하드 스탑로스(-4.0%) 발동 및 CRITICAL 선점 발주 검증"""
+    print("▶ [Test 3] 하드 스탑로스(-4.0%) 및 CRITICAL 우선순위 선점 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 매수가 50,000원, 100주 보유 포지션 설정
+    await portfolio.add_position("035420", "NAVER", qty=100, buy_price=50000.0)
+    mock_client.holdings["035420"] = {"name": "NAVER", "qty": 100, "buy_price": 50000.0}
+
+    # -4.5% 급락 (현재가 47,750원)
+    mock_client.prices["035420"] = 47750.0
+    await bot.monitor_positions_and_exit()
+
+    assert "035420" not in portfolio.positions, "손절 후 포지션이 청산되어야 합니다."
+    emergency_order = mock_client.sent_orders[-1]
+    assert emergency_order["code"] == "035420"
+    assert emergency_order["side"] == "SELL"
+    assert emergency_order["priority"] == RequestPriority.CRITICAL, "긴급 손절은 CRITICAL 우선순위로 큐를 선점해야 합니다."
+    assert emergency_order["price"] == 47650, "매수 2호가(47,650원)로 즉시 슬리피지 방지 체결 유도되어야 합니다."
+    print(f"  ✅ 긴급 손절 성공: {emergency_order['code']} {emergency_order['qty']}주 (Priority: CRITICAL=0)")
+
+async def test_trailing_stop():
+    """4. 트레일링 스탑 (최고가 대비 -2.5% 반락 시 CRITICAL 청산) 검증"""
+    print("▶ [Test 4] 트레일링 스탑 (고점 대비 -2.5% 반락) 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 매수가 20,000원, 200주 보유 -> 장중 25,000원까지 급등 (+25%)
+    await portfolio.add_position("000270", "기아", qty=200, buy_price=20000.0)
+    mock_client.holdings["000270"] = {"name": "기아", "qty": 200, "buy_price": 20000.0}
+    await portfolio.update_current_price("000270", 25000.0)
+
+    # 최고가(25,000원) 대비 -3.0% 반락하여 24,250원으로 하락
+    mock_client.prices["000270"] = 24250.0
+    await bot.monitor_positions_and_exit()
+
+    assert "000270" not in portfolio.positions, "트레일링 스탑 발동 후 청산되어야 합니다."
+    ts_order = mock_client.sent_orders[-1]
+    assert ts_order["priority"] == RequestPriority.CRITICAL, "트레일링 스탑은 CRITICAL 우선순위여야 합니다."
+    print(f"  ✅ 트레일링 스탑 성공: 최고가 25,000원 대비 반락 감지 -> 긴급 청산 완료 (Priority: CRITICAL)")
+
+async def test_market_filter_and_manual_orders():
+    """5. KODEX 200 지수 급락 필터 및 대시보드 수동 주문 처리 검증"""
+    print("▶ [Test 5] 시장 필터 및 대시보드 수동 주문 비동기 처리 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1) 시장 필터 차단 검증
+    bot.market_filter_passed = False  # KODEX 200 -1.5% 이하 급락 상태 시뮬레이션
+    bot.watchlist["005930"] = {
+        "name": "삼성전자",
+        "fib_382": 76180.0, "fib_618": 73820.0, "current_price": 75000.0
+    }
+    mock_client.prices["005930"] = 75000.0
+    await bot.monitor_watchlist_and_enter()
+    assert "005930" not in portfolio.positions, "시장 필터 미통과 시 신규 매수가 차단되어야 합니다."
+    print("  ✅ 시장 필터(-1.5% 급락) 신규 매수 완벽 차단 확인")
+
+    # 2) 수동 주문 처리 검증
+    mock_db.manual_orders = [
+        {"id": 1, "code": "005930", "side": "BUY", "qty": 10, "status": "PENDING"},
+        {"id": 2, "code": "000660", "side": "SELL", "qty": 5, "status": "PENDING"}
+    ]
+    # 포지션에 000660 미리 등록
+    await portfolio.add_position("000660", "SK하이닉스", qty=5, buy_price=150000.0)
+    mock_client.holdings["000660"] = {"name": "SK하이닉스", "qty": 5, "buy_price": 150000.0}
+
+    await bot.process_manual_orders()
+    assert mock_db.manual_orders[0]["status"] == "COMPLETED"
+    assert mock_db.manual_orders[1]["status"] == "COMPLETED"
+    assert "005930" in portfolio.positions, "수동 매수 종목이 포트폴리오에 반영되어야 합니다."
+    assert "000660" not in portfolio.positions, "수동 매도 종목이 포트폴리오에서 청산되어야 합니다."
+    print("  ✅ 대시보드 PENDING 수동 주문 2건 비동기 체결 및 동기화 완료")
+
+async def main():
+    print("=" * 65)
+    print("🚀 [Phase 2] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
+    print("=" * 65)
+    await test_fibonacci_pullback_entry()
+    await test_three_stage_profit_taking()
+    await test_hard_stop_loss_preemption()
+    await test_trailing_stop()
+    await test_market_filter_and_manual_orders()
+    print("=" * 65)
+    print("🎉 Phase 2 모든 퀀트 매매 시뮬레이션 테스트 100% 통과 완료!")
+    print("=" * 65)
+
+if __name__ == "__main__":
+    asyncio.run(main())
