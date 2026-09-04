@@ -101,19 +101,19 @@
 
 ---
 
-### Phase 4. 실시간 알림 봇 및 관제 대시보드/킬스위치 (Priority 4)
+### Phase 4. 실시간 알림 봇 및 관제 대시보드/킬스위치 (Priority 4 - 완료)
 
-- [ ] **Task 4.1: 비동기 텔레그램 실시간 알림 엔진 (`notifier.py`)**
+- [x] **Task 4.1: 비동기 텔레그램 실시간 알림 엔진 (`notifier.py`)**
   - **설명:** 매수/매도 체결, 스탑로스, MDD -5% 서킷브레이커, 일일 정산 리포트 즉시 푸시 알림.
   - **수정/생성 파일:** `notifier.py` (신규)
   - **검증 기준:** 비동기 논블로킹 메시지 큐 전송 및 텔레그램 봇 응답 확인.
 
-- [ ] **Task 4.2: FastAPI 비상 킬스위치 및 무중단 제어 API (`api_server.py`)**
+- [x] **Task 4.2: FastAPI 비상 킬스위치 및 무중단 제어 API (`api_server.py`)**
   - **설명:** `POST /api/bot/emergency-stop` 호출 시 즉시 전 포지션 시장가 청산 및 신규 주문 락.
   - **수정 파일:** `api_server.py`
   - **검증 기준:** 비상 호출 시 1초 이내 전량 청산 주문 큐 등록 및 상태 전이 확인.
 
-- [ ] **Task 4.3: WebSocket 기반 실시간 스트리밍 대시보드 (`dashboard.py`)**
+- [x] **Task 4.3: WebSocket 기반 실시간 스트리밍 대시보드 (`dashboard.py`)**
   - **설명:** DB 폴링 제거, WebSocket 브로드캐스터 기반 실시간 체결 로그/포트폴리오 스트리밍 시각화.
   - **수정 파일:** `dashboard.py`
 
