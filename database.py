@@ -102,6 +102,35 @@ class DatabaseManager:
         except Exception as e:
             print(f"DB Daily OHLCV Error: {e}")
 
+    async def batch_upsert_minute_candles(self, candle_list):
+        """튜플/딕셔너리 리스트 형태의 분봉 데이터 비동기 벌크 저장"""
+        if not self.pool or not candle_list: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    sql = '''
+                        INSERT INTO minute_ohlcv (code, datetime, open, high, low, close, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE
+                        open=VALUES(open), high=VALUES(high), low=VALUES(low),
+                        close=VALUES(close), volume=VALUES(volume)
+                    '''
+                    data = []
+                    for c in candle_list:
+                        if isinstance(c, (list, tuple)):
+                            data.append(c)
+                        elif isinstance(c, dict):
+                            data.append((
+                                c.get('code'), c.get('datetime'),
+                                c.get('open'), c.get('high'), c.get('low'), c.get('close'),
+                                c.get('volume', 0)
+                            ))
+                    if data:
+                        await cursor.executemany(sql, data)
+                await conn.commit()
+        except Exception as e:
+            print(f"DB Batch Minute OHLCV Error: {e}")
+
     async def upsert_minute_ohlcv(self, df):
         if not self.pool or df.empty: return
         try:

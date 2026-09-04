@@ -2,8 +2,13 @@ import pandas as pd
 from datetime import datetime
 
 class LiquidityBreakoutStrategy:
-    def __init__(self, db_manager):
+    def __init__(self, db_manager=None, buffer_manager=None):
         self.db = db_manager
+        self.buffer = buffer_manager
+
+    def set_buffer_manager(self, buffer_manager):
+        """인메모리 링버퍼 매니저 설정"""
+        self.buffer = buffer_manager
 
     async def check_buy_signal(self, code, current_price, current_volume, ind):
         """
@@ -56,13 +61,19 @@ class LiquidityBreakoutStrategy:
         print(f"  ✅ [DEBUG/{code}] 핵심조건 통과! 현재가={current_price:,} / 분봉 피보나치 판단 진입")
 
         # [보조 조건] 피보나치 23.6% 눌림목(Pullback) 및 반등 확인
-        # ★ 조정이 없는 강한 상승장에서는 거래량 3배 이상이면 추격 매수 허용
+        # ★ 인메모리 링버퍼(MarketDataBuffer) 우선 조회 (SQL 쿼리 제거, 0.1ms 처리)
         try:
-            query = f"SELECT * FROM minute_ohlcv WHERE code='{code}' ORDER BY datetime DESC LIMIT 10"
-            df = await self.db.get_dataframe(query)
+            if self.buffer:
+                df = self.buffer.get_dataframe(code, limit=10)
+            elif self.db:
+                query = f"SELECT * FROM minute_ohlcv WHERE code='{code}' ORDER BY datetime DESC LIMIT 10"
+                df = await self.db.get_dataframe(query)
+            else:
+                df = pd.DataFrame()
 
             if not df.empty and len(df) >= 5:
-                df = df.sort_values('datetime').reset_index(drop=True)
+                if 'datetime' in df.columns:
+                    df = df.sort_values('datetime').reset_index(drop=True)
 
                 highest = df['high'].max()
                 lowest = df['low'].min()

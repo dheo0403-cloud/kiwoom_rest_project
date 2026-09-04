@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
 from database import AsyncDatabase
+from market_data_buffer import MarketDataBuffer
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -26,6 +27,7 @@ class AsyncTradingBot:
     완전 비동기(asyncio/aiohttp) 키움증권 퀀트 트레이딩 봇 데몬
     - 4단계 선점형 우선순위 큐(CRITICAL/HIGH/MEDIUM/LOW) 연동
     - 동시성 안전 포트폴리오 관리자(AsyncPortfolioManager)
+    - 인메모리 링버퍼(MarketDataBuffer) 및 비동기 배치 DB 영속화
     - 피보나치 눌림목 매수 전략 (0.382 / 0.5 / 0.618)
     - 스마트 호가 기반 3단계 분할 익절 및 긴급 스탑로스 선점 매도
     - KODEX 200 지수 급락 필터 & MDD -5% 계좌 서킷 브레이커
@@ -34,11 +36,13 @@ class AsyncTradingBot:
     def __init__(self, is_demo: bool = True, initial_capital: float = 10_000_000,
                  client: Optional[AsyncKiwoomClient] = None,
                  portfolio: Optional[AsyncPortfolioManager] = None,
-                 db: Optional[AsyncDatabase] = None):
+                 db: Optional[AsyncDatabase] = None,
+                 buffer: Optional[MarketDataBuffer] = None):
         self.is_demo = is_demo
         self.client = client or AsyncKiwoomClient(is_demo=is_demo)
         self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=5)
         self.db = db or AsyncDatabase()
+        self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
 
         self.market_filter_passed = True
         self.kodex200_change_rate = 0.0
@@ -81,9 +85,10 @@ class AsyncTradingBot:
         await self.update_watchlist()
 
     async def initialize(self):
-        """클라이언트, DB 풀, 계좌 상태 초기화"""
+        """클라이언트, DB 풀, 인메모리 버퍼, 계좌 상태 초기화"""
         print(f"🚀 [AsyncTradingBot] 엔진 초기화 시작 (모드: {'모의투자' if self.is_demo else '실전투자'})...")
         await self.db.init_pool()
+        await self.buffer.start()
         await self.client.start()
         await self._sync_account_balance()
         self.is_running = True
@@ -312,6 +317,8 @@ class AsyncTradingBot:
                 continue
 
             cur_price = float(cur_price_str)
+            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0)).replace(',', '').strip() or 0)
+            self.buffer.update_tick(code, cur_price, cur_volume)
             await self.portfolio.update_current_price(code, cur_price)
 
             yield_rate = (cur_price - buy_price) / buy_price if buy_price > 0 else 0.0
@@ -425,6 +432,8 @@ class AsyncTradingBot:
                 continue
 
             cur_price = float(cur_price_str)
+            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0)).replace(',', '').strip() or 0)
+            self.buffer.update_tick(code, cur_price, cur_volume)
             info['current_price'] = cur_price
 
             # 피보나치 눌림목 조건: 0.382 이하 ~ 0.618 이상 구간에 위치
@@ -524,9 +533,13 @@ class AsyncTradingBot:
                 await asyncio.sleep(2.0)
 
     async def shutdown(self):
-        """시스템 종료 및 자원 정리"""
+        """시스템 종료 및 자원 정리 (Graceful Shutdown)"""
         self.is_running = False
         print("🛑 [AsyncTradingBot] 데몬 종료 및 자원 반환 중...")
+        try:
+            await self.buffer.stop()
+        except Exception as e:
+            print(f"⚠️ [Shutdown] 버퍼 정지 오류: {e}")
         await self.client.stop()
         await self.db.close_pool()
         print("✅ [AsyncTradingBot] 정상 종료 완료")
