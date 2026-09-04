@@ -158,10 +158,17 @@ class MockDatabaseManager:
     async def update_balance(self, total_asset: float, deposit: float, profit_loss: float, yield_rate: float):
         pass
 
-    async def save_watchlist(self, codes: List[str], name_map: Optional[Dict[str, str]] = None):
+    async def save_watchlist(self, codes: Any, name_map: Optional[Dict[str, str]] = None):
         name_map = name_map or {}
+        if isinstance(codes, dict):
+            codes = list(codes.values())
         for c in codes:
-            self.watchlist_db[c] = name_map.get(c, c)
+            if isinstance(c, dict):
+                c_code = c.get('code') or c.get('stk_cd', '')
+                c_name = c.get('name') or c.get('stk_nm') or name_map.get(c_code, c_code)
+                self.watchlist_db[c_code] = c_name
+            elif isinstance(c, str):
+                self.watchlist_db[c] = name_map.get(c, c)
 
     async def update_watchlist_price(self, code: str, name: str, price: float, volume: int = 0):
         pass

@@ -277,6 +277,75 @@ async def control_bot(req: BotControlRequest):
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
 
+@app.post("/api/bot/emergency-stop")
+async def emergency_kill_switch():
+    """
+    🚨 긴급 비상 킬스위치 (Emergency Kill-Switch)
+    - 즉시 봇 정지 및 신규 매수 차단
+    - 현재 보유 중인 모든 포지션에 대해 CRITICAL 우선순위로 시장가(03) 전량 매도 발주
+    """
+    if not ctx.bot or not ctx.client or not ctx.portfolio:
+        raise HTTPException(status_code=503, detail="트레이딩 엔진이 준비되지 않았습니다.")
+
+    ctx.bot.running = False
+    ctx.bot.mdd_shutdown = True
+    if ctx.bot_task:
+        ctx.bot_task.cancel()
+
+    snap = await ctx.portfolio.get_snapshot()
+    positions = snap.get('positions', [])
+    executed_orders = []
+
+    for pos in positions:
+        code = pos['code']
+        name = pos['name']
+        qty = pos['qty']
+        if qty > 0:
+            res = await ctx.client.send_order(
+                code=code, qty=qty, price=0, order_type="03", side="SELL",
+                priority=RequestPriority.CRITICAL
+            )
+            executed_orders.append({"code": code, "name": name, "qty": qty, "response": res})
+
+    alert_msg = f"🚨 [EMERGENCY KILL-SWITCH 발동] 총 {len(executed_orders)}개 포지션 긴급 시장가 청산 발주 완료!"
+    if ctx.db:
+        await ctx.db.log_message("CRITICAL", alert_msg)
+    if hasattr(ctx.bot, 'notifier') and ctx.bot.notifier:
+        ctx.bot.notifier.send_message(alert_msg)
+
+    await ws_manager.broadcast_log({
+        "type": "LOG",
+        "level": "CRITICAL",
+        "message": alert_msg
+    })
+
+    return {
+        "status": "emergency_shutdown",
+        "message": "긴급 킬스위치 발동 완료. 모든 포지션 시장가 청산 발주.",
+        "liquidated_count": len(executed_orders),
+        "orders": executed_orders
+    }
+
+@app.post("/api/bot/params")
+async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fraction: Optional[float] = None):
+    """런타임 무중단 매매 파라미터 동적 조정"""
+    if not ctx.bot:
+        raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
+
+    updated = {}
+    if k_breakout is not None and hasattr(ctx.bot, 'strategy') and ctx.bot.strategy:
+        ctx.bot.strategy.k_breakout = float(k_breakout)
+        updated['k_breakout'] = k_breakout
+
+    if kelly_fraction is not None and ctx.portfolio:
+        ctx.portfolio.kelly_fraction = float(kelly_fraction)
+        updated['kelly_fraction'] = kelly_fraction
+
+    return {
+        "status": "updated",
+        "updated_params": updated
+    }
+
 # ================= WebSocket 엔드포인트 =================
 
 @app.websocket("/ws/portfolio")

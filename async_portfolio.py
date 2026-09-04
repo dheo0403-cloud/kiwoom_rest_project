@@ -243,8 +243,11 @@ class AsyncPortfolioManager:
                 'invested_pchs': invested_pchs,
                 'invested_eval': invested_eval,
                 'total_pnl': total_pnl,
+                'unrealized_pnl': total_pnl,
                 'total_yield': total_yield,
+                'total_yield_rate': total_yield,
                 'kelly_allocation_pct': self.get_kelly_allocation_fraction() * 100.0,
                 'positions_count': len(pos_list),
+                'stock_count': len(pos_list),
                 'positions': pos_list
             }

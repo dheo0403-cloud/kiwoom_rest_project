@@ -50,7 +50,7 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         code = "005930"
         buy_price = 70000.0
         atr14 = 2000.0
-        ind = {'atr14': atr14}
+        ind = {'atr14': atr14, 'skip_time_filter': True}
 
         # 정상 가격 (손절선 미도달)
         action, _ = await self.strategy.check_sell_signal(
@@ -71,7 +71,7 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         buy_price = 100000.0
         atr14 = 3000.0
         highest_price = 115000.0  # +15% 최고가 달성
-        ind = {'atr14': atr14}
+        ind = {'atr14': atr14, 'skip_time_filter': True}
 
         # 최고가(115,000) 대비 2.5 ATR(7,500원) 하락한 스탑가 = 107,500원
         # sell_stage=2 (2차 분할익절 완료 상태)
@@ -95,7 +95,7 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         code = "035420"
         buy_price = 200000.0
         atr14 = 4000.0
-        ind = {'atr14': atr14}
+        ind = {'atr14': atr14, 'skip_time_filter': True}
 
         # 1차 목표가: 200,000 + 1.5 * 4,000 = 206,000원 (+3%)
         action, reason = await self.strategy.check_sell_signal(

@@ -19,6 +19,7 @@ from database import AsyncDatabase
 from market_data_buffer import MarketDataBuffer
 from strategy import AdaptiveVolatilityBreakoutStrategy
 from indicators import TechnicalIndicators
+from notifier import AsyncNotifier
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -32,6 +33,7 @@ class AsyncTradingBot:
     - 인메모리 링버퍼(MarketDataBuffer) 및 비동기 배치 DB 영속화
     - ATR 적응형 변동성 돌파 & 샹들리에 엑시트(Chandelier Exit) 트레일링 스탑
     - KODEX 200 지수 급락 필터 & MDD -5% 계좌 서킷 브레이커
+    - 텔레그램 실시간 비동기 알림 (AsyncNotifier)
     - 수동 주문 비동기 처리 및 DB 영속화
     """
     def __init__(self, is_demo: bool = True, initial_capital: float = 10_000_000,
@@ -39,13 +41,15 @@ class AsyncTradingBot:
                  portfolio: Optional[AsyncPortfolioManager] = None,
                  db: Optional[AsyncDatabase] = None,
                  buffer: Optional[MarketDataBuffer] = None,
-                 strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None):
+                 strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None,
+                 notifier: Optional[AsyncNotifier] = None):
         self.is_demo = is_demo
         self.client = client or AsyncKiwoomClient(is_demo=is_demo)
         self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=5)
         self.db = db or AsyncDatabase()
         self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
         self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer)
+        self.notifier = notifier or AsyncNotifier()
 
         self.market_filter_passed = True
         self.kodex200_change_rate = 0.0
@@ -88,13 +92,15 @@ class AsyncTradingBot:
         await self.update_watchlist()
 
     async def initialize(self):
-        """클라이언트, DB 풀, 인메모리 버퍼, 계좌 상태 초기화"""
+        """클라이언트, DB 풀, 인메모리 버퍼, 텔레그램 알림, 계좌 상태 초기화"""
         print(f"🚀 [AsyncTradingBot] 엔진 초기화 시작 (모드: {'모의투자' if self.is_demo else '실전투자'})...")
         await self.db.init_pool()
         await self.buffer.start()
+        await self.notifier.start()
         await self.client.start()
         await self._sync_account_balance()
         self.is_running = True
+        self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
     async def _sync_account_balance(self):
@@ -365,9 +371,12 @@ class AsyncTradingBot:
         res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
         if res and str(rt_cd) == '0':
-            await self.portfolio.remove_position(code, sell_price)
+            pos = await self.portfolio.remove_position(code, sell_price)
             await self.db.log_order(code, name, "SELL", qty, sell_price)
             await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
+            pnl = (sell_price - pos['buy_price']) * qty if pos else None
+            yield_rt = (sell_price - pos['buy_price']) / pos['buy_price'] * 100.0 if pos and pos['buy_price'] > 0 else None
+            self.notifier.notify_order_filled("SELL", name, code, qty, sell_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
             await self._sync_account_balance()
         else:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
@@ -390,9 +399,14 @@ class AsyncTradingBot:
         res = await self.client.send_order(code, qty, sell_price, order_type="00", side="SELL", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
         if res and str(rt_cd) == '0':
+            snap_pos = self.portfolio.positions.get(code, {})
+            buy_p = snap_pos.get('buy_price', sell_price)
             await self.portfolio.update_partial_sell(code, qty, sell_price, next_stage)
             await self.db.log_order(code, name, "SELL", qty, sell_price)
             await self.db.log_message("INFO", f"🎯 [분할 익절 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
+            pnl = (sell_price - buy_p) * qty
+            yield_rt = (sell_price - buy_p) / buy_p * 100.0 if buy_p > 0 else 0.0
+            self.notifier.notify_order_filled("SELL", name, code, qty, sell_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
             await self._sync_account_balance()
         else:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
@@ -439,6 +453,8 @@ class AsyncTradingBot:
             ind['avg_vol'] = info.get('avg_volume', 0)
             ind['high10'] = info.get('high_price', cur_price)
             ind['open'] = float(out.get('oprn', cur_price) or cur_price)
+            ind['fib_rebound'] = (info.get('fib_618', 0) <= cur_price <= info.get('fib_382', cur_price * 2))
+            ind['skip_time_filter'] = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
 
             # 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀)
             buy_signal, reason = await self.strategy.check_buy_signal(
@@ -475,6 +491,7 @@ class AsyncTradingBot:
             await self.portfolio.add_position(code, name, qty, buy_price)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
             await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원")
+            self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason="ATR돌파_스퀴즈모멘텀")
             await self._sync_account_balance()
         else:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
@@ -510,7 +527,9 @@ class AsyncTradingBot:
                 # 6. 장 마감(15:30) 체크
                 if now_time.hour >= 15 and now_time.minute >= 30:
                     print("🏁 [장 마감] 당일 정규 거래 시간이 종료되었습니다.")
-                    await self.db.log_message("SYSTEM", "당일 정규장 마감. 트레이딩 루프를 종료합니다.")
+                    snap = await self.portfolio.get_snapshot()
+                    self.notifier.notify_daily_settlement(snap)
+                    await self.db.log_message("SYSTEM", "당일 정규장 마감. 일일 결산 알림 발송 완료.")
                     break
 
                 await asyncio.sleep(2.0)
@@ -529,6 +548,10 @@ class AsyncTradingBot:
             await self.buffer.stop()
         except Exception as e:
             print(f"⚠️ [Shutdown] 버퍼 정지 오류: {e}")
+        try:
+            await self.notifier.stop()
+        except Exception as e:
+            print(f"⚠️ [Shutdown] 알림 워커 정지 오류: {e}")
         await self.client.stop()
         await self.db.close_pool()
         print("✅ [AsyncTradingBot] 정상 종료 완료")

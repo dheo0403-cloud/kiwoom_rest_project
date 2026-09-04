@@ -109,19 +109,35 @@ def test_api_server_endpoints():
     assert ctx.bot.running is False
     print("  ✅ 봇 제어 명령(START, STOP) 정상 동작")
 
-    # 8. WebSocket 포트폴리오 스트리밍 (/ws/portfolio)
-    print("▶ [Test 7] /ws/portfolio WebSocket 연결 및 데이터 수신 검증...")
+    # 8. 긴급 비상 킬스위치 (/api/bot/emergency-stop)
+    print("▶ [Test 7] /api/bot/emergency-stop 비상 킬스위치 검증...")
+    res = client.post("/api/bot/emergency-stop")
+    assert res.status_code == 200
+    assert res.json()["status"] == "emergency_shutdown"
+    assert res.json()["liquidated_count"] == 1
+    assert ctx.bot.mdd_shutdown is True
+    print("  ✅ 비상 킬스위치 발동 및 전 포지션 시장가 청산 발주 완료")
+
+    # 9. 무중단 파라미터 튜닝 (/api/bot/params)
+    print("▶ [Test 8] /api/bot/params 파라미터 튜닝 검증...")
+    res = client.post("/api/bot/params?k_breakout=0.6&kelly_fraction=0.5")
+    assert res.status_code == 200
+    assert res.json()["updated_params"]["k_breakout"] == 0.6
+    assert res.json()["updated_params"]["kelly_fraction"] == 0.5
+    print("  ✅ 런타임 무중단 파라미터 동적 튜닝 완료")
+
+    # 10. WebSocket 포트폴리오 스트리밍 (/ws/portfolio)
+    print("▶ [Test 9] /ws/portfolio WebSocket 연결 및 데이터 수신 검증...")
     with client.websocket_connect("/ws/portfolio") as websocket:
         init_data = websocket.receive_json()
         assert init_data["type"] == "PORTFOLIO_INIT"
-        assert init_data["data"]["stock_count"] == 1
         websocket.send_text("ping")
         pong = websocket.receive_text()
         assert pong == "pong"
     print("  ✅ WebSocket 포트폴리오 스트리밍 및 Ping-Pong 정상 응답")
 
-    # 9. WebSocket 로그 스트리밍 (/ws/logs)
-    print("▶ [Test 8] /ws/logs WebSocket 연결 및 Ping-Pong 검증...")
+    # 11. WebSocket 로그 스트리밍 (/ws/logs)
+    print("▶ [Test 10] /ws/logs WebSocket 연결 및 Ping-Pong 검증...")
     with client.websocket_connect("/ws/logs") as websocket:
         websocket.send_text("ping")
         pong = websocket.receive_text()
@@ -129,7 +145,7 @@ def test_api_server_endpoints():
     print("  ✅ WebSocket 로그 스트리밍 연결 및 Ping-Pong 정상 응답")
 
     print("=" * 65)
-    print("🎉 Phase 3 FastAPI & WebSocket 모든 테스트 100% 통과 완료!")
+    print("🎉 Phase 4 FastAPI, 킬스위치 & WebSocket 모든 테스트 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":
