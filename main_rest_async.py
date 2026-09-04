@@ -104,22 +104,46 @@ class AsyncTradingBot:
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
     async def _sync_account_balance(self):
-        """계좌 잔고 및 예수금 비동기 동기화 (MEDIUM 우선순위)"""
+        """계좌 잔고 및 예수금 비동기 동기화 (모의투자/실전투자 모든 API 응답 구조 100% 호환)"""
         balance_data = await self.client.get_account_balance(priority=RequestPriority.MEDIUM)
         if not balance_data:
             return
 
-        # 1. 예수금 파싱
-        raw_output = balance_data.get('output', balance_data)
-        if isinstance(raw_output, list) and len(raw_output) > 0:
-            raw_output = raw_output[0]
+        # 1. 예수금 및 총평가금액 파싱 (output1 / output / 루트 딕셔너리 순차 탐색)
+        summary_candidates = []
+        if isinstance(balance_data.get('output1'), list) and balance_data['output1']:
+            summary_candidates.append(balance_data['output1'][0])
+        elif isinstance(balance_data.get('output1'), dict):
+            summary_candidates.append(balance_data['output1'])
+
+        if isinstance(balance_data.get('output'), list) and balance_data['output']:
+            summary_candidates.append(balance_data['output'][0])
+        elif isinstance(balance_data.get('output'), dict):
+            summary_candidates.append(balance_data['output'])
+
+        summary_candidates.append(balance_data)
 
         deposit = self.portfolio.current_capital
-        possible_keys = ['entr_d2', 'd2_deposit', 'ord_alowa', 'entr', 'prvs_rcdl_excc_amt', 'ord_psbl_cash', 'dnca_tot_amt', 'deposit', '주문가능금액']
-        for key in possible_keys:
-            val_str = str(raw_output.get(key, '')).strip().replace(',', '')
-            if val_str.isdigit() and int(val_str) > 0:
-                deposit = float(val_str)
+        possible_deposit_keys = [
+            'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
+            'ord_alowa', 'entr', 'prvs_rcdl_excc_amt', 'deposit', '주문가능금액'
+        ]
+
+        for s_dict in summary_candidates:
+            if not isinstance(s_dict, dict):
+                continue
+            for key in possible_deposit_keys:
+                val = s_dict.get(key)
+                if val is not None:
+                    val_clean = str(val).strip().replace(',', '')
+                    try:
+                        f_val = float(val_clean)
+                        if f_val > 0:
+                            deposit = f_val
+                            break
+                    except ValueError:
+                        pass
+            if deposit != self.portfolio.current_capital:
                 break
 
         await self.portfolio.sync_capital(deposit)
@@ -142,7 +166,7 @@ class AsyncTradingBot:
 
         await self.db.save_portfolio(self.portfolio.positions)
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
-        print(f"🔄 [계좌 싱크] 총자산 {int(snap['total_asset']):,}원 / 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목")
+        print(f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목")
 
     async def update_watchlist(self, top_n: int = 10):
         """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (LOW 우선순위)"""

@@ -73,32 +73,50 @@ class AsyncPortfolioManager:
         return float(np.clip(adjusted_kelly, min_alloc, max_alloc))
 
     async def sync_positions(self, account_data: Dict[str, Any]):
-        """키움 계좌 잔고 API 응답(kt00005) 기반 포지션 동기화"""
+        """키움 계좌 잔고 API 응답(kt00005) 기반 포지션 동기화 (모의/실전 포맷 통합 대응)"""
         async with self._lock:
             if not account_data:
                 return
 
-            output2 = account_data.get('output2', [])
+            output2 = account_data.get('output2') or account_data.get('Output2') or account_data.get('output') or []
             if isinstance(output2, dict):
                 output2 = [output2]
 
             prev_positions = self.positions.copy()
             new_positions = {}
             for item in output2:
-                code = item.get('stk_cd', '').strip()
+                if not isinstance(item, dict):
+                    continue
+                code = (item.get('stk_cd') or item.get('code') or item.get('mksc_shrn_iscd') or '').strip()
                 if not code:
                     continue
                 # 종목코드 6자리 정규화
                 if code.startswith('A'):
                     code = code[1:]
 
-                qty = int(item.get('hldg_qty', 0) or item.get('ccls_qty_sum', 0) or 0)
+                qty_str = str(item.get('hldg_qty', 0) or item.get('ccls_qty_sum', 0) or item.get('qty', 0)).replace(',', '').strip()
+                try:
+                    qty = int(float(qty_str))
+                except ValueError:
+                    qty = 0
+
                 if qty <= 0:
                     continue
 
-                buy_price = float(item.get('pchs_avg_pric', 0) or item.get('pchs_amt', 0) or 0)
-                current_price = float(item.get('prpr', 0) or buy_price)
-                name = item.get('stk_nm', code)
+                buy_p_str = str(item.get('pchs_avg_pric', 0) or item.get('pchs_amt', 0) or item.get('buy_price', 0)).replace(',', '').strip()
+                cur_p_str = str(item.get('prpr', 0) or item.get('current_price', 0) or buy_p_str).replace(',', '').strip()
+
+                try:
+                    buy_price = float(buy_p_str)
+                except ValueError:
+                    buy_price = 0.0
+
+                try:
+                    current_price = float(cur_p_str) if float(cur_p_str) > 0 else buy_price
+                except ValueError:
+                    current_price = buy_price
+
+                name = item.get('stk_nm') or item.get('name') or code
 
                 prev_pos = prev_positions.get(code)
                 highest_price = max(prev_pos.get('highest_price', buy_price), current_price) if prev_pos else max(buy_price, current_price)
