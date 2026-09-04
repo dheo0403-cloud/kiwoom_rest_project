@@ -9,7 +9,7 @@ import asyncio
 import os
 import sys
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
@@ -497,9 +497,31 @@ class AsyncTradingBot:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
             await self.db.log_message("ERROR", f"매수 주문 실패: {name}({code}) - {msg}")
 
+    async def wait_until_next_market_open(self):
+        """장 마감 후 다음 거래일 08:55까지 비동기 휴면 대기 (24시간 데몬 가용성 유지)"""
+        now = datetime.now()
+        # 다음날 08:55 설정
+        next_open = now.replace(hour=8, minute=55, second=0, microsecond=0)
+        if now >= next_open:
+            next_open += timedelta(days=1)
+
+        # 주말(토요일=5, 일요일=6) 건너뛰기
+        while next_open.weekday() >= 5:
+            next_open += timedelta(days=1)
+
+        total_sleep_sec = (next_open - now).total_seconds()
+        hours, remainder = divmod(int(total_sleep_sec), 3600)
+        minutes, _ = divmod(remainder, 60)
+        print(f"💤 [휴면 모드] 다음 거래일({next_open.strftime('%Y-%m-%d %H:%M')})까지 약 {hours}시간 {minutes}분 대기합니다...")
+
+        while self.is_running and datetime.now() < next_open:
+            await asyncio.sleep(min(60.0, max(1.0, (next_open - datetime.now()).total_seconds())))
+
     async def trading_loop(self):
-        """메인 트레이딩 비동기 주기 루프"""
+        """정규 거래 시간(09:00 ~ 15:30) 내의 실시간 트레이딩 비동기 주기 루프"""
         loop_count = 0
+        print(f"🔥 [TradingLoop] 정규장 실시간 매매 루프 가동 시작 ({datetime.now().strftime('%H:%M:%S')})")
+
         while self.is_running:
             try:
                 loop_count += 1
@@ -524,11 +546,12 @@ class AsyncTradingBot:
                 # 5. 신규 매수 기회 탐색 (매 2초마다)
                 await self.monitor_watchlist_and_enter()
 
-                # 6. 장 마감(15:30) 체크
+                # 6. 장 마감(15:30) 도달 시 당일 루프 종료 후 정산
                 if now_time.hour >= 15 and now_time.minute >= 30:
                     print("🏁 [장 마감] 당일 정규 거래 시간이 종료되었습니다.")
                     snap = await self.portfolio.get_snapshot()
                     self.notifier.notify_daily_settlement(snap)
+                    await self.buffer.flush_all()
                     await self.db.log_message("SYSTEM", "당일 정규장 마감. 일일 결산 알림 발송 완료.")
                     break
 
@@ -539,6 +562,59 @@ class AsyncTradingBot:
                 print(f"❌ [TradingLoop Error] {e}")
                 await self.db.log_message("ERROR", f"트레이딩 루프 오류: {e}")
                 await asyncio.sleep(2.0)
+
+    async def run_daemon(self):
+        """24시간 365일 무중단 데몬 메인 오케스트레이터"""
+        await self.initialize()
+
+        while self.is_running:
+            try:
+                now = datetime.now()
+                weekday = now.weekday()  # 0=월 ~ 4=금, 5=토, 6=일
+                now_time = now.time()
+
+                # 1. 주말(토/일)인 경우 다음 거래일까지 휴면
+                if weekday >= 5:
+                    print(f"🏖️ [주말 휴일] 오늘은 주말입니다. 다음 월요일 아침까지 대기합니다.")
+                    await self.wait_until_next_market_open()
+                    continue
+
+                # 2. 장 시작 전(08:55 이전): 08:55까지 대기
+                if now_time.hour < 8 or (now_time.hour == 8 and now_time.minute < 55):
+                    target_0855 = now.replace(hour=8, minute=55, second=0, microsecond=0)
+                    wait_sec = (target_0855 - now).total_seconds()
+                    print(f"⏳ [개장 전 대기] 아침 08:55까지 대기합니다 ({int(wait_sec//60)}분 남음)...")
+                    while self.is_running and datetime.now() < target_0855:
+                        await asyncio.sleep(min(30.0, max(1.0, (target_0855 - datetime.now()).total_seconds())))
+                    continue
+
+                # 3. 장 시작 준비(08:55 ~ 09:00): 계좌 잔고 동기화 및 당일 감시 유니버스 스캔
+                if now_time.hour == 8 and now_time.minute >= 55:
+                    print("🌅 [08:55 장전 준비] 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석...")
+                    self.mdd_shutdown = False
+                    self.market_filter_passed = True
+                    await self._sync_account_balance()
+                    await self.update_watchlist()
+                    target_0900 = now.replace(hour=9, minute=0, second=0, microsecond=0)
+                    while self.is_running and datetime.now() < target_0900:
+                        await asyncio.sleep(1.0)
+                    continue
+
+                # 4. 정규 거래 시간(09:00 ~ 15:30): 실시간 트레이딩 루프 실행
+                if (now_time.hour == 9 and now_time.minute >= 0) or (9 < now_time.hour < 15) or (now_time.hour == 15 and now_time.minute < 30):
+                    await self.trading_loop()
+                    continue
+
+                # 5. 장 마감 후(15:30 이후): 다음 거래일 08:55까지 안전 휴면 대기
+                if now_time.hour > 15 or (now_time.hour == 15 and now_time.minute >= 30):
+                    await self.wait_until_next_market_open()
+                    continue
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"⚠️ [Daemon Loop Error] {e}")
+                await asyncio.sleep(5.0)
 
     async def shutdown(self):
         """시스템 종료 및 자원 정리 (Graceful Shutdown)"""
@@ -557,15 +633,14 @@ class AsyncTradingBot:
         print("✅ [AsyncTradingBot] 정상 종료 완료")
 
 async def main():
-    parser = argparse.ArgumentParser(description="키움 OpenAPI 비동기 퀀트 트레이딩 데몬")
+    parser = argparse.ArgumentParser(description="키움 OpenAPI 비동기 퀀트 트레이딩 데몬 (24/365 무한 루프)")
     parser.add_argument('--real', action='store_true', help='실전투자 모드 (미지정시 모의투자)')
     parser.add_argument('--capital', type=float, default=10_000_000, help='초기 운용 자본금')
     args = parser.parse_args()
 
     bot = AsyncTradingBot(is_demo=not args.real, initial_capital=args.capital)
     try:
-        await bot.initialize()
-        await bot.trading_loop()
+        await bot.run_daemon()
     except KeyboardInterrupt:
         print("\n사용자에 의해 데몬이 중단되었습니다.")
     finally:

@@ -1,6 +1,6 @@
 # 🚢 Azure Kubernetes Service (AKS) 배포 가이드 (AKS_DEPLOYMENT.md)
 
-본 문서는 고도화된 키움 비동기 퀀트 자동매매 시스템(`kiwoom_rest_project`)을 **Azure Container Registry(ACR)** 및 **Azure Kubernetes Service(AKS)** 환경에 무중단으로 빌드하고 배포하는 전체 절차와 업로드 파일 목록을 안내합니다.
+본 문서는 고도화된 키움 비동기 퀀트 자동매매 시스템(`kiwoom_rest_project`)을 **Azure Container Registry(ACR)** 및 **Azure Kubernetes Service(AKS)** 환경에 24시간 365일 무중단으로 빌드하고 배포하는 전체 절차와 업로드 파일 목록을 안내합니다.
 
 ---
 
@@ -17,8 +17,8 @@
 | **빌드/설정** | `Dockerfile` | Multi-stage 경량화 빌드 및 KST 타임존 설정 |
 | | `.dockerignore` | 불필요한 캐시 및 테스트 파일 빌드 제외 설정 |
 | | `requirements.txt` | 런타임 의존 패키지 목록 (FastAPI, Streamlit, Pandas 등) |
-| **통합 실행기** | `start.py` | 봇 데몬 + FastAPI(8000) + Streamlit(8501) 통합 구동기 |
-| **코어 엔진** | `main_rest_async.py` | 비동기 퀀트 트레이딩 봇 메인 데몬 |
+| **통합 실행기** | `start.py` | 24/365 슈퍼바이저: 봇 데몬 + FastAPI(8000) + Streamlit(8501) 자가치유 관리 |
+| **코어 엔진** | `main_rest_async.py` | 비동기 퀀트 트레이딩 봇 데몬 (장 마감 시 익일 08:55까지 자동 휴면) |
 | | `async_kiwoom_client.py` | 키움 REST API 비동기 클라이언트 (토큰 버킷 & 서킷 브레이커) |
 | | `async_portfolio.py` | 프랙셔널 켈리(Fractional Kelly) 자산 배분 & 포트폴리오 매니저 |
 | **전략/지표** | `strategy.py` | ATR 적응형 변동성 돌파 진입 & 샹들리에 엑시트 출구 전략 |
@@ -39,7 +39,20 @@
 
 ---
 
-## 2. 🚀 ACR 빌드 및 AKS 배포 명령어
+## 2. 🛡️ 24시간 365일 무중단 아키텍처 동작 원리
+
+과거에는 장 마감(15:30) 시 봇 프로세스가 완전히 exit하면서 부모 프로세스(`start.py`)가 대시보드까지 함께 종료시키는 현상이 있었습니다. 이를 완전히 해결하기 위해 **2단계 자가 치유 및 영구 데몬 아키텍처**를 적용하였습니다:
+
+1. **봇 데몬 영구 가용성 (`main_rest_async.py`)**:
+   - 15:30 장 마감 시 프로세스가 종료되지 않고, 당일 정산 완료 후 **다음 거래일 08:55까지 비동기 수면(`asyncio.sleep`) 상태로 안전하게 대기**합니다.
+   - 주말(토/일)에는 다음 주 월요일 08:55까지 대기하며, 아침 08:55가 되면 자동으로 계좌 동기화 및 09:00 정규장 매매를 재개합니다.
+2. **슈퍼바이저 자가 치유 관리 (`start.py`)**:
+   - 대시보드(8501)와 API 서버(8000)는 24시간 내내 상시 서빙됩니다.
+   - 만약 특정 프로세스가 예기치 않게 비정상 종료되더라도 컨테이너 전체를 죽이지 않고, 해당 프로세스만 3~5초 후 **자동으로 재시작(Self-Healing Restart)**합니다.
+
+---
+
+## 3. 🚀 ACR 빌드 및 AKS 배포 명령어
 
 클라우드 쉘(Azure Cloud Shell) 또는 배포 서버 터미널에서 아래 명령어를 순서대로 실행합니다.
 
@@ -71,27 +84,27 @@ kubectl logs -f deployment/kiwoom-bot -n mzc-apps
 
 ---
 
-## 3. 🌐 서비스 접속 및 운영 확인
+## 4. 🌐 서비스 접속 및 24시간 운영 확인
 
-배포 완료 후 기존 인그레스(Ingress) 도메인으로 정상 접속되는지 확인합니다:
+배포 완료 후 장 마감 이후나 야간/주말에도 대시보드가 상시 정상 접속됩니다:
 
 - **대시보드 접속 URL**: `https://mcmportal.koreacentral.cloudapp.azure.com/kiwoom`
-- **주요 기능 점검**:
-  1. 상단 `🚨 긴급 전량 청산 (Kill-Switch)` 버튼 노출 확인
-  2. `🔔 알림 센터` 탭에서 실시간 체결 및 시스템 이벤트 피드 렌더링 확인
-  3. `⚙️ 퀀트 파라미터` 탭에서 실시간 $k$ 돌파 계수 및 켈리 비중 슬라이더 튜닝 확인
+- **확인 사항**:
+  - 장 마감 후에도 과거 매매 내역, 실현 손익 분석, 일별 자산 추이 정상 조회 가능.
+  - 최상단 `🚨 긴급 전량 청산 (Kill-Switch)` 버튼 및 `🔔 알림 센터` 실시간 피드 상시 활성화.
 
 ---
 
-## 4. 📱 (선택 사항) 카카오톡 실시간 알림 연동 방법
+## 5. 🏗️ (대안 아키텍처) K8s 파드 완전 분리 구성안 (Pod Separation)
 
-카카오톡 '나에게 보내기' 푸시 알림을 활성화하려면 AKS의 `kiwoom-bot` Deployment에 환경 변수를 추가하거나 Secret을 갱신해 주시면 됩니다.
+현재 적용된 **해결안 A(통합 슈퍼바이저 + 24시간 데몬 휴면)** 외에, 인프라 관점에서 대시보드와 트레이딩 봇을 물리적으로 완전히 다른 파드로 격리하고 싶으실 경우의 매니페스트 구성안입니다:
 
-```bash
-# 카카오톡 REST API 키 및 토큰 주입 (선택 사항)
-kubectl set env deployment/kiwoom-bot -n mzc-apps \
-  KAKAO_REST_API_KEY="your_kakao_rest_api_key" \
-  KAKAO_ACCESS_TOKEN="your_access_token" \
-  KAKAO_REFRESH_TOKEN="your_refresh_token"
-```
-*(카카오 토큰을 등록하지 않아도 대시보드의 '알림 센터' 피드 및 로그로 안전하게 자동 수신됩니다.)*
+### (1) 대시보드 전용 Pod (`kiwoom-dashboard-deployment.yaml`)
+- 실행 명령: `streamlit run dashboard.py --server.port 8501 --server.baseUrlPath /kiwoom`
+- 24시간 365일 상시 가동 (웹 트래픽 전담).
+
+### (2) 트레이딩 봇 전용 Pod (`kiwoom-bot-deployment.yaml` 또는 CronJob)
+- 실행 명령: `python main_rest_async.py --real`
+- **스케줄러 선택 가이드**:
+  - **파이썬 내부 데몬 방식 (현재 적용됨 - 추천)**: 키움 웹소켓 및 인메모리 버퍼 세션을 유지하며 08:55 자동 활성화 (파드 재시작 오버헤드 0초).
+  - **K8s CronJob 방식**: 매일 평일 08:55에 파드가 새로 생성되고 15:30에 정상 종료(Completed). 단, 매일 컨테이너 기동 시 이미지 풀 및 세션 초기화 시간이 소요됨.

@@ -3,11 +3,25 @@ import time
 import sys
 import argparse
 import os
+import signal
 
 # 한국 표준시(KST) 강제 적용
 os.environ["TZ"] = "Asia/Seoul"
 if hasattr(time, "tzset"):
     time.tzset()
+
+_is_shutting_down = False
+
+
+def sig_handler(signum, frame):
+    global _is_shutting_down
+    _is_shutting_down = True
+    print(f"\n🛑 [Supervisor] 종료 시그널({signum}) 수신. 시스템 안전 종료 시퀀스를 시작합니다...", flush=True)
+
+
+# 시그널 핸들러 등록 (Linux/Windows 호환)
+signal.signal(signal.SIGINT, sig_handler)
+signal.signal(signal.SIGTERM, sig_handler)
 
 
 def run_api_server():
@@ -44,7 +58,7 @@ def run_trading_bot(is_real):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="키움 퀀트 시스템 통합 구동기")
+    parser = argparse.ArgumentParser(description="키움 퀀트 시스템 통합 슈퍼바이저 (24/365 가용성 보장)")
     parser.add_argument('--real', action='store_true', help='실전투자 모드로 실행')
     args = parser.parse_args()
 
@@ -65,26 +79,39 @@ if __name__ == "__main__":
     bot_proc = run_trading_bot(is_real)
 
     print("\n" + "="*55)
-    print("🎉 키움 퀀트 자동매매 시스템이 정상적으로 가동되었습니다.")
+    print("🎉 키움 퀀트 24/365 무중단 자동매매 시스템이 가동되었습니다.")
     print("• 대시보드 접속: http://[서버IP]:8501/kiwoom")
     print(f"• 운영 모드: {'실전투자 (REAL)' if is_real else '모의투자 (MOCK)'}")
     print("="*55 + "\n", flush=True)
 
     try:
-        while True:
-            if bot_proc.poll() is not None:
-                print("⚠️ [TradingBot] 매매 봇 프로세스가 종료되었습니다.")
-                break
-            if dashboard_proc.poll() is not None:
-                print("⚠️ [Dashboard] 대시보드 프로세스가 종료되었습니다.")
-                break
-            if api_proc.poll() is not None:
-                print("⚠️ [API Server] API 서버 프로세스가 종료되었습니다.")
-                break
-            time.sleep(1)
+        # 슈퍼바이저 무한 감시 루프 (개별 프로세스 장애 시 자동 자가치유 재시작)
+        while not _is_shutting_down:
+            # 1. 대시보드 프로세스 감시
+            if dashboard_proc.poll() is not None and not _is_shutting_down:
+                print("⚠️ [Supervisor] 대시보드 프로세스 종료 감지 -> 3초 후 자동 재시작합니다...", flush=True)
+                time.sleep(3)
+                dashboard_proc = run_dashboard()
+
+            # 2. API 서버 프로세스 감시
+            if api_proc.poll() is not None and not _is_shutting_down:
+                print("⚠️ [Supervisor] API 서버 프로세스 종료 감지 -> 3초 후 자동 재시작합니다...", flush=True)
+                time.sleep(3)
+                api_proc = run_api_server()
+
+            # 3. 매매 봇 프로세스 감시
+            if bot_proc.poll() is not None and not _is_shutting_down:
+                exit_code = bot_proc.returncode
+                print(f"⚠️ [Supervisor] 트레이딩 봇 프로세스 종료 감지 (ExitCode: {exit_code}) -> 5초 후 자동 재시작합니다...", flush=True)
+                time.sleep(5)
+                bot_proc = run_trading_bot(is_real)
+
+            time.sleep(2)
+
     except KeyboardInterrupt:
-        print("\n🛑 정지 요청 수신. 모든 백그라운드 프로세스를 안전하게 종료합니다...")
+        print("\n🛑 사용자 중단 요청 수신.")
     finally:
+        print("🛑 모든 자식 프로세스를 안전하게 정리합니다...", flush=True)
         for p, name in [(bot_proc, "TradingBot"), (dashboard_proc, "Dashboard"), (api_proc, "API Server")]:
             if p and p.poll() is None:
                 p.terminate()
