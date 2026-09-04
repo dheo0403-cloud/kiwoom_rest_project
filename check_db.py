@@ -1,8 +1,17 @@
+import os
 import pymysql
 import pandas as pd
+from dotenv import load_dotenv
+
+load_dotenv()
 
 try:
-    conn = pymysql.connect(host='localhost', user='azure', password='1Rhcemdtla!3%7', db='kiwoom_quant_db')
+    conn = pymysql.connect(
+        host=os.getenv('DB_HOST', 'localhost'),
+        user=os.getenv('DB_USER', 'azure'),
+        password=os.getenv('DB_PASSWORD', ''),
+        db=os.getenv('DB_NAME', 'kiwoom_quant_db')
+    )
     
     print('--- PORTFOLIO ---')
     try:

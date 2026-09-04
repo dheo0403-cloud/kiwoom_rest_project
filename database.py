@@ -14,10 +14,10 @@ load_dotenv(override=False)
 
 class DatabaseManager:
     def __init__(self):
-        self.host = os.getenv("DB_HOST", "mariadb-vm-svc")
+        self.host = os.getenv("DB_HOST", "localhost")
         self.port = int(os.getenv("DB_PORT", "3306"))
         self.user = os.getenv("DB_USER", "azure")
-        self.password = os.getenv("DB_PASSWORD", "1Rhcemdtla!3%7")
+        self.password = os.getenv("DB_PASSWORD", "")
         self.db_name = os.getenv("DB_NAME", "kiwoom_quant_db")
         self.pool = None
 
