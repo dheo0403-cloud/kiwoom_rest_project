@@ -19,6 +19,7 @@ export interface PortfolioSnapshot {
   total_yield_rate: number;
   positions: Position[];
   timestamp?: string;
+  last_synced_at?: string;
 }
 
 export interface WatchlistItem {

@@ -99,6 +99,29 @@ class AsyncTradingBot:
         await self.buffer.start()
         await self.notifier.start()
         await self.client.start()
+
+        # DB에서 직전 계좌 잔고 및 포지션 복원 (오프마켓/장 시작 전 0원 방어)
+        if hasattr(self.db, 'get_latest_balance'):
+            try:
+                db_bal = await self.db.get_latest_balance()
+                if db_bal and float(db_bal.get('total_asset', 0)) > 0:
+                    self.portfolio.initial_capital = float(db_bal.get('total_asset'))
+                    self.portfolio.current_capital = float(db_bal.get('deposit', self.portfolio.initial_capital))
+                if hasattr(self.db, 'get_portfolio_positions'):
+                    db_pos = await self.db.get_portfolio_positions()
+                    if db_pos:
+                        for p in db_pos:
+                            code = p.get('code')
+                            name = p.get('name') or code
+                            qty = int(p.get('qty', 0))
+                            buy_p = float(p.get('buy_price', 0))
+                            cur_p = float(p.get('current_price') or buy_p)
+                            if code and qty > 0:
+                                await self.portfolio.add_position(code, name, qty, buy_p)
+                                await self.portfolio.update_current_price(code, cur_p)
+            except Exception as e:
+                print(f"⚠️ [Bot Init] DB 계좌 복원 예외: {e}")
+
         await self._sync_account_balance()
         self.is_running = True
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")

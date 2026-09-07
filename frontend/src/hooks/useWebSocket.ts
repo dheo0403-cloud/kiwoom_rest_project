@@ -38,16 +38,21 @@ export function useTradingWebSocket() {
 
       if (portRes.status === 'fulfilled' && portRes.value.ok) {
         const portData = await portRes.value.json();
-        setPortfolio(prev => ({
-          ...prev,
-          total_asset: portData.total_asset || prev.total_asset,
-          current_capital: portData.current_capital || prev.current_capital,
-          invested_capital: portData.invested_capital || prev.invested_capital,
-          stock_count: portData.stock_count ?? (portData.positions?.length || 0),
-          unrealized_pnl: portData.unrealized_pnl || 0,
-          total_yield_rate: portData.total_yield_rate || 0,
-          positions: portData.positions || []
-        }));
+        setPortfolio(prev => {
+          const nextAsset = portData.total_asset > 0 ? portData.total_asset : prev.total_asset;
+          const nextCap = portData.current_capital > 0 ? portData.current_capital : prev.current_capital;
+          const nextPos = (portData.positions && portData.positions.length > 0) ? portData.positions : prev.positions;
+          return {
+            total_asset: nextAsset,
+            current_capital: nextCap,
+            invested_capital: portData.invested_capital || prev.invested_capital,
+            stock_count: portData.stock_count ?? nextPos.length,
+            unrealized_pnl: portData.unrealized_pnl ?? prev.unrealized_pnl,
+            total_yield_rate: portData.total_yield_rate ?? prev.total_yield_rate,
+            positions: nextPos,
+            last_synced_at: portData.last_synced_at || prev.last_synced_at
+          };
+        });
       }
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
@@ -88,8 +93,23 @@ export function useTradingWebSocket() {
         portWs.onmessage = (event) => {
           try {
             const msg = JSON.parse(event.data);
-            if (msg.type === 'PORTFOLIO_UPDATE' && msg.data) {
-              setPortfolio(msg.data);
+            if ((msg.type === 'PORTFOLIO_UPDATE' || msg.type === 'PORTFOLIO_INIT') && msg.data) {
+              const d = msg.data;
+              setPortfolio(prev => {
+                const nextAsset = d.total_asset > 0 ? d.total_asset : prev.total_asset;
+                const nextCap = d.current_capital > 0 ? d.current_capital : prev.current_capital;
+                const nextPos = (d.positions && d.positions.length > 0) ? d.positions : prev.positions;
+                return {
+                  total_asset: nextAsset,
+                  current_capital: nextCap,
+                  invested_capital: d.invested_capital || prev.invested_capital,
+                  stock_count: d.stock_count ?? nextPos.length,
+                  unrealized_pnl: d.unrealized_pnl ?? prev.unrealized_pnl,
+                  total_yield_rate: d.total_yield_rate ?? prev.total_yield_rate,
+                  positions: nextPos,
+                  last_synced_at: d.last_synced_at || prev.last_synced_at
+                };
+              });
             }
           } catch (e) {
             console.error("Portfolio WS parse error:", e);

@@ -36,7 +36,7 @@ export const KpiMetricsRow: React.FC<KpiMetricsRowProps> = ({ portfolio, colorMo
             총 평가자산
           </span>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-500/15 text-blue-400 border border-blue-500/20">
-            실시간 집계
+            {portfolio.last_synced_at ? `기준: ${portfolio.last_synced_at}` : '실시간 집계'}
           </span>
         </div>
         <div className="mt-2.5">

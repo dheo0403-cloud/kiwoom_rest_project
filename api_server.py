@@ -96,11 +96,67 @@ class ServerContext:
 ctx = ServerContext()
 
 async def portfolio_broadcast_loop():
-    """1초 주기로 연결된 클라이언트에 최신 포트폴리오 스냅샷 브로드캐스팅"""
+    """1초 주기로 연결된 클라이언트에 최신 포트폴리오 스냅샷 브로드캐스팅 (인메모리 + DB 영속 캐시 연동)"""
     while True:
         try:
-            if ctx.portfolio and ws_manager.portfolio_connections:
-                snapshot = await ctx.portfolio.get_snapshot()
+            if ws_manager.portfolio_connections:
+                snapshot = None
+                if ctx.portfolio and (ctx.portfolio.positions or ctx.portfolio.current_capital > 0):
+                    snapshot = await ctx.portfolio.get_snapshot()
+
+                if snapshot is None:
+                    snapshot = {
+                        "total_asset": 0.0,
+                        "current_capital": 0.0,
+                        "invested_capital": 0.0,
+                        "stock_count": 0,
+                        "unrealized_pnl": 0.0,
+                        "total_yield_rate": 0.0,
+                        "positions": []
+                    }
+
+                # 만약 메모리 자산이 비어있거나 포지션이 없다면 DB에서 보강
+                if ctx.db and hasattr(ctx.db, 'get_latest_balance'):
+                    try:
+                        db_bal = await ctx.db.get_latest_balance()
+                        if db_bal:
+                            if snapshot.get("total_asset", 0) == 0:
+                                snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
+                                snapshot["current_capital"] = float(db_bal.get('deposit', 0))
+                                snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
+                                snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
+                            snapshot["last_synced_at"] = str(db_bal.get('date', ''))
+
+                        if (not snapshot.get("positions")) and hasattr(ctx.db, 'get_portfolio_positions'):
+                            db_pos = await ctx.db.get_portfolio_positions()
+                            if db_pos:
+                                formatted_pos = []
+                                invested = 0.0
+                                for p in db_pos:
+                                    qty = int(p.get('qty', 0))
+                                    buy_p = float(p.get('buy_price', 0))
+                                    cur_p = float(p.get('current_price') or buy_p)
+                                    pnl = (cur_p - buy_p) * qty
+                                    y_rate = ((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0
+                                    invested += buy_p * qty
+                                    formatted_pos.append({
+                                        "code": p.get('code', ''),
+                                        "name": p.get('name', p.get('code', '')),
+                                        "qty": qty,
+                                        "buy_price": buy_p,
+                                        "current_price": cur_p,
+                                        "highest_price": cur_p,
+                                        "sell_stage": 1,
+                                        "pnl": pnl,
+                                        "yield_rate": round(y_rate, 2)
+                                    })
+                                snapshot["positions"] = formatted_pos
+                                snapshot["stock_count"] = len(formatted_pos)
+                                if invested > 0 and snapshot.get("invested_capital", 0) == 0:
+                                    snapshot["invested_capital"] = invested
+                    except Exception:
+                        pass
+
                 await ws_manager.broadcast_portfolio({
                     "type": "PORTFOLIO_UPDATE",
                     "data": snapshot
@@ -122,9 +178,34 @@ async def lifespan(app: FastAPI):
     await ctx.db.init_pool()
 
     ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+
+    # DB로부터 직전 계좌 잔고 및 보유 포지션 즉시 복원 (장 마감/재기동 시 0원 노출 방지)
+    if ctx.db and hasattr(ctx.db, 'get_latest_balance'):
+        try:
+            db_bal = await ctx.db.get_latest_balance()
+            if db_bal and float(db_bal.get('total_asset', 0)) > 0:
+                ctx.portfolio.initial_capital = float(db_bal.get('total_asset', 10_000_000))
+                ctx.portfolio.current_capital = float(db_bal.get('deposit', 10_000_000))
+
+            if hasattr(ctx.db, 'get_portfolio_positions'):
+                db_pos = await ctx.db.get_portfolio_positions()
+                if db_pos:
+                    for p in db_pos:
+                        code = p.get('code')
+                        name = p.get('name') or code
+                        qty = int(p.get('qty', 0))
+                        buy_price = float(p.get('buy_price', 0))
+                        cur_price = float(p.get('current_price') or buy_price)
+                        if code and qty > 0:
+                            await ctx.portfolio.add_position(code, name, qty, buy_price)
+                            await ctx.portfolio.update_current_price(code, cur_price)
+                    print(f"✅ [API Server] DB로부터 직전 계좌 잔고({ctx.portfolio.current_capital:,}원) 및 {len(db_pos)}개 포지션 복원 완료.")
+        except Exception as e:
+            print(f"⚠️ [API Server] 초기 DB 계좌 복원 예외: {e}")
+
     ctx.bot = AsyncTradingBot(
         is_demo=True,
-        initial_capital=10_000_000,
+        initial_capital=ctx.portfolio.initial_capital,
         client=ctx.client,
         portfolio=ctx.portfolio,
         db=ctx.db

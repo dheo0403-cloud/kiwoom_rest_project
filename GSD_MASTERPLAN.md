@@ -145,25 +145,68 @@
 
 ### Phase 6. 차세대 트레이딩 콕핏 실데이터 바인딩 및 동적 인터랙션 고도화 (Priority 6 - 진행 중)
 
-- [ ] **Task 6.1: 백엔드 실데이터 엔드포인트(`GET /api/chart/{code}`) 신설 및 DB/인메모리 연동 강화**
+- [x] **Task 6.1: 백엔드 실데이터 엔드포인트(`GET /api/chart/{code}`) 신설 및 DB/인메모리 연동 강화**
   - **설명:** 키움 API 일봉/분봉 조회 및 인메모리 링버퍼/DB로부터 실제 OHLCV 캔들과 피보나치 3대 지지선(38.2%, 50.0%, 61.8%)을 반환하는 엔드포인트 구현. `/api/portfolio`, `/api/watchlist`의 DB 테이블 연동 강화로 실계좌 잔고 및 종목 정보 실시간 동기화.
-  - **수정 파일:** `api_server.py`
+  - **수정 파일:** `api_server.py`, `database.py`
   - **검증 기준:** `/api/chart/005930`, `/api/portfolio`, `/api/watchlist` 호출 시 실제 자산/종목 데이터 정확히 반환.
 
-- [ ] **Task 6.2: 프론트엔드 하드코딩 제거 및 보유/감시 종목 기반 동적 선택(Auto-Selection & Quick Select) 구현**
+- [x] **Task 6.2: 프론트엔드 하드코딩 제거 및 보유/감시 종목 기반 동적 선택(Auto-Selection & Quick Select) 구현**
   - **설명:** 하드코딩된 '005930'/'삼성전자' 기본값을 제거하고, 실제 보유종목(1순위) 또는 감시종목 최상위(2순위)를 자동 로드. 차트 헤더에 빠른 종목 전환 드롭다운/칩스 UI 추가.
   - **수정 파일:** `frontend/src/App.tsx`, `frontend/src/components/TradingViewChartBento.tsx`, `frontend/src/components/Header.tsx`
   - **검증 기준:** 페이지 로드 시 실제 계좌/감시 종목이 차트에 기본 렌더링되며, 클릭 또는 선택 시 즉시 전환.
 
-- [ ] **Task 6.3: TradingView Lightweight Charts 실데이터 OHLCV 및 피보나치 레벨 실시간 바인딩**
+- [x] **Task 6.3: TradingView Lightweight Charts 실데이터 OHLCV 및 피보나치 레벨 실시간 바인딩**
   - **설명:** 더미 `Math.random()` 캔들 생성기를 완전 제거하고, 백엔드 `/api/chart/{code}`로부터 수신한 실제 캔들 및 피보나치 지지선, 매수평단가 라인을 60FPS 하드웨어 가속 캔버스에 정확히 렌더링.
   - **수정 파일:** `frontend/src/components/TradingViewChartBento.tsx`, `frontend/src/hooks/useWebSocket.ts`
   - **검증 기준:** 캔들스틱, 거래량 바, 피보나치 3대 지지선, 매수평단가 라인이 실데이터로 오버레이 렌더링.
 
-- [ ] **Task 6.4: 빌드 검증, E2E 통합 테스트 및 형상 관리(`feature/dashboard-real-data-binding`)**
+- [x] **Task 6.4: 빌드 검증, E2E 통합 테스트 및 형상 관리(`feature/dashboard-real-data-binding`)**
   - **설명:** Vite 프로덕션 빌드, 백엔드 테스트 스위트 검증 완료 후 전용 브랜치에 원자적 커밋 생성.
   - **수정 파일:** `frontend/dist/`, `WORK_HISTORY.md`
   - **검증 기준:** `npm run build` 성공 및 `pytest` 통과.
+
+---
+
+### Phase 7. 장 마감/유휴 상태 계좌 데이터 영속화 및 대시보드 상태 보존 (Priority 7 - 진행 중)
+
+- [ ] **Task 7.1: api_server.py 기동 시 MariaDB 계좌/포지션 즉시 복원 및 WebSocket 브로드캐스트 보강**
+  - **설명:** 서버 기동 시 `ctx.db`에서 마지막 잔고(`balance`)와 보유 포지션(`portfolio`)을 즉시 읽어와 `ctx.portfolio`에 복원. 장 마감 또는 API 세션 종료 시에도 직전 계좌 상태가 0원으로 초기화되지 않도록 보장.
+  - **수정 파일:** `api_server.py`, `database.py`
+  - **검증 기준:** 장 마감/휴일 상태에서 api_server 재기동 시 0원이 아닌 직전 정산 잔고와 보유 종목이 즉시 조회됨.
+
+- [ ] **Task 7.2: main_rest_async.py 장 마감 정산 데이터 영속화 및 API 빈 응답 방어**
+  - **설명:** 15:30 장 마감 시 최종 포트폴리오 스냅샷을 DB에 즉시 영속화하고, 야간/주말 키움 API가 빈 값을 반환하더라도 이전 DB 잔고를 0으로 덮어쓰지 않도록 방어 로직 강화.
+  - **수정 파일:** `main_rest_async.py`
+  - **검증 기준:** 장 마감 후 휴면 루프 진입 시 DB에 최종 잔고와 보유종목이 안전하게 보존됨.
+
+- [ ] **Task 7.3: 프론트엔드 대시보드 마지막 동기화 일시 표출 및 0원 덮어쓰기 방지**
+  - **설명:** 상단 4대 KPI 카드 및 헤더에 "마지막 동기화: YYYY-MM-DD HH:MM (장마감)" 배지 표출, WebSocket 일시 수신 공백 시 기존 유효 자산 데이터 유지.
+  - **수정 파일:** `frontend/src/components/KpiMetricsRow.tsx`, `frontend/src/components/Header.tsx`, `frontend/src/hooks/useWebSocket.ts`
+  - **검증 기준:** 장 마감 상태에서도 직전 평가자산/예수금/손익이 정상 노출되며 기준 일시가 명확히 표출됨.
+
+- [ ] **Task 7.4: 로컬/오프마켓 시뮬레이션 검증 및 Git 형상 관리(`fix/account-balance-after-market-close`)**
+  - **설명:** 장 마감 오프마켓 상태 테스트 통과 후 브랜치 커밋 완료.
+  - **수정 파일:** `test_api_server.py`, `WORK_HISTORY.md`
+  - **검증 기준:** 모든 단위 테스트 통과 및 브랜치 커밋.
+
+---
+
+### Phase 8. 세션 시작 브리핑 자동 출력 제어 흐름 및 TTY 즉시 렌더링 최적화 (Priority 8 - 완료)
+
+- [x] **Task 8.1: SessionStart 훅 스크립트(`session-start-briefing.js`) 콘솔 디바이스 직접 쓰기(Direct CONOUT$) 적용**
+  - **설명:** CLI 에이전트 시작 시 사용자 입력 대기(REPL/input) 루프 진입 전 화면에 브리핑 배너가 즉각 출력되도록 Windows `//./CONOUT$` 및 Unix `/dev/tty` 직접 디바이스 쓰기 구현. 파이프 버퍼링 및 화면 지워짐 방지.
+  - **수정 파일:** `.claude/scripts/session-start-briefing.js`
+  - **검증 기준:** 키보드 입력 없이도 세션 기동 즉시 콘솔에 ANSI 브리핑 배너 0초 즉각 렌더링.
+
+- [x] **Task 8.2: Git 정보 수집 로직 비차단(Non-blocking) 및 오버헤드 최소화**
+  - **설명:** `.git` 디렉터리가 실제로 존재하는 서브프로젝트만 필터링하고 타임아웃을 1000ms로 단축하여 시작 딜레이 제로화.
+  - **수정 파일:** `.claude/scripts/session-start-briefing.js`
+  - **검증 기준:** 훅 스크립트 실행 시간 50ms 이내 초고속 완료.
+
+- [x] **Task 8.3: 로컬 테스트 및 Git 형상 관리 (`fix/auto-briefing-on-startup`)**
+  - **설명:** 스크립트 단독 및 통합 실행 검증 후 `fix/auto-briefing-on-startup` 브랜치에 커밋.
+  - **수정 파일:** `.claude/scripts/session-start-briefing.js`, `GSD_MASTERPLAN.md`, `WORK_HISTORY.md`
+  - **검증 기준:** 노드 단독 실행 배너 정상 출력 및 git 커밋 완료.
 
 ---
 
