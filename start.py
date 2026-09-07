@@ -78,11 +78,12 @@ if __name__ == "__main__":
     # 3. 비동기 매매 봇 실행
     bot_proc = run_trading_bot(is_real)
 
-    print("\n" + "="*55)
+    print("\n" + "="*60)
     print("🎉 키움 퀀트 24/365 무중단 자동매매 시스템이 가동되었습니다.")
-    print("• 대시보드 접속: http://[서버IP]:8501/kiwoom")
+    print("• 🚀 [신규] 차세대 벤토 그리드 콕핏: http://[서버IP]:8000")
+    print("• 📈 [레거시] 스트림릿 대시보드: http://[서버IP]:8501/kiwoom")
     print(f"• 운영 모드: {'실전투자 (REAL)' if is_real else '모의투자 (MOCK)'}")
-    print("="*55 + "\n", flush=True)
+    print("="*60 + "\n", flush=True)
 
     try:
         # 슈퍼바이저 무한 감시 루프 (개별 프로세스 장애 시 자동 자가치유 재시작)

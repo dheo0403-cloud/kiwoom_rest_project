@@ -7,10 +7,12 @@ Gate Info:
 """
 import asyncio
 import json
+import os
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
@@ -380,3 +382,9 @@ async def ws_logs_endpoint(websocket: WebSocket):
         await ws_manager.disconnect_log(websocket)
     except Exception:
         await ws_manager.disconnect_log(websocket)
+
+
+# ================= 정적 프론트엔드 서빙 (React Bento Grid Cockpit) =================
+frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+if os.path.exists(frontend_dist):
+    app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
