@@ -157,21 +157,26 @@ class AdaptiveVolatilityBreakoutStrategy:
                 return "SELL_ALL", f"폴백_트레일링스탑({profit_rate:.1%})"
 
         # 3. 🎯 ATR R-배수 기반 다단계 분할 익절 (Take-Profit Stages)
-        #    1R = 1.5 * ATR (약 +3~4%), 2R = 2.5 * ATR (약 +5~7%)
+        #    1R = 1.5 * ATR (약 +3~4%), 2R = 2.5 * ATR (약 +5~7%), 3R = 3.5 * ATR (약 +8~10%)
         if atr14 > 0:
             r1_target = buy_price + (1.5 * atr14)
             r2_target = buy_price + (2.5 * atr14)
+            r3_target = buy_price + (3.5 * atr14)
 
             if sell_stage == 0 and current_price >= r1_target:
                 return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_33%({profit_rate:.1%}, 목표가:{r1_target:,.0f}원)"
             if sell_stage == 1 and current_price >= r2_target:
                 return "SELL_PARTIAL", f"2차_ATR_R2_분할익절_50%({profit_rate:.1%}, 목표가:{r2_target:,.0f}원)"
+            if sell_stage >= 2 and current_price >= r3_target:
+                return "SELL_ALL", f"3차_ATR_R3_전량익절_100%({profit_rate:.1%}, 목표가:{r3_target:,.0f}원)"
         else:
             # 폴백 고정 % 익절
             if sell_stage == 0 and profit_rate >= 0.03:
                 return "SELL_PARTIAL", f"1차_고정_분할익절_33%({profit_rate:.1%})"
             if sell_stage == 1 and profit_rate >= 0.05:
                 return "SELL_PARTIAL", f"2차_고정_분할익절_50%({profit_rate:.1%})"
+            if sell_stage >= 2 and profit_rate >= 0.08:
+                return "SELL_ALL", f"3차_고정_전량익절_100%({profit_rate:.1%})"
 
         # 4. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
         skip_time_filter = ind.get('skip_time_filter', False) if ind else False

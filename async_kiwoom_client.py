@@ -333,14 +333,20 @@ class AsyncKiwoomClient:
         return data
 
     async def get_top_trading_value(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
-        """거래대금 상위 종목 조회"""
+        """거래대금 상위 종목 조회 (KRX/통합 다중 거래소 파라미터 방어 지원)"""
         url = f"{self.base_url}/api/dostk/rkinfo"
+        stex = "1" if self.mode == "MOCK" else "3"
         payload = {
             "mrkt_tp": "000",
             "mang_stk_incls": "0",
-            "stex_tp": "1" if self.mode == "MOCK" else "3"
+            "stex_tp": stex
         }
         data, _ = await self.request("ka10032", url, payload, priority=priority)
+        # 만약 통합(3) 조회 응답에 종목 리스트가 없다면 KRX(1)로 1회 안전 재시도
+        if not data or (isinstance(data, dict) and not any(k in data for k in ['trde_prica_upper', 'output', 'Output', 'list', 'trde_val_upper', 'data'])):
+            if stex != "1":
+                payload["stex_tp"] = "1"
+                data, _ = await self.request("ka10032", url, payload, priority=priority)
         return data
 
     async def get_daily_chart(self, code: str, base_dt: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:

@@ -172,66 +172,143 @@ class AsyncTradingBot:
         """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (LOW 우선순위)"""
         print(f"🔍 [Watchlist] 거래대금 상위 {top_n}종목 스캔 및 피보나치 분석 시작...")
         top_data = await self.client.get_top_trading_value(priority=RequestPriority.LOW)
-        if not top_data:
-            print("⚠️ 거래대금 상위 조회 응답 없음")
-            return
 
-        if isinstance(top_data, list):
-            items = top_data
-        elif isinstance(top_data, dict):
-            items = top_data.get('output', top_data.get('list', []))
-        else:
-            items = []
+        # 1. API 응답 추출 (Kiwoom OpenAPI REST 다중 스키마 키 100% 대응)
+        items = []
+        if top_data:
+            if isinstance(top_data, list):
+                items = top_data
+            elif isinstance(top_data, dict):
+                items = (
+                    top_data.get('trde_prica_upper') or
+                    top_data.get('output') or
+                    top_data.get('Output') or
+                    top_data.get('list') or
+                    top_data.get('trde_val_upper') or
+                    top_data.get('data') or
+                    []
+                )
+            if isinstance(items, dict):
+                items = [items]
 
-        if isinstance(items, dict):
-            items = [items]
+        raw_count = len(items)
+        print(f"  📋 [Watchlist Debug] API 수신 원본 종목 수: {raw_count}개")
+
+        # 2. API 미응답 또는 빈 리스트 시 Fallback (MOCK 모드 또는 비상 상황)
+        if raw_count == 0:
+            if getattr(self, 'is_demo', False) or getattr(self.client, 'mode', '') == 'MOCK':
+                print("  ⚠️ [Watchlist Fallback] 모의투자/장외시간 거래대금 상위 미제공 -> 기본 우량주 5종목 자동 주입")
+                items = [
+                    {'stk_cd': '005930', 'stk_nm': '삼성전자'},
+                    {'stk_cd': '000660', 'stk_nm': 'SK하이닉스'},
+                    {'stk_cd': '035420', 'stk_nm': 'NAVER'},
+                    {'stk_cd': '035720', 'stk_nm': '카카오'},
+                    {'stk_cd': '005380', 'stk_nm': '현대차'},
+                ]
+                raw_count = len(items)
+            else:
+                raw_keys = list(top_data.keys()) if isinstance(top_data, dict) else type(top_data)
+                print(f"  ⚠️ [Watchlist Debug] 거래대금 상위 응답이 비어있습니다. (Raw keys: {raw_keys})")
+                return
 
         today_str = datetime.now().strftime('%Y%m%d')
         new_watchlist = {}
 
-        for item in items[:top_n]:
+        # 필터링 단계별 탈락 카운터 (디버깅 관제용)
+        drop_reasons = {
+            'invalid_code': 0,
+            'no_chart_data': 0,
+            'insufficient_candles': 0,
+            'zero_price_diff': 0,
+            'analysis_error': 0
+        }
+
+        # 상위 top_n개 유효 종목을 채울 때까지 순회 (원본 items 전체 대상)
+        for item in items:
+            if len(new_watchlist) >= top_n:
+                break
+
             if not isinstance(item, dict):
                 continue
-            code = (item.get('stk_cd') or item.get('code') or '').strip()
-            if not code:
+
+            raw_code = item.get('stk_cd') or item.get('code') or item.get('mksc_shrn_iscd') or ''
+            if not raw_code:
+                drop_reasons['invalid_code'] += 1
                 continue
-            if code.startswith('A'):
-                code = code[1:]
-            name = item.get('stk_nm') or item.get('name') or code
+
+            # 종목코드 정제: A접두사 및 _AL, _NX 등 거래소 접미사 제거 → 6자리 표준화
+            code = raw_code.replace('A', '').split('_')[0].strip()
+            if len(code) != 6 or not code.isdigit():
+                drop_reasons['invalid_code'] += 1
+                continue
+
+            name = item.get('stk_nm') or item.get('name') or item.get('hts_kor_isnm') or code
 
             # 일봉 차트 조회하여 최근 20일 고가/저가 및 피보나치 레벨 산출
             daily_chart = await self.client.get_daily_chart(code, base_dt=today_str, priority=RequestPriority.LOW)
             if not daily_chart:
+                drop_reasons['no_chart_data'] += 1
                 continue
             if isinstance(daily_chart, tuple):
                 daily_chart = daily_chart[0]
             if not isinstance(daily_chart, dict):
+                drop_reasons['no_chart_data'] += 1
                 continue
 
-            chart_items = daily_chart.get('output2', daily_chart.get('output', []))
+            chart_items = (
+                daily_chart.get('stk_dt_pole_chart_qry') or
+                daily_chart.get('output2') or
+                daily_chart.get('output') or
+                daily_chart.get('Output') or
+                daily_chart.get('data') or
+                []
+            )
             if not chart_items or not isinstance(chart_items, list):
+                drop_reasons['no_chart_data'] += 1
                 continue
 
             # 최근 20거래일 데이터 추출
             recent_candles = chart_items[:20]
             if len(recent_candles) < 5:
+                drop_reasons['insufficient_candles'] += 1
                 continue
 
             try:
-                highs = [float(c.get('hgpr', 0) or c.get('stck_hgpr', 0) or c.get('high_price', 0)) for c in recent_candles]
-                lows = [float(c.get('lwpr', 0) or c.get('stck_lwpr', 0) or c.get('low_price', 0)) for c in recent_candles]
+                highs = []
+                lows = []
+                for c in recent_candles:
+                    if not isinstance(c, dict):
+                        continue
+                    h_val = c.get('high_pric') or c.get('hgpr') or c.get('stck_hgpr') or c.get('high_price') or c.get('high') or 0
+                    l_val = c.get('low_pric') or c.get('lwpr') or c.get('stck_lwpr') or c.get('low_price') or c.get('low') or 0
+                    h = abs(float(str(h_val).replace(',', '').strip()))
+                    l = abs(float(str(l_val).replace(',', '').strip()))
+                    if h > 0: highs.append(h)
+                    if l > 0: lows.append(l)
+
+                if not highs or not lows:
+                    drop_reasons['zero_price_diff'] += 1
+                    continue
+
                 period_high = max(highs)
                 period_low = min(lows)
                 diff = period_high - period_low
 
                 if diff <= 0:
+                    drop_reasons['zero_price_diff'] += 1
                     continue
 
                 fib_382 = period_high - (diff * 0.382)
                 fib_500 = period_high - (diff * 0.500)
                 fib_618 = period_high - (diff * 0.618)
 
-                cur_price = float(item.get('prpr', 0) or chart_items[0].get('clpr', 0))
+                # 현재가 추출
+                c_first = chart_items[0] if isinstance(chart_items[0], dict) else {}
+                cur_price_raw = (
+                    item.get('prpr') or item.get('cur_prc') or item.get('stck_prpr') or item.get('price') or
+                    c_first.get('cur_prc') or c_first.get('clpr') or c_first.get('stck_clpr') or c_first.get('close') or period_high
+                )
+                cur_price = abs(float(str(cur_price_raw).replace(',', '').strip()))
 
                 new_watchlist[code] = {
                     'code': code,
@@ -245,8 +322,13 @@ class AsyncTradingBot:
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             except Exception as e:
-                print(f"⚠️ {name}({code}) 피보나치 분석 실패: {e}")
+                drop_reasons['analysis_error'] += 1
+                print(f"⚠️ [Watchlist Debug] {name}({code}) 피보나치 분석 예외 발생: {e}")
                 continue
+
+        # 단계별 필터링 디버그 리포트 출력
+        total_dropped = sum(drop_reasons.values())
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']})")
 
         self.watchlist = new_watchlist
         await self.db.save_watchlist(list(self.watchlist.values()))

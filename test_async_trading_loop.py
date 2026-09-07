@@ -232,6 +232,13 @@ async def test_three_stage_profit_taking():
     await portfolio.add_position("000660", "SK하이닉스", qty=100, buy_price=100000.0)
     mock_client.holdings["000660"] = {"name": "SK하이닉스", "qty": 100, "buy_price": 100000.0}
 
+    # 20개 안정적 분봉 적재 (ATR = 2,000원 기준 설정)
+    initial_candles = [
+        {"datetime": f"2026-09-04 09:{i:02d}:00", "open": 100000, "high": 102000, "low": 100000, "close": 101000, "volume": 1000}
+        for i in range(20)
+    ]
+    bot.buffer.load_initial_candles("000660", initial_candles)
+
     # 1단계 익절 테스트 (+3.5% 상승: 103,500원 -> 33% 매도)
     mock_client.prices["000660"] = 103500.0
     await bot.monitor_positions_and_exit()
@@ -248,7 +255,7 @@ async def test_three_stage_profit_taking():
     assert pos["qty"] == 34, f"33주 추가 매도 후 34주가 남아야 합니다. (실제: {pos['qty']}주)"
     print(f"  ✅ 2단계 익절(+5%) 완료: 잔여 {pos['qty']}주, 다음 단계: Stage {pos['sell_stage']}")
 
-    # 3단계 익절 테스트 (+8.5% 상승: 108,500원 -> 잔여 전량 매도 및 청산)
+    # 3단계 익절 테스트 (3차 ATR R3 107,000원 돌파: 108,500원 -> 잔여 전량 매도 및 청산)
     mock_client.prices["000660"] = 108500.0
     await bot.monitor_positions_and_exit()
     assert "000660" not in portfolio.positions, "3단계 전량 익절 후 포지션이 청산되어야 합니다."
@@ -335,6 +342,59 @@ async def test_market_filter_and_manual_orders():
     assert "000660" not in portfolio.positions, "수동 매도 종목이 포트폴리오에서 청산되어야 합니다."
     print("  ✅ 대시보드 PENDING 수동 주문 2건 비동기 체결 및 동기화 완료")
 
+async def test_update_watchlist_multi_schema_and_fallback():
+    """6. 거래대금 상위 다중 스키마 파싱 및 MOCK Fallback 검증"""
+    print("▶ [Test 6] 거래대금 상위 다중 스키마(Korean/English) 파싱 및 Fallback 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1) 실전 키움 REST 스키마 (trde_prica_upper, stk_dt_pole_chart_qry, high_pric, low_pric)
+    class CustomSchemaMockClient(MockKiwoomClient):
+        async def get_top_trading_value(self, mrkt_tp: str = "000", limit: int = 30, priority: RequestPriority = RequestPriority.LOW):
+            return {
+                "rt_cd": "0",
+                "trde_prica_upper": [
+                    {"stk_cd": "005930_AL", "stk_nm": "삼성전자", "cur_prc": "75000", "trde_prica": "500000000000"},
+                    {"stk_cd": "000660", "stk_nm": "SK하이닉스", "cur_prc": "150000", "trde_prica": "300000000000"}
+                ]
+            }
+
+        async def get_daily_chart(self, code: str, base_dt: str, priority: RequestPriority = RequestPriority.LOW):
+            return {
+                "rt_cd": "0",
+                "stk_dt_pole_chart_qry": [
+                    {"dt": "20260904", "open_pric": "70000", "high_pric": "80000", "low_pric": "70000", "cur_prc": "75000", "trde_qty": "1000000"}
+                    for _ in range(20)
+                ]
+            }
+
+    custom_client = CustomSchemaMockClient()
+    custom_bot = AsyncTradingBot(is_demo=False, initial_capital=10_000_000, client=custom_client, portfolio=portfolio, db=mock_db)
+
+    await custom_bot.update_watchlist(top_n=10)
+    assert len(custom_bot.watchlist) == 2, f"2개 종목이 정상 수집되어야 합니다. (실제: {len(custom_bot.watchlist)})"
+    assert "005930" in custom_bot.watchlist, "A접두사 및 _AL 접미사가 제거된 '005930'이 등록되어야 합니다."
+    assert "000660" in custom_bot.watchlist, "'000660'이 등록되어야 합니다."
+    samsung_fib = custom_bot.watchlist["005930"]
+    assert samsung_fib["period_high"] == 80000.0
+    assert samsung_fib["period_low"] == 70000.0
+    assert samsung_fib["fib_382"] == 80000.0 - (10000.0 * 0.382)
+    assert samsung_fib["fib_618"] == 80000.0 - (10000.0 * 0.618)
+    print(f"  ✅ 실전 키움 REST 스키마(trde_prica_upper, high_pric) 2종목 피보나치 분석 완벽 검증")
+
+    # 2) MOCK 모드 / 빈 응답 시 Fallback 검증
+    class EmptyMockClient(MockKiwoomClient):
+        async def get_top_trading_value(self, mrkt_tp: str = "000", limit: int = 30, priority: RequestPriority = RequestPriority.LOW):
+            return None
+
+    empty_client = EmptyMockClient()
+    mock_bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=empty_client, portfolio=portfolio, db=mock_db)
+    await mock_bot.update_watchlist(top_n=5)
+    assert len(mock_bot.watchlist) == 5, f"MOCK Fallback으로 5개 우량주가 등록되어야 합니다. (실제: {len(mock_bot.watchlist)})"
+    print(f"  ✅ MOCK Fallback 5개 우량주 자동 주입 및 피보나치 분석 완벽 검증")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -344,6 +404,7 @@ async def main():
     await test_hard_stop_loss_preemption()
     await test_trailing_stop()
     await test_market_filter_and_manual_orders()
+    await test_update_watchlist_multi_schema_and_fallback()
     print("=" * 65)
     print("🎉 Phase 2 모든 퀀트 매매 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)

@@ -179,6 +179,11 @@ class MarketDataBuffer:
         if completed_candle and self._is_running:
             self.db_queue.put_nowait(completed_candle)
 
+    def load_initial_candles(self, code: str, candle_list: List[Dict[str, Any]]):
+        """특정 종목의 초기 분봉 리스트 적재"""
+        buf = self.get_or_create(code)
+        buf.load_initial_candles(candle_list)
+
     def get_dataframe(self, code: str, limit: Optional[int] = 10) -> pd.DataFrame:
         """특정 종목의 최근 분봉 DataFrame 메모리 조회"""
         buf = self.get_or_create(code)
