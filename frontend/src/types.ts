@@ -62,3 +62,16 @@ export interface CandleData {
   close: number;
   volume?: number;
 }
+
+export interface ChartResponse {
+  code: string;
+  name: string;
+  current_price: number;
+  period_high: number;
+  period_low: number;
+  fib_382: number;
+  fib_500: number;
+  fib_618: number;
+  candles: CandleData[];
+}
+

@@ -143,6 +143,30 @@
 
 ---
 
+### Phase 6. 차세대 트레이딩 콕핏 실데이터 바인딩 및 동적 인터랙션 고도화 (Priority 6 - 진행 중)
+
+- [ ] **Task 6.1: 백엔드 실데이터 엔드포인트(`GET /api/chart/{code}`) 신설 및 DB/인메모리 연동 강화**
+  - **설명:** 키움 API 일봉/분봉 조회 및 인메모리 링버퍼/DB로부터 실제 OHLCV 캔들과 피보나치 3대 지지선(38.2%, 50.0%, 61.8%)을 반환하는 엔드포인트 구현. `/api/portfolio`, `/api/watchlist`의 DB 테이블 연동 강화로 실계좌 잔고 및 종목 정보 실시간 동기화.
+  - **수정 파일:** `api_server.py`
+  - **검증 기준:** `/api/chart/005930`, `/api/portfolio`, `/api/watchlist` 호출 시 실제 자산/종목 데이터 정확히 반환.
+
+- [ ] **Task 6.2: 프론트엔드 하드코딩 제거 및 보유/감시 종목 기반 동적 선택(Auto-Selection & Quick Select) 구현**
+  - **설명:** 하드코딩된 '005930'/'삼성전자' 기본값을 제거하고, 실제 보유종목(1순위) 또는 감시종목 최상위(2순위)를 자동 로드. 차트 헤더에 빠른 종목 전환 드롭다운/칩스 UI 추가.
+  - **수정 파일:** `frontend/src/App.tsx`, `frontend/src/components/TradingViewChartBento.tsx`, `frontend/src/components/Header.tsx`
+  - **검증 기준:** 페이지 로드 시 실제 계좌/감시 종목이 차트에 기본 렌더링되며, 클릭 또는 선택 시 즉시 전환.
+
+- [ ] **Task 6.3: TradingView Lightweight Charts 실데이터 OHLCV 및 피보나치 레벨 실시간 바인딩**
+  - **설명:** 더미 `Math.random()` 캔들 생성기를 완전 제거하고, 백엔드 `/api/chart/{code}`로부터 수신한 실제 캔들 및 피보나치 지지선, 매수평단가 라인을 60FPS 하드웨어 가속 캔버스에 정확히 렌더링.
+  - **수정 파일:** `frontend/src/components/TradingViewChartBento.tsx`, `frontend/src/hooks/useWebSocket.ts`
+  - **검증 기준:** 캔들스틱, 거래량 바, 피보나치 3대 지지선, 매수평단가 라인이 실데이터로 오버레이 렌더링.
+
+- [ ] **Task 6.4: 빌드 검증, E2E 통합 테스트 및 형상 관리(`feature/dashboard-real-data-binding`)**
+  - **설명:** Vite 프로덕션 빌드, 백엔드 테스트 스위트 검증 완료 후 전용 브랜치에 원자적 커밋 생성.
+  - **수정 파일:** `frontend/dist/`, `WORK_HISTORY.md`
+  - **검증 기준:** `npm run build` 성공 및 `pytest` 통과.
+
+---
+
 ## 📈 추진 일정 및 작업 진행 룰
 
 1. **원칙:** 선행 과제가 테스트를 완전히 통과해야만 다음 과제로 진행한다.

@@ -1,7 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createChart, ColorType, IChartApi, ISeriesApi } from 'lightweight-charts';
-import { LineChart, BarChart2, Maximize2, RefreshCw } from 'lucide-react';
-import { WatchlistItem, Position } from '../types';
+import { LineChart, BarChart2, RefreshCw, ChevronDown } from 'lucide-react';
+import { WatchlistItem, Position, ChartResponse } from '../types';
 
 interface TradingViewChartBentoProps {
   selectedStockCode: string;
@@ -9,6 +9,7 @@ interface TradingViewChartBentoProps {
   watchlist: WatchlistItem[];
   positions: Position[];
   colorMode: 'KRX' | 'GLOBAL';
+  onSelectStock?: (code: string, name?: string) => void;
 }
 
 export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
@@ -16,26 +17,52 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
   selectedStockName,
   watchlist,
   positions,
-  colorMode
+  colorMode,
+  onSelectStock
 }) => {
   const chartContainerRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<IChartApi | null>(null);
-  const [selectedStock, setSelectedStock] = useState<WatchlistItem | null>(null);
+  const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+
   const [chartPeriod, setChartPeriod] = useState<'1m' | '5m' | 'D'>('1m');
+  const [chartData, setChartData] = useState<ChartResponse | null>(null);
+  const [isLoading, setIsLoading] = useState<boolean>(false);
 
   const activePosition = positions.find(p => p.code === selectedStockCode);
   const activeWatchItem = watchlist.find(w => w.code === selectedStockCode);
 
-  useEffect(() => {
-    if (activeWatchItem) {
-      setSelectedStock(activeWatchItem);
-    }
-  }, [selectedStockCode, activeWatchItem]);
+  const effectiveName = selectedStockName || activePosition?.name || activeWatchItem?.name || chartData?.name || selectedStockCode;
+  const curPrice = chartData?.current_price || activePosition?.current_price || activeWatchItem?.current_price || 0;
 
+  // 1. 차트 실데이터 Fetch
+  const fetchChartData = useCallback(async () => {
+    if (!selectedStockCode) return;
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/api/chart/${selectedStockCode}?period=${chartPeriod}`);
+      if (res.ok) {
+        const data: ChartResponse = await res.json();
+        setChartData(data);
+      }
+    } catch (e) {
+      console.warn("Chart data fetch error:", e);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [selectedStockCode, chartPeriod]);
+
+  useEffect(() => {
+    fetchChartData();
+    const interval = setInterval(fetchChartData, 5000);
+    return () => clearInterval(interval);
+  }, [fetchChartData]);
+
+  // 2. TradingView Chart 초기화 및 캔들 바인딩
   useEffect(() => {
     if (!chartContainerRef.current) return;
 
-    // Clean up existing chart
+    // 기존 인스턴스 정리
     if (chartInstanceRef.current) {
       chartInstanceRef.current.remove();
       chartInstanceRef.current = null;
@@ -64,7 +91,7 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
       },
       timeScale: {
         borderColor: 'rgba(255, 255, 255, 0.08)',
-        timeVisible: true,
+        timeVisible: chartPeriod !== 'D',
         secondsVisible: false,
       },
       handleScroll: true,
@@ -82,52 +109,65 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
       wickUpColor: upColor,
       wickDownColor: downColor,
     });
+    candleSeriesRef.current = candleSeries;
 
     // Volume Series
     const volumeSeries = chart.addHistogramSeries({
       color: '#334155',
       priceFormat: { type: 'volume' },
-      priceScaleId: '', // Overlay on separate internal scale
+      priceScaleId: '',
     });
     volumeSeries.priceScale().applyOptions({
       scaleMargins: { top: 0.8, bottom: 0 },
     });
+    volumeSeriesRef.current = volumeSeries;
 
-    // Generate Initial Simulation/Historical Candles around current stock price
-    const curPrice = activePosition?.current_price || activeWatchItem?.current_price || 75000;
-    const periodHigh = activeWatchItem?.period_high || curPrice * 1.05;
-    const periodLow = activeWatchItem?.period_low || curPrice * 0.95;
-    const fib382 = activeWatchItem?.fib_382 || (periodHigh - (periodHigh - periodLow) * 0.382);
-    const fib500 = activeWatchItem?.fib_500 || (periodHigh - (periodHigh - periodLow) * 0.500);
-    const fib618 = activeWatchItem?.fib_618 || (periodHigh - (periodHigh - periodLow) * 0.618);
-
-    const nowSec = Math.floor(Date.now() / 1000);
-    const sampleCandles = [];
-    const sampleVolumes = [];
-    let prevClose = periodLow + (curPrice - periodLow) * 0.5;
-
-    for (let i = 50; i >= 0; i--) {
-      const time = (nowSec - i * 60) as any;
-      const change = (Math.random() - 0.48) * (curPrice * 0.004);
-      const open = prevClose;
-      const close = open + change;
-      const high = Math.max(open, close) + Math.random() * (curPrice * 0.002);
-      const low = Math.min(open, close) - Math.random() * (curPrice * 0.002);
-      const vol = Math.floor(Math.random() * 5000) + 1000;
-
-      sampleCandles.push({ time, open, high, low, close });
-      sampleVolumes.push({
-        time,
-        value: vol,
-        color: close >= open ? (colorMode === 'KRX' ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)') : (colorMode === 'KRX' ? 'rgba(59, 130, 246, 0.4)' : 'rgba(239, 68, 68, 0.4)'),
+    // 캔들 데이터 매핑
+    const rawCandles = chartData?.candles || [];
+    if (rawCandles.length > 0) {
+      const sorted = [...rawCandles].sort((a, b) => {
+        if (typeof a.time === 'number' && typeof b.time === 'number') {
+          return a.time - b.time;
+        }
+        return String(a.time).localeCompare(String(b.time));
       });
-      prevClose = close;
+
+      // 중복 timestamp 제거
+      const uniqueCandles: any[] = [];
+      const uniqueVolumes: any[] = [];
+      const seenTimes = new Set();
+
+      for (const c of sorted) {
+        if (!seenTimes.has(c.time) && c.open > 0 && c.close > 0) {
+          seenTimes.add(c.time);
+          uniqueCandles.push({
+            time: c.time,
+            open: c.open,
+            high: c.high,
+            low: c.low,
+            close: c.close
+          });
+          uniqueVolumes.push({
+            time: c.time,
+            value: c.volume || 0,
+            color: c.close >= c.open
+              ? (colorMode === 'KRX' ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)')
+              : (colorMode === 'KRX' ? 'rgba(59, 130, 246, 0.45)' : 'rgba(239, 68, 68, 0.45)'),
+          });
+        }
+      }
+
+      if (uniqueCandles.length > 0) {
+        candleSeries.setData(uniqueCandles);
+        volumeSeries.setData(uniqueVolumes);
+      }
     }
 
-    candleSeries.setData(sampleCandles);
-    volumeSeries.setData(sampleVolumes);
+    // 피보나치 3대 지지선 오버레이
+    const fib382 = chartData?.fib_382 || activeWatchItem?.fib_382 || 0;
+    const fib500 = chartData?.fib_500 || activeWatchItem?.fib_500 || 0;
+    const fib618 = chartData?.fib_618 || activeWatchItem?.fib_618 || 0;
 
-    // Add Fibonacci Lines if available
     if (fib382 > 0) {
       candleSeries.createPriceLine({
         price: fib382,
@@ -159,7 +199,7 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
       });
     }
 
-    // Add Buy Price Line if holding position
+    // 보유 포지션 매수평단가 라인 오버레이
     if (activePosition && activePosition.buy_price > 0) {
       candleSeries.createPriceLine({
         price: activePosition.buy_price,
@@ -190,13 +230,11 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
         chartInstanceRef.current = null;
       }
     };
-  }, [selectedStockCode, colorMode, activePosition, activeWatchItem]);
-
-  const curPrice = activePosition?.current_price || activeWatchItem?.current_price || 0;
+  }, [chartData, chartPeriod, colorMode, activePosition, activeWatchItem]);
 
   return (
-    <div className="bento-card p-4 flex flex-col h-full">
-      {/* Chart Top Header */}
+    <div className="flex flex-col h-full bg-slate-900/90 rounded-xl border border-white/10 p-4 backdrop-blur-md relative overflow-hidden">
+      {/* Chart Top Header & Quick Selector */}
       <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-white/5">
         <div className="flex items-center gap-3">
           <div className="p-1.5 rounded-md bg-indigo-500/10 text-indigo-400">
@@ -204,35 +242,75 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
           </div>
           <div>
             <div className="flex items-center gap-2">
-              <h2 className="text-base font-black text-white tracking-tight">
-                {selectedStockName || selectedStock?.name || '종목 선택'}
-              </h2>
-              <span className="text-xs font-mono text-slate-400 px-1.5 py-0.5 rounded bg-slate-800">
-                {selectedStockCode || '005930'}
-              </span>
+              {/* Dynamic Stock Quick Select Dropdown */}
+              <div className="relative inline-block">
+                <select
+                  value={selectedStockCode}
+                  onChange={(e) => {
+                    const targetCode = e.target.value;
+                    const found = watchlist.find(w => w.code === targetCode) || positions.find(p => p.code === targetCode);
+                    if (onSelectStock) {
+                      onSelectStock(targetCode, found?.name);
+                    }
+                  }}
+                  className="bg-slate-800 text-white font-bold text-sm sm:text-base rounded-lg px-2.5 py-1 pr-7 border border-slate-700 hover:border-slate-500 focus:outline-none focus:ring-1 focus:ring-blue-500 appearance-none cursor-pointer"
+                >
+                  {positions.length > 0 && (
+                    <optgroup label="📦 보유 포지션">
+                      {positions.map(p => (
+                        <option key={p.code} value={p.code}>
+                          {p.name} ({p.code})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {watchlist.length > 0 && (
+                    <optgroup label="📋 감시 종목 유니버스">
+                      {watchlist.map(w => (
+                        <option key={w.code} value={w.code}>
+                          {w.name} ({w.code})
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {positions.length === 0 && watchlist.length === 0 && (
+                    <option value={selectedStockCode || '005930'}>
+                      {effectiveName} ({selectedStockCode || '005930'})
+                    </option>
+                  )}
+                </select>
+                <ChevronDown className="w-3.5 h-3.5 text-slate-400 absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+              </div>
+
               {activePosition && (
                 <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-blue-500/20 text-blue-400 border border-blue-500/30">
-                  보유중 ({activePosition.qty}주)
+                  보유 ({activePosition.qty}주)
                 </span>
               )}
             </div>
           </div>
         </div>
 
-        {/* Current Price & Indicator Info */}
-        <div className="flex items-center gap-4">
+        {/* Current Price & Period Selector */}
+        <div className="flex items-center gap-3">
           <div className="text-right">
-            <div className="text-lg font-black font-mono tabular-nums text-white">
-              {curPrice > 0 ? `${Math.round(curPrice).toLocaleString()}원` : '조회 중...'}
+            <div className="text-lg font-black font-mono tabular-nums text-white flex items-center justify-end gap-1.5">
+              {curPrice > 0 ? (
+                `${Math.round(curPrice).toLocaleString()}원`
+              ) : isLoading ? (
+                <span className="text-xs text-slate-400 animate-pulse">시세 수신 중...</span>
+              ) : (
+                <span className="text-xs text-slate-400">대기 중</span>
+              )}
             </div>
-            <div className="text-[10px] text-slate-400 flex items-center gap-2">
-              <span>MA20 지지</span>
+            <div className="text-[10px] text-slate-400 flex items-center gap-1.5 justify-end">
+              <span>피보나치 3대 지지선</span>
               <span>•</span>
-              <span>피보나치 3대 레벨 오버레이</span>
+              <span>실시간 캔들</span>
             </div>
           </div>
 
-          {/* Period Selector */}
+          {/* Period Selector Tabs */}
           <div className="flex items-center rounded-lg bg-slate-800/80 p-0.5 border border-slate-700/60 text-xs">
             {(['1m', '5m', 'D'] as const).map(p => (
               <button
@@ -248,23 +326,38 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
               </button>
             ))}
           </div>
+
+          <button
+            onClick={fetchChartData}
+            title="차트 즉시 새로고침"
+            className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700/60 transition"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${isLoading ? 'animate-spin text-blue-400' : ''}`} />
+          </button>
         </div>
       </div>
 
       {/* TradingView Chart Canvas Container */}
-      <div className="flex-1 w-full min-h-[300px] mt-2 relative" ref={chartContainerRef}>
+      <div className="flex-1 w-full min-h-[290px] mt-2 relative" ref={chartContainerRef}>
         {/* Shaded Indicator Watermark */}
-        <div className="absolute top-3 left-3 pointer-events-none z-10 flex flex-wrap gap-2 text-[10px] font-mono">
+        <div className="absolute top-2 left-2 pointer-events-none z-10 flex flex-wrap gap-1.5 text-[10px] font-mono">
           <span className="text-emerald-400 bg-emerald-950/40 px-1.5 py-0.5 rounded border border-emerald-800/40">
-            Fib 38.2%: {selectedStock?.fib_382 ? Math.round(selectedStock.fib_382).toLocaleString() : '-'}
+            Fib 38.2%: {chartData?.fib_382 ? Math.round(chartData.fib_382).toLocaleString() : (activeWatchItem?.fib_382 ? Math.round(activeWatchItem.fib_382).toLocaleString() : '-')}
           </span>
           <span className="text-amber-400 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-800/40">
-            Fib 50.0%: {selectedStock?.fib_500 ? Math.round(selectedStock.fib_500).toLocaleString() : '-'}
+            Fib 50.0%: {chartData?.fib_500 ? Math.round(chartData.fib_500).toLocaleString() : (activeWatchItem?.fib_500 ? Math.round(activeWatchItem.fib_500).toLocaleString() : '-')}
           </span>
           <span className="text-rose-400 bg-rose-950/40 px-1.5 py-0.5 rounded border border-rose-800/40">
-            Fib 61.8%: {selectedStock?.fib_618 ? Math.round(selectedStock.fib_618).toLocaleString() : '-'}
+            Fib 61.8%: {chartData?.fib_618 ? Math.round(chartData.fib_618).toLocaleString() : (activeWatchItem?.fib_618 ? Math.round(activeWatchItem.fib_618).toLocaleString() : '-')}
           </span>
         </div>
+
+        {/* Empty/Loading Overlay */}
+        {(!chartData?.candles || chartData.candles.length === 0) && !isLoading && (
+          <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-xs pointer-events-none">
+            실시간 캔들 데이터 수신 대기 중...
+          </div>
+        )}
       </div>
     </div>
   );

@@ -14,8 +14,8 @@ export function App() {
   const { portfolio, logs, botStatus, isConnected, refreshData, addManualLog } = useTradingWebSocket();
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
-  const [selectedStockCode, setSelectedStockCode] = useState<string>('005930');
-  const [selectedStockName, setSelectedStockName] = useState<string>('삼성전자');
+  const [selectedStockCode, setSelectedStockCode] = useState<string>('');
+  const [selectedStockName, setSelectedStockName] = useState<string>('');
   const [colorMode, setColorMode] = useState<'KRX' | 'GLOBAL'>('KRX');
   const [isKillSwitchOpen, setIsKillSwitchOpen] = useState<boolean>(false);
   const [isParamsOpen, setIsParamsOpen] = useState<boolean>(false);
@@ -27,12 +27,18 @@ export function App() {
       const res = await fetch('/api/watchlist');
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data) && data.length > 0) {
-          setWatchlist(data);
-          if (!selectedStockCode && data[0]) {
-            setSelectedStockCode(data[0].code);
-            setSelectedStockName(data[0].name);
+        let items: WatchlistItem[] = [];
+        if (Array.isArray(data)) {
+          items = data;
+        } else if (data && data.items) {
+          if (Array.isArray(data.items)) {
+            items = data.items;
+          } else if (typeof data.items === 'object') {
+            items = Object.values(data.items);
           }
+        }
+        if (items.length > 0) {
+          setWatchlist(items);
         }
       }
     } catch (e) {
@@ -45,6 +51,19 @@ export function App() {
     const interval = setInterval(fetchWatchlist, 4000);
     return () => clearInterval(interval);
   }, []);
+
+  // 실제 보유 종목(1순위) 또는 감시 종목(2순위)으로 초기 종목 자동 선택
+  useEffect(() => {
+    if (!selectedStockCode) {
+      if (portfolio.positions && portfolio.positions.length > 0) {
+        setSelectedStockCode(portfolio.positions[0].code);
+        setSelectedStockName(portfolio.positions[0].name);
+      } else if (watchlist.length > 0) {
+        setSelectedStockCode(watchlist[0].code);
+        setSelectedStockName(watchlist[0].name);
+      }
+    }
+  }, [portfolio.positions, watchlist, selectedStockCode]);
 
   const handleSelectStock = (code: string, name?: string) => {
     setSelectedStockCode(code);
@@ -107,6 +126,7 @@ export function App() {
                 watchlist={watchlist}
                 positions={portfolio.positions}
                 colorMode={colorMode}
+                onSelectStock={handleSelectStock}
               />
             </div>
 

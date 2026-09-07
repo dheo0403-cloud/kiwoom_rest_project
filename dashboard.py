@@ -56,7 +56,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-API_BASE_URL = os.getenv("API_SERVER_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_SERVER_URL", "http://localhost:8501")
 
 
 def get_connection():

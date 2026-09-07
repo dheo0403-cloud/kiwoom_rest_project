@@ -25,22 +25,22 @@ signal.signal(signal.SIGTERM, sig_handler)
 
 
 def run_api_server():
-    """FastAPI 킬스위치 및 WebSocket 제어 서버 실행 (Port: 8000)"""
-    print("🌐 [API Server] FastAPI 백엔드를 시작합니다... (Port: 8000)", flush=True)
+    """FastAPI 킬스위치 및 WebSocket 제어 서버 + 차세대 콕핏 (Port: 8501, Ingress 메인 타겟)"""
+    print("🌐 [API Server] FastAPI 백엔드 및 차세대 벤토 그리드 콕핏을 시작합니다... (Port: 8501)", flush=True)
     return subprocess.Popen([
         sys.executable, "-m", "uvicorn", "api_server:app",
         "--host", "0.0.0.0",
-        "--port", "8000",
+        "--port", "8501",
         "--log-level", "warning"
     ])
 
 
 def run_dashboard():
-    """스트림릿 대시보드 실행 (Port: 8501, Ingress /kiwoom 경로 연동)"""
-    print("📈 [Dashboard] 스트림릿 대시보드를 시작합니다... (Port: 8501, BasePath: /kiwoom)", flush=True)
+    """[레거시] 스트림릿 대시보드 실행 (Port: 8000, BasePath: /kiwoom)"""
+    print("📈 [Dashboard] [레거시] 스트림릿 대시보드를 시작합니다... (Port: 8000, BasePath: /kiwoom)", flush=True)
     return subprocess.Popen([
         sys.executable, "-m", "streamlit", "run", "dashboard.py",
-        "--server.port", "8501",
+        "--server.port", "8000",
         "--server.address", "0.0.0.0",
         "--server.headless", "true",
         "--server.baseUrlPath", "/kiwoom"
@@ -80,8 +80,8 @@ if __name__ == "__main__":
 
     print("\n" + "="*60)
     print("🎉 키움 퀀트 24/365 무중단 자동매매 시스템이 가동되었습니다.")
-    print("• 🚀 [신규] 차세대 벤토 그리드 콕핏: http://[서버IP]:8000")
-    print("• 📈 [레거시] 스트림릿 대시보드: http://[서버IP]:8501/kiwoom")
+    print("• 🚀 [메인] 차세대 벤토 그리드 콕핏: http://[서버IP]:8501 (또는 /kiwoom)")
+    print("• 📈 [레거시] 스트림릿 대시보드: http://[서버IP]:8000/kiwoom")
     print(f"• 운영 모드: {'실전투자 (REAL)' if is_real else '모의투자 (MOCK)'}")
     print("="*60 + "\n", flush=True)
 

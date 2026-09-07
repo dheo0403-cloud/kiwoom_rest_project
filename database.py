@@ -341,6 +341,65 @@ class DatabaseManager:
         except Exception as e:
             pass
 
+    async def get_latest_balance(self):
+        """최신 계좌 잔고 조회 (총평가자산, 예수금, 누적손익 등)"""
+        if not self.pool: return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT * FROM balance ORDER BY date DESC LIMIT 1")
+                    row = await cursor.fetchone()
+                    return dict(row) if row else None
+        except Exception as e:
+            print(f"DB Balance 조회 에러: {e}")
+            return None
+
+    async def get_portfolio_positions(self):
+        """현재 DB에 저장된 보유 포지션 목록 조회"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT * FROM portfolio")
+                    rows = await cursor.fetchall()
+                    return [dict(r) for r in rows] if rows else []
+        except Exception as e:
+            print(f"DB Portfolio 조회 에러: {e}")
+            return []
+
+    async def get_watchlist_items(self):
+        """현재 DB에 저장된 감시 종목 목록 조회"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT * FROM watchlist ORDER BY current_price DESC")
+                    rows = await cursor.fetchall()
+                    return [dict(r) for r in rows] if rows else []
+        except Exception as e:
+            print(f"DB Watchlist 조회 에러: {e}")
+            return []
+
+    async def get_candles_by_code(self, code: str, period: str = '1m', limit: int = 60):
+        """특정 종목의 최근 분봉/일봉 캔들 조회"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    if period == 'D':
+                        sql = "SELECT date as datetime, open, high, low, close, volume FROM daily_ohlcv WHERE code = %s ORDER BY date DESC LIMIT %s"
+                    else:
+                        sql = "SELECT datetime, open, high, low, close, volume FROM minute_ohlcv WHERE code = %s ORDER BY datetime DESC LIMIT %s"
+                    await cursor.execute(sql, (code, limit))
+                    rows = await cursor.fetchall()
+                    if not rows: return []
+                    rows = list(reversed(rows))
+                    return [dict(r) for r in rows]
+        except Exception as e:
+            print(f"DB Candle 조회 에러 ({code}): {e}")
+            return []
+
+
     # ================= 동기 버전 (Dashboard 용) =================
     def add_manual_order_sync(self, code, side, qty):
         """(동기) 대시보드에서 수동 주문 접수"""

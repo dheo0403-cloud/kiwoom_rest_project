@@ -8,6 +8,8 @@ Gate Info:
 import asyncio
 import json
 import os
+import time
+from datetime import datetime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
@@ -201,21 +203,269 @@ async def get_bot_status():
 
 @app.get("/api/portfolio")
 async def get_portfolio():
-    """현재 포트폴리오 및 자산 스냅샷 조회"""
-    if not ctx.portfolio:
-        raise HTTPException(status_code=503, detail="포트폴리오 관리자가 초기화되지 않았습니다.")
-    snapshot = await ctx.portfolio.get_snapshot()
+    """현재 포트폴리오 및 자산 스냅샷 조회 (인메모리 + DB 폴백)"""
+    snapshot = None
+    if ctx.portfolio:
+        try:
+            snapshot = await ctx.portfolio.get_snapshot()
+        except Exception:
+            snapshot = None
+
+    if snapshot is None:
+        snapshot = {
+            "total_asset": 0.0,
+            "current_capital": 0.0,
+            "invested_capital": 0.0,
+            "stock_count": 0,
+            "unrealized_pnl": 0.0,
+            "total_yield_rate": 0.0,
+            "positions": []
+        }
+
+    # DB에 저장된 최신 잔고 및 포지션으로 보완 (인메모리가 비어있거나 데몬 재시작 시)
+    if ctx.db:
+        try:
+            db_bal = await ctx.db.get_latest_balance()
+            if db_bal:
+                snapshot["total_asset"] = float(db_bal.get('total_asset') or snapshot["total_asset"])
+                snapshot["current_capital"] = float(db_bal.get('deposit') or snapshot["current_capital"])
+                snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss') or snapshot["unrealized_pnl"])
+                snapshot["total_yield_rate"] = float(db_bal.get('yield') or snapshot["total_yield_rate"])
+
+            if not snapshot.get("positions"):
+                db_pos = await ctx.db.get_portfolio_positions()
+                if db_pos:
+                    formatted_pos = []
+                    invested = 0.0
+                    for p in db_pos:
+                        qty = int(p.get('qty', 0))
+                        buy_p = float(p.get('buy_price', 0))
+                        cur_p = float(p.get('current_price') or buy_p)
+                        pnl = (cur_p - buy_p) * qty
+                        y_rate = ((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0
+                        invested += buy_p * qty
+                        formatted_pos.append({
+                            "code": p.get('code', ''),
+                            "name": p.get('name', p.get('code', '')),
+                            "qty": qty,
+                            "buy_price": buy_p,
+                            "current_price": cur_p,
+                            "highest_price": cur_p,
+                            "sell_stage": 1,
+                            "pnl": pnl,
+                            "yield_rate": round(y_rate, 2)
+                        })
+                    snapshot["positions"] = formatted_pos
+                    snapshot["stock_count"] = len(formatted_pos)
+                    if invested > 0:
+                        snapshot["invested_capital"] = invested
+        except Exception as e:
+            print(f"Portfolio DB sync error: {e}")
+
     return snapshot
+
 
 @app.get("/api/watchlist")
 async def get_watchlist():
-    """감시 종목 목록 및 피보나치 레벨 조회"""
-    if not ctx.bot:
-        raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
+    """감시 종목 목록 및 피보나치 레벨 조회 (인메모리 + DB 폴백)"""
+    items_dict = {}
+    if ctx.bot and ctx.bot.watchlist:
+        if isinstance(ctx.bot.watchlist, dict):
+            items_dict = ctx.bot.watchlist
+        elif isinstance(ctx.bot.watchlist, list):
+            items_dict = {item.get('code', str(idx)): item for idx, item in enumerate(ctx.bot.watchlist)}
+
+    if not items_dict and ctx.db:
+        try:
+            if hasattr(ctx.db, 'get_watchlist_items'):
+                db_items = await ctx.db.get_watchlist_items()
+                for r in db_items:
+                    code = r.get('code', '')
+                    cur_p = float(r.get('current_price', 0))
+                    p_high = float(r.get('period_high') or (cur_p * 1.05 if cur_p > 0 else 0))
+                    p_low = float(r.get('period_low') or (cur_p * 0.95 if cur_p > 0 else 0))
+                    diff = p_high - p_low
+                    items_dict[code] = {
+                        "code": code,
+                        "name": r.get('name') or code,
+                        "current_price": cur_p,
+                        "volume": int(r.get('avg_volume', 0)),
+                        "period_high": p_high,
+                        "period_low": p_low,
+                        "fib_382": float(r.get('fib_382') or (p_high - diff * 0.382 if diff > 0 else cur_p)),
+                        "fib_500": float(r.get('fib_500') or (p_high - diff * 0.500 if diff > 0 else cur_p)),
+                        "fib_618": float(r.get('fib_618') or (p_high - diff * 0.618 if diff > 0 else cur_p)),
+                        "status": r.get('status', 'WATCHING'),
+                        "updated_at": str(r.get('updated_at', ''))
+                    }
+        except Exception as e:
+            print(f"Watchlist DB fetch error: {e}")
+
     return {
-        "count": len(ctx.bot.watchlist),
-        "items": ctx.bot.watchlist
+        "count": len(items_dict),
+        "items": items_dict
     }
+
+
+@app.get("/api/chart/{code}")
+async def get_stock_chart_data(code: str, period: str = "1m"):
+    """
+    특정 종목의 실시간 OHLCV 캔들 및 피보나치 레벨 조회
+    - 우선순위: 1) 인메모리 링버퍼 -> 2) DB minute/daily_ohlcv -> 3) 키움 REST API
+    """
+    clean_code = code.replace('A', '').split('_')[0].strip()
+    candles = []
+    stock_name = clean_code
+    current_price = 0.0
+    period_high = 0.0
+    period_low = 0.0
+    fib_382 = 0.0
+    fib_500 = 0.0
+    fib_618 = 0.0
+
+    # 1. 감시종목 / 포지션에서 메타데이터 추출
+    if ctx.bot and ctx.bot.watchlist and isinstance(ctx.bot.watchlist, dict) and clean_code in ctx.bot.watchlist:
+        w_item = ctx.bot.watchlist[clean_code]
+        stock_name = w_item.get('name', clean_code)
+        current_price = float(w_item.get('current_price', 0))
+        period_high = float(w_item.get('period_high', 0))
+        period_low = float(w_item.get('period_low', 0))
+        fib_382 = float(w_item.get('fib_382', 0))
+        fib_500 = float(w_item.get('fib_500', 0))
+        fib_618 = float(w_item.get('fib_618', 0))
+    elif ctx.portfolio:
+        pos = ctx.portfolio.positions.get(clean_code)
+        if pos:
+            stock_name = pos.name
+            current_price = float(pos.current_price or pos.buy_price)
+
+    # 2. 인메모리 링버퍼에서 분봉 조회 (1m/5m)
+    if period != 'D' and ctx.bot and hasattr(ctx.bot, 'buffer') and ctx.bot.buffer:
+        try:
+            df = ctx.bot.buffer.get_dataframe(clean_code, limit=60)
+            if not df.empty:
+                for row in df.itertuples():
+                    dt_val = str(getattr(row, 'datetime', ''))
+                    try:
+                        t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:%S').timestamp())
+                    except Exception:
+                        try:
+                            t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:00').timestamp())
+                        except Exception:
+                            t_sec = int(time.time())
+                    candles.append({
+                        "time": t_sec,
+                        "open": float(getattr(row, 'open', 0)),
+                        "high": float(getattr(row, 'high', 0)),
+                        "low": float(getattr(row, 'low', 0)),
+                        "close": float(getattr(row, 'close', 0)),
+                        "volume": float(getattr(row, 'volume', 0))
+                    })
+                if current_price <= 0 and candles:
+                    current_price = candles[-1]["close"]
+        except Exception as e:
+            print(f"RingBuffer query error: {e}")
+
+    # 3. DB 조회 (링버퍼 데이터가 부족할 때)
+    if len(candles) < 5 and ctx.db and hasattr(ctx.db, 'get_candles_by_code'):
+        try:
+            db_candles = await ctx.db.get_candles_by_code(clean_code, period=period, limit=60)
+            if db_candles:
+                candles = []
+                for c in db_candles:
+                    dt_str = str(c.get('datetime', ''))
+                    if period == 'D':
+                        t_val = dt_str[:10]
+                    else:
+                        try:
+                            t_sec = int(datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S').timestamp())
+                        except Exception:
+                            t_sec = int(time.time())
+                        t_val = t_sec
+                    candles.append({
+                        "time": t_val,
+                        "open": float(c.get('open', 0)),
+                        "high": float(c.get('high', 0)),
+                        "low": float(c.get('low', 0)),
+                        "close": float(c.get('close', 0)),
+                        "volume": float(c.get('volume', 0))
+                    })
+                if current_price <= 0 and candles:
+                    current_price = candles[-1]["close"]
+        except Exception as e:
+            print(f"DB candle fetch error: {e}")
+
+    # 4. 키움 API 실시간 조회 (DB/버퍼 모두 없을 때)
+    if len(candles) < 5 and ctx.client:
+        today_str = datetime.now().strftime('%Y%m%d')
+        if period == 'D':
+            chart_res = await ctx.client.get_daily_chart(clean_code, base_dt=today_str, priority=RequestPriority.LOW)
+            if chart_res and isinstance(chart_res, dict):
+                items = chart_res.get('stk_dt_pole_chart_qry') or chart_res.get('output2') or chart_res.get('output') or []
+                for item in reversed(items[:60]):
+                    d_str = str(item.get('stck_bsop_date') or item.get('date') or '')
+                    if len(d_str) == 8:
+                        d_fmt = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
+                    else:
+                        d_fmt = d_str
+                    candles.append({
+                        "time": d_fmt,
+                        "open": abs(float(str(item.get('open_pric') or item.get('oprc') or 0).replace(',', ''))),
+                        "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
+                        "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
+                        "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
+                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                    })
+        else:
+            minute_res, _ = await ctx.client.get_minute_chart(clean_code, base_dt=today_str, priority=RequestPriority.LOW)
+            if minute_res and isinstance(minute_res, dict):
+                items = minute_res.get('stk_dt_pole_chart_qry') or minute_res.get('output2') or minute_res.get('output') or []
+                for item in reversed(items[:60]):
+                    dt_str = str(item.get('cntg_tm') or item.get('time') or item.get('stck_cntg_hour') or '')
+                    if len(dt_str) == 6:
+                        t_str = f"{today_str[:4]}-{today_str[4:6]}-{today_str[6:]} {dt_str[:2]}:{dt_str[2:4]}:{dt_str[4:6]}"
+                        try:
+                            t_sec = int(datetime.strptime(t_str, '%Y-%m-%d %H:%M:%S').timestamp())
+                        except Exception:
+                            t_sec = int(time.time())
+                    else:
+                        t_sec = int(time.time())
+                    candles.append({
+                        "time": t_sec,
+                        "open": abs(float(str(item.get('open_pric') or item.get('oprc') or 0).replace(',', ''))),
+                        "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
+                        "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
+                        "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
+                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                    })
+
+    # 5. 캔들 기반 피보나치 및 가격 보정
+    if candles:
+        if current_price <= 0:
+            current_price = candles[-1]["close"]
+        highs = [c["high"] for c in candles if c["high"] > 0]
+        lows = [c["low"] for c in candles if c["low"] > 0]
+        if highs and lows:
+            if period_high <= 0: period_high = max(highs)
+            if period_low <= 0: period_low = min(lows)
+            diff = period_high - period_low
+            if diff > 0:
+                if fib_382 <= 0: fib_382 = period_high - (diff * 0.382)
+                if fib_500 <= 0: fib_500 = period_high - (diff * 0.500)
+                if fib_618 <= 0: fib_618 = period_high - (diff * 0.618)
+
+    return {
+        "code": clean_code,
+        "name": stock_name,
+        "current_price": current_price,
+        "period_high": period_high,
+        "period_low": period_low,
+        "fib_382": fib_382,
+        "fib_500": fib_500,
+        "fib_618": fib_618,
+        "candles": candles
+    }
+
 
 @app.post("/api/order/manual")
 async def create_manual_order(req: ManualOrderRequest):
@@ -387,4 +637,6 @@ async def ws_logs_endpoint(websocket: WebSocket):
 # ================= 정적 프론트엔드 서빙 (React Bento Grid Cockpit) =================
 frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 if os.path.exists(frontend_dist):
+    app.mount("/kiwoom", StaticFiles(directory=frontend_dist, html=True), name="frontend_kiwoom")
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+

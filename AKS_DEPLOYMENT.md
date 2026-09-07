@@ -10,13 +10,14 @@
 
 > ⚠️ **보안 주의**: 로컬의 `.env` 파일은 컨테이너에 포함되지 않아야 합니다. DB 및 증권사 키는 AKS의 `Secret`(`kiwoom-credentials`, `db-credentials`)에서 환경 변수로 자동 주입됩니다.
 
-### ✅ 필수 업로드 파일 목록 (총 17개 파일)
+### ✅ 필수 업로드 파일 및 디렉터리 목록
 
-| 구분 | 파일명 | 역할 및 설명 |
+| 구분 | 파일/디렉터리명 | 역할 및 설명 |
 | :--- | :--- | :--- |
-| **빌드/설정** | `Dockerfile` | Multi-stage 경량화 빌드 및 KST 타임존 설정 |
-| | `.dockerignore` | 불필요한 캐시 및 테스트 파일 빌드 제외 설정 |
+| **빌드/설정** | `Dockerfile` | Multi-stage (Node.js 20 + Python 3.11) 컨테이너 빌드 설정 |
+| | `.dockerignore` | 불필요한 캐시, node_modules, 테스트 파일 빌드 제외 설정 |
 | | `requirements.txt` | 런타임 의존 패키지 목록 (FastAPI, Streamlit, Pandas 등) |
+| **차세대 프론트엔드**| `frontend/` | React 18 + Vite + TradingView 캔들 + 벤토 그리드 소스코드 (`src/`, `package.json` 등 포함, `node_modules` 제외) |
 | **통합 실행기** | `start.py` | 24/365 슈퍼바이저: 봇 데몬 + FastAPI(8000) + Streamlit(8501) 자가치유 관리 |
 | **코어 엔진** | `main_rest_async.py` | 비동기 퀀트 트레이딩 봇 데몬 (장 마감 시 익일 08:55까지 자동 휴면) |
 | | `async_kiwoom_client.py` | 키움 REST API 비동기 클라이언트 (토큰 버킷 & 서킷 브레이커) |
@@ -28,11 +29,12 @@
 | | `database.py` | MariaDB 커넥션 풀 및 배치 인서트 매니저 |
 | | `data_collector.py` | 당일 거래대금 상위 유니버스 수집기 |
 | **알림 및 관제** | `notifier.py` | 카카오톡 '나에게 보내기' 실시간 알림 엔진 (토큰 자동 갱신) |
-| | `api_server.py` | FastAPI 비상 킬스위치(`POST /api/bot/emergency-stop`) & WebSocket |
-| | `dashboard.py` | 킬스위치 버튼 & 실시간 알림 센터(Notification Center) 대시보드 |
+| | `api_server.py` | FastAPI 비상 킬스위치 & WebSocket + 차세대 콕핏 정적 서빙 |
+| | `dashboard.py` | [레거시] 스트림릿 대시보드 |
 | **분석 도구** | `backtest.py` | 슬리피지/세금(0.21%) 반영 고충실도 백테스터 & WFO 최적화 |
 
 ### ❌ 업로드 제외 대상 (업로드하지 않아도 되는 파일)
+- `frontend/node_modules/` (Dockerfile 빌드 시 자동 설치됨)
 - `legacy/` 디렉터리 (구버전 동기식 파일)
 - `test_*.py` 파일 (로컬 단위 테스트 파일)
 - `.git/`, `__pycache__/`, `.env`, `*.log`

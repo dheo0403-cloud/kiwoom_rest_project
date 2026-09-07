@@ -144,8 +144,18 @@ def test_api_server_endpoints():
         assert pong == "pong"
     print("  ✅ WebSocket 로그 스트리밍 연결 및 Ping-Pong 정상 응답")
 
+    # 12. 실시간 차트 & 피보나치 조회 (/api/chart/{code})
+    print("▶ [Test 11] /api/chart/{code} 실시간 캔들 및 피보나치 레벨 조회 검증...")
+    chart_res = client.get("/api/chart/000660?period=1m")
+    assert chart_res.status_code == 200
+    chart_data = chart_res.json()
+    assert chart_data["code"] == "000660"
+    assert chart_data["name"] == "SK하이닉스"
+    assert chart_data["fib_382"] == 150000.0
+    print(f"  ✅ /api/chart/000660 정상 응답 (종목명: {chart_data['name']}, Fib 38.2%: {chart_data['fib_382']})")
+
     print("=" * 65)
-    print("🎉 Phase 4 FastAPI, 킬스위치 & WebSocket 모든 테스트 100% 통과 완료!")
+    print("🎉 Phase 4 FastAPI, 킬스위치, WebSocket & 실시간 차트 모든 테스트 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":
