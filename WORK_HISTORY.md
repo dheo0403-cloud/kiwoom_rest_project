@@ -2,23 +2,6 @@
 
 ---
 
-## 📅 [2026-09-07] 세션 시작 시 사용자 입력 없는 상태에서의 자동 상태 브리핑 제어 흐름 최적화
-
-### 1. 작업 개요 및 목적
-- 세션 시작(SessionStart) 시 사용자의 키보드 입력(Enter/프롬프트 전송) 없이도 즉시 직전 작업 상태와 코드 변경 내역 브리핑 배너가 화면에 0초 지연으로 출력되도록 제어 흐름(Control Flow) 버그 수정 및 최적화.
-- Windows 콘솔 직접 쓰기(`//./CONOUT$`) 및 Git 탐색 고속화로 CLI 입력 대기 루프 전 즉각적인 브리핑 표출 완성.
-
-### 2. 주요 수정 파일 및 변경 내역
-- `.claude/scripts/session-start-briefing.js`:
-  - `renderConsoleBanner`: Windows `//./CONOUT$` 및 Unix `/dev/tty` 직접 디바이스 쓰기로 CLI 파이프 버퍼링 우회
-  - `getRecentGitCommitInfo`: `.git` 존재하는 프로젝트만 필터링하여 동기 호출 오버헤드 최소화 (<20ms)
-- `GSD_MASTERPLAN.md`: Phase 8 세션 시작 브리핑 제어 흐름 및 TTY 렌더링 최적화 계획 추가 및 완료 반영
-
-### 3. 검증 결과
-- `node .claude/scripts/session-start-briefing.js` 실행 시 사용자 입력 없이도 화면에 ANSI 브리핑 배너 즉각 렌더링 및 `additionalContext` 정상 주입 확인.
-
----
-
 ## 📅 [2026-09-07] 장 마감/유휴 상태 계좌 잔고 및 포지션 영속 캐싱 보존 (0원 노출 방지)
 
 ### 1. 작업 개요 및 목적

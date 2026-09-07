@@ -191,25 +191,6 @@
 
 ---
 
-### Phase 8. 세션 시작 브리핑 자동 출력 제어 흐름 및 TTY 즉시 렌더링 최적화 (Priority 8 - 완료)
-
-- [x] **Task 8.1: SessionStart 훅 스크립트(`session-start-briefing.js`) 콘솔 디바이스 직접 쓰기(Direct CONOUT$) 적용**
-  - **설명:** CLI 에이전트 시작 시 사용자 입력 대기(REPL/input) 루프 진입 전 화면에 브리핑 배너가 즉각 출력되도록 Windows `//./CONOUT$` 및 Unix `/dev/tty` 직접 디바이스 쓰기 구현. 파이프 버퍼링 및 화면 지워짐 방지.
-  - **수정 파일:** `.claude/scripts/session-start-briefing.js`
-  - **검증 기준:** 키보드 입력 없이도 세션 기동 즉시 콘솔에 ANSI 브리핑 배너 0초 즉각 렌더링.
-
-- [x] **Task 8.2: Git 정보 수집 로직 비차단(Non-blocking) 및 오버헤드 최소화**
-  - **설명:** `.git` 디렉터리가 실제로 존재하는 서브프로젝트만 필터링하고 타임아웃을 1000ms로 단축하여 시작 딜레이 제로화.
-  - **수정 파일:** `.claude/scripts/session-start-briefing.js`
-  - **검증 기준:** 훅 스크립트 실행 시간 50ms 이내 초고속 완료.
-
-- [x] **Task 8.3: 로컬 테스트 및 Git 형상 관리 (`fix/auto-briefing-on-startup`)**
-  - **설명:** 스크립트 단독 및 통합 실행 검증 후 `fix/auto-briefing-on-startup` 브랜치에 커밋.
-  - **수정 파일:** `.claude/scripts/session-start-briefing.js`, `GSD_MASTERPLAN.md`, `WORK_HISTORY.md`
-  - **검증 기준:** 노드 단독 실행 배너 정상 출력 및 git 커밋 완료.
-
----
-
 ## 📈 추진 일정 및 작업 진행 룰
 
 1. **원칙:** 선행 과제가 테스트를 완전히 통과해야만 다음 과제로 진행한다.
