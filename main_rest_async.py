@@ -58,6 +58,7 @@ class AsyncTradingBot:
         self.is_running = False
 
         # 감시 종목 리스트 (코드, 이름, 피보나치 레벨 정보)
+        self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
         self.watchlist: Dict[str, Dict[str, Any]] = {}
 
         # 분할 익절 단계 목표치
@@ -168,9 +169,10 @@ class AsyncTradingBot:
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
         print(f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목")
 
-    async def update_watchlist(self, top_n: int = 10):
-        """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (LOW 우선순위)"""
-        print(f"🔍 [Watchlist] 거래대금 상위 {top_n}종목 스캔 및 피보나치 분석 시작...")
+    async def update_watchlist(self, top_n: Optional[int] = None):
+        """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (기본 30종목, LOW 우선순위)"""
+        target_top_n = top_n if top_n is not None else self.watchlist_size
+        print(f"🔍 [Watchlist] 거래대금 상위 {target_top_n}종목 스캔 및 피보나치 분석 시작...")
         top_data = await self.client.get_top_trading_value(priority=RequestPriority.LOW)
 
         # 1. API 응답 추출 (Kiwoom OpenAPI REST 다중 스키마 키 100% 대응)
@@ -197,13 +199,28 @@ class AsyncTradingBot:
         # 2. API 미응답 또는 빈 리스트 시 Fallback (MOCK 모드 또는 비상 상황)
         if raw_count == 0:
             if getattr(self, 'is_demo', False) or getattr(self.client, 'mode', '') == 'MOCK':
-                print("  ⚠️ [Watchlist Fallback] 모의투자/장외시간 거래대금 상위 미제공 -> 기본 우량주 5종목 자동 주입")
+                print("  ⚠️ [Watchlist Fallback] 모의투자/장외시간 거래대금 상위 미제공 -> 코스피/코스닥 대표 주도주 20종목 자동 주입")
                 items = [
                     {'stk_cd': '005930', 'stk_nm': '삼성전자'},
                     {'stk_cd': '000660', 'stk_nm': 'SK하이닉스'},
+                    {'stk_cd': '373220', 'stk_nm': 'LG에너지솔루션'},
+                    {'stk_cd': '207940', 'stk_nm': '삼성바이오로직스'},
+                    {'stk_cd': '005380', 'stk_nm': '현대차'},
+                    {'stk_cd': '000270', 'stk_nm': '기아'},
+                    {'stk_cd': '068270', 'stk_nm': '셀트리온'},
+                    {'stk_cd': '105560', 'stk_nm': 'KB금융'},
                     {'stk_cd': '035420', 'stk_nm': 'NAVER'},
                     {'stk_cd': '035720', 'stk_nm': '카카오'},
-                    {'stk_cd': '005380', 'stk_nm': '현대차'},
+                    {'stk_cd': '005490', 'stk_nm': 'POSCO홀딩스'},
+                    {'stk_cd': '055550', 'stk_nm': '신한지주'},
+                    {'stk_cd': '028260', 'stk_nm': '삼성물산'},
+                    {'stk_cd': '012330', 'stk_nm': '현대모비스'},
+                    {'stk_cd': '247540', 'stk_nm': '에코프로비엠'},
+                    {'stk_cd': '086520', 'stk_nm': '에코프로'},
+                    {'stk_cd': '196170', 'stk_nm': '알테오젠'},
+                    {'stk_cd': '000100', 'stk_nm': '유한양행'},
+                    {'stk_cd': '003670', 'stk_nm': '포스코퓨처엠'},
+                    {'stk_cd': '010130', 'stk_nm': '고려아연'}
                 ]
                 raw_count = len(items)
             else:
@@ -223,9 +240,9 @@ class AsyncTradingBot:
             'analysis_error': 0
         }
 
-        # 상위 top_n개 유효 종목을 채울 때까지 순회 (원본 items 전체 대상)
+        # 상위 target_top_n개 유효 종목을 채울 때까지 순회 (원본 items 전체 대상)
         for item in items:
-            if len(new_watchlist) >= top_n:
+            if len(new_watchlist) >= target_top_n:
                 break
 
             if not isinstance(item, dict):
