@@ -125,9 +125,9 @@ class AsyncKiwoomClient:
             self.account = os.getenv("KIWOOM_REAL_ACCOUNT")
             self.password = os.getenv("KIWOOM_REAL_PASSWORD")
             self.mode = "REAL"
-            default_tps = 4.5  # 실전은 초당 5건 한도 내 안전하게 4.5 TPS
+            default_tps = 3.5  # 실전은 키움 게이트웨이 초당 5건 한도 대비 안전하게 3.5 TPS
 
-        self.rate_limiter = TokenBucketRateLimiter(rate=max_tps or default_tps)
+        self.rate_limiter = TokenBucketRateLimiter(rate=max_tps or default_tps, capacity=2.0)
         self.circuit_breaker = CircuitBreaker()
         self.queue: asyncio.PriorityQueue[QueuedRequest] = asyncio.PriorityQueue()
         self.access_token: Optional[str] = None

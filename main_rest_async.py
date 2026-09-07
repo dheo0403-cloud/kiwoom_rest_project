@@ -244,6 +244,9 @@ class AsyncTradingBot:
 
             name = item.get('stk_nm') or item.get('name') or item.get('hts_kor_isnm') or code
 
+            # 키움 API 초당 호출량 분산을 위한 미세 비동기 딜레이
+            await asyncio.sleep(0.08)
+
             # 일봉 차트 조회하여 최근 20일 고가/저가 및 피보나치 레벨 산출
             daily_chart = await self.client.get_daily_chart(code, base_dt=today_str, priority=RequestPriority.LOW)
             if not daily_chart:
