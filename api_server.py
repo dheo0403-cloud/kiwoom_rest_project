@@ -271,8 +271,17 @@ async def get_bot_status():
         raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
 
     circuit_open = False
-    if ctx.client and hasattr(ctx.client, 'circuit_breaker') and ctx.client.circuit_breaker:
-        circuit_open = ctx.client.circuit_breaker.is_open()
+    try:
+        if ctx.client and hasattr(ctx.client, 'circuit_breaker') and ctx.client.circuit_breaker:
+            cb = ctx.client.circuit_breaker
+            if hasattr(cb, 'state'):
+                circuit_open = (cb.state == "OPEN")
+            elif hasattr(cb, 'is_open'):
+                circuit_open = cb.is_open() if callable(cb.is_open) else bool(cb.is_open)
+            elif hasattr(cb, 'can_proceed'):
+                circuit_open = not cb.can_proceed()
+    except Exception:
+        circuit_open = False
 
     return {
         "running": ctx.bot.running,

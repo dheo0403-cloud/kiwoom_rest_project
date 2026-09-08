@@ -41,14 +41,26 @@ def test_api_server_endpoints():
     assert data["mode"] == "DEMO"
     print("  ✅ /api/health 정상 응답")
 
-    # 3. 봇 상태 조회 (/api/status)
-    print("▶ [Test 2] /api/status 봇 상태 조회 검증...")
+    # 3. 봇 상태 조회 (/api/status 및 CircuitBreaker 상태 확인)
+    print("▶ [Test 2] /api/status 봇 상태 조회 및 서킷 브레이커 상태 연동 검증...")
+    from async_kiwoom_client import CircuitBreaker
+    mock_client.circuit_breaker = CircuitBreaker()
     res = client.get("/api/status")
     assert res.status_code == 200
     data = res.json()
     assert data["running"] is False
     assert data["market_filter_passed"] is True
-    print("  ✅ /api/status 정상 응답")
+    assert data["circuit_breaker_open"] is False, "초기 CLOSED 상태에서는 circuit_breaker_open이 False여야 합니다."
+
+    # 서킷 브레이커 OPEN 상태 시뮬레이션
+    mock_client.circuit_breaker.record_failure(is_rate_limit=True)
+    assert mock_client.circuit_breaker.is_open is True
+    res_open = client.get("/api/status")
+    assert res_open.status_code == 200
+    assert res_open.json()["circuit_breaker_open"] is True, "OPEN 상태에서는 circuit_breaker_open이 True여야 합니다."
+    # 복구
+    mock_client.circuit_breaker.record_success()
+    print("  ✅ /api/status 정상 응답 및 서킷 브레이커(CLOSED/OPEN) 상태 완벽 연동")
 
     # 4. 포트폴리오 스냅샷 조회 (/api/portfolio)
     print("▶ [Test 3] /api/portfolio 포트폴리오 스냅샷 조회 검증...")

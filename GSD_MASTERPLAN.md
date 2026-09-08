@@ -191,7 +191,7 @@
 
 ---
 
-### Phase 8. 실시간 매매 실행 파이프라인 심층 디버깅 및 매수 판단 가시화 (Priority 8 - 신규)
+### Phase 8. 실시간 매매 실행 파이프라인 심층 디버깅 및 매수 판단 가시화 (Priority 8 - 완료)
 
 - [x] **Task 8.1: 실시간 가격 수신 및 감시종목 지표 메타데이터 보강 (`main_rest_async.py`, `strategy.py`)**
   - **설명:** 감시종목 갱신 시 `avg_volume`, `period_high`, `period_low`, `fib_382`, `fib_500`, `fib_618`를 전략 지표 딕셔너리(`ind`)에 정확히 주입하고, 시가 추출 키(`oprc`, `stck_oprc`, `open_pric`, `open`) 다중화 지원.
@@ -215,6 +215,25 @@
   - **설명:** `test_async_trading_loop.py`에 상세 디버그 로깅 및 소액 예수금 매수 시뮬레이션 테스트를 추가하고 통과 확인 후 커밋.
   - **수정 파일:** `test_async_trading_loop.py`, `WORK_HISTORY.md`
   - **검증 기준:** 모든 단위 테스트 100% PASS.
+
+---
+
+### Phase 9. 서킷 브레이커 is_open AttributeError 해결 및 상태 조회 방어 로직 강화 (Priority 9 - 진행 중)
+
+- [x] **Task 9.1: CircuitBreaker 클래스에 `is_open` 프로퍼티 및 헬퍼 메서드 추가 (`async_kiwoom_client.py`)**
+  - **설명:** `CircuitBreaker` 객체에 `state == "OPEN"`을 반환하는 `@property is_open`을 추가하여 호출 규격을 일원화.
+  - **수정 파일:** `async_kiwoom_client.py`
+  - **검증 기준:** `cb.is_open` 프로퍼티 접근 시 서킷 상태(True/False) 정확히 반환.
+
+- [x] **Task 9.2: api_server.py의 `get_bot_status` 서킷 브레이커 상태 확인부 다중 방어 로직 적용 (`api_server.py`)**
+  - **설명:** `is_open()` 메서드 직접 호출 대신 `cb.state == "OPEN"`, `cb.is_open`, `can_proceed()` 순차 Fallback 및 예외 방어 로직 적용하여 AttributeError 및 로그 도배 원천 차단.
+  - **수정 파일:** `api_server.py`
+  - **검증 기준:** `GET /api/status` 및 `GET /kiwoom/api/status` 호출 시 콘솔 에러 발생 제로.
+
+- [x] **Task 9.3: 로컬 테스트 및 Git 형상 관리 (`fix/circuit-breaker-is-open-error`)**
+  - **설명:** `test_api_server.py` 단위 테스트 검증 및 전용 브랜치 커밋.
+  - **수정 파일:** `test_api_server.py`, `WORK_HISTORY.md`
+  - **검증 기준:** `test_api_server.py` 100% ALL PASS.
 
 ---
 

@@ -90,6 +90,11 @@ class CircuitBreaker:
             return backoff
         return 0.5
 
+    @property
+    def is_open(self) -> bool:
+        """서킷이 열려있는지(OPEN 상태) 여부 반환"""
+        return self.state == "OPEN"
+
     def can_proceed(self) -> bool:
         if self.state == "CLOSED":
             return True
