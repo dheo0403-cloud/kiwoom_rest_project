@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { createChart, ColorType, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { LineChart, BarChart2, RefreshCw, ChevronDown } from 'lucide-react';
 import { WatchlistItem, Position, ChartResponse } from '../types';
+import { getApiUrl } from '../utils/apiConfig';
 
 interface TradingViewChartBentoProps {
   selectedStockCode: string;
@@ -40,7 +41,7 @@ export const TradingViewChartBento: React.FC<TradingViewChartBentoProps> = ({
     if (!selectedStockCode) return;
     setIsLoading(true);
     try {
-      const res = await fetch(`/api/chart/${selectedStockCode}?period=${chartPeriod}`);
+      const res = await fetch(getApiUrl(`/chart/${selectedStockCode}?period=${chartPeriod}`));
       if (res.ok) {
         const data: ChartResponse = await res.json();
         setChartData(data);

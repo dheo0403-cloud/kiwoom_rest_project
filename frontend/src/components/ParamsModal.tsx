@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { Sliders, X, Check, RotateCcw } from 'lucide-react';
+import { getApiUrl } from '../utils/apiConfig';
 
 interface ParamsModalProps {
   isOpen: boolean;
@@ -19,7 +20,7 @@ export const ParamsModal: React.FC<ParamsModalProps> = ({ isOpen, onClose, onRef
     setIsSaving(true);
     setMsg(null);
     try {
-      const res = await fetch(`/api/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`, {
+      const res = await fetch(getApiUrl(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`), {
         method: 'POST'
       });
       if (res.ok) {

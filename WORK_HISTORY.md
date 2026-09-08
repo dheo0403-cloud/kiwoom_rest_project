@@ -2,6 +2,30 @@
 
 ---
 
+## 📅 [2026-09-08] 키움 포털 URL(/kiwoom) 404 및 API/WebSocket 서브패스 라우팅 결함 해결
+
+### 1. 작업 개요 및 목적
+- `https://mcmportal.koreacentral.cloudapp.azure.com/kiwoom` 접근 시 404 오류 및 서브패스(`/kiwoom/`) 환경에서 REST API 및 WebSocket 통신 단절 결함 완벽 해결.
+- Nginx Ingress와 FastAPI StaticFiles 간 트레일링 슬래시 누락 보정 및 로컬/서브패스 듀얼 라우팅 구조 확립.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `api_server.py`:
+  - `/kiwoom` GET 요청 시 `/kiwoom/`으로 302 리다이렉트하는 보정 라우터 추가
+  - `APIRouter`를 도입하여 `/api` 및 `/kiwoom/api` 두 접두사를 모두 처리하도록 등록
+  - `/ws/portfolio`, `/kiwoom/ws/portfolio`, `/ws/logs`, `/kiwoom/ws/logs` 듀얼 WebSocket 엔드포인트 지원
+- `frontend/src/utils/apiConfig.ts` (신규):
+  - 런타임 `window.location.pathname`에 따라 `/kiwoom/api` 및 `/kiwoom/ws` 또는 `/api`, `/ws`를 반환하는 동적 URL 빌더
+- `frontend/src/` 전역 컴포넌트:
+  - `useWebSocket.ts`, `App.tsx`, `TradingViewChartBento.tsx`, `ParamsModal.tsx`, `LiveTerminalBento.tsx`, `ActivePositionsBento.tsx`에 `getApiUrl` 및 `getWsUrl` 적용
+- `frontend/dist/`:
+  - `npm run build`를 통해 Vite 프로덕션 번들 갱신 완료
+
+### 3. 검증 결과
+- **프론트엔드 빌드:** `npm run build` 성공 (0 errors)
+- **백엔드 테스트:** `python test_api_server.py` 13개 테스트 스위트 100% 통과
+
+---
+
 ## 📅 [2026-09-07] 장 마감/유휴 상태 계좌 잔고 및 포지션 영속 캐싱 보존 (0원 노출 방지)
 
 ### 1. 작업 개요 및 목적

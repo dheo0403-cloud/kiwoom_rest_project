@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Terminal, Filter, Trash2, CheckCircle2, Sliders, Play } from 'lucide-react';
 import { LogMessage } from '../types';
+import { getApiUrl } from '../utils/apiConfig';
 
 interface LiveTerminalBentoProps {
   logs: LogMessage[];
@@ -28,7 +29,7 @@ export const LiveTerminalBento: React.FC<LiveTerminalBentoProps> = ({ logs, onCl
     setIsApplying(true);
     setApplyResult(null);
     try {
-      const res = await fetch(`/api/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`, {
+      const res = await fetch(getApiUrl(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`), {
         method: 'POST'
       });
       if (res.ok) {

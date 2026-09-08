@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Package, TrendingUp, TrendingDown, Layers, ArrowUpRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { Position } from '../types';
+import { getApiUrl } from '../utils/apiConfig';
 
 interface ActivePositionsBentoProps {
   positions: Position[];
@@ -25,7 +26,7 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = ({
     }
     setLoadingCode(code);
     try {
-      const res = await fetch('/api/order/manual', {
+      const res = await fetch(getApiUrl('/order/manual'), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ code, side, qty, price: 0 })

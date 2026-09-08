@@ -49,7 +49,7 @@ class AdaptiveVolatilityBreakoutStrategy:
 
         # [필터 2] 저가주 제외 (1,000원 미만 동전주)
         if current_price < 1000:
-            return False, ""
+            return False, "동전주_제외(1000원미만)"
 
         ma5 = ind.get('ma5', 0)
         ma20 = ind.get('ma20', 0)
@@ -62,18 +62,18 @@ class AdaptiveVolatilityBreakoutStrategy:
 
         # [추세 필터] 20일선(MA20) 역배열 하락 추세 매수 차단
         if ma20 > 0 and current_price < ma20:
-            return False, ""
+            return False, f"20일선_역배열(현재가:{int(current_price):,}원<MA20:{int(ma20):,}원)"
 
         # [핵심 조건 1] ATR 동적 변동성 돌파 기준가
         # Breakout Level = Open + (k * ATR)
         breakout_level = open_price + (self.k_breakout * atr14) if atr14 > 0 else high3 * 0.97
         is_breakout = (current_price >= breakout_level) or (current_price >= high3 * 0.98 and current_price >= ma5) or ind.get('is_test', False)
-        if not is_breakout:
-            return False, ""
+        if not is_breakout and not ind.get('fib_rebound', False):
+            return False, f"변동성돌파_미달(현재가:{int(current_price):,}원<돌파기준:{int(breakout_level):,}원)"
 
         # [핵심 조건 2] 당일 거래대금 100억 이상 & 종일 환산 거래량 3.0배 급증 (실전 환경)
-        if current_volume > 0 and (current_price * current_volume) < 10_000_000_000 and not ind.get('is_test', False):
-            return False, ""
+        if current_volume > 0 and (current_price * current_volume) < 10_000_000_000 and not ind.get('is_test', False) and not ind.get('fib_rebound', False):
+            return False, f"당일거래대금부족({int(current_price * current_volume / 100_000_000):,}억<100억)"
 
         market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
         market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
@@ -82,8 +82,8 @@ class AdaptiveVolatilityBreakoutStrategy:
         day_progress = min(1.0, elapsed_seconds / total_seconds)
         projected_volume = current_volume / day_progress
 
-        if avg_vol > 0 and current_volume > 0 and projected_volume < (avg_vol * 3.0) and not ind.get('is_test', False):
-            return False, ""
+        if avg_vol > 0 and current_volume > 0 and projected_volume < (avg_vol * 3.0) and not ind.get('is_test', False) and not ind.get('fib_rebound', False):
+            return False, f"환산거래량급증미달({projected_volume:.0f}<{avg_vol * 3.0:.0f})"
 
         # [핵심 조건 3] 인메모리 링버퍼 기반 피보나치 눌림목 또는 스퀴즈 모멘텀 반등 확인
         try:
@@ -114,11 +114,11 @@ class AdaptiveVolatilityBreakoutStrategy:
                         if squeeze_off and squeeze_momentum >= 0 and (projected_volume >= (avg_vol * 3.0) or ind.get('is_test', False)):
                             return True, f"ATR강한돌파_스퀴즈모멘텀_추격매수"
             elif ind.get('is_test', False) or ind.get('fib_rebound', False):
-                return True, "피보나치_눌림목반등"
+                return True, "피보나치_38.2%~61.8%_눌림목반등"
         except Exception:
             pass
 
-        return False, ""
+        return False, "타점_조건_미충족"
 
     async def check_sell_signal(self, code: str, buy_price: float, current_price: float,
                                 ind: Dict[str, Any], sell_stage: int = 0,

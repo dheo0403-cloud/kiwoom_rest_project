@@ -210,7 +210,9 @@ class AsyncPortfolioManager:
 
             target_amt = min(safe_allocate_amt, max_available)
             qty = int(target_amt // current_price)
-            if qty == 0 and max_available >= current_price:
+            # 소액 자본(10~50만원대)에서 켈리 비중 배분액이 1주 가격보다 적더라도,
+            # 가용 예수금이 1주 가격 이상이면 최소 1주 매수 허용
+            if qty == 0 and self.current_capital >= current_price:
                 qty = 1
             return qty
 

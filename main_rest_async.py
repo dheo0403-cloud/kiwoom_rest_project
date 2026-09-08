@@ -319,15 +319,19 @@ class AsyncTradingBot:
             try:
                 highs = []
                 lows = []
+                vols = []
                 for c in recent_candles:
                     if not isinstance(c, dict):
                         continue
                     h_val = c.get('high_pric') or c.get('hgpr') or c.get('stck_hgpr') or c.get('high_price') or c.get('high') or 0
                     l_val = c.get('low_pric') or c.get('lwpr') or c.get('stck_lwpr') or c.get('low_price') or c.get('low') or 0
+                    v_val = c.get('acml_vol') or c.get('vol') or c.get('volume') or c.get('stck_cntg_hour') or 0
                     h = abs(float(str(h_val).replace(',', '').strip()))
                     l = abs(float(str(l_val).replace(',', '').strip()))
+                    v = abs(float(str(v_val).replace(',', '').strip()))
                     if h > 0: highs.append(h)
                     if l > 0: lows.append(l)
+                    if v > 0: vols.append(v)
 
                 if not highs or not lows:
                     drop_reasons['zero_price_diff'] += 1
@@ -344,6 +348,7 @@ class AsyncTradingBot:
                 fib_382 = period_high - (diff * 0.382)
                 fib_500 = period_high - (diff * 0.500)
                 fib_618 = period_high - (diff * 0.618)
+                avg_vol = float(sum(vols) / len(vols)) if vols else 0.0
 
                 # 현재가 추출
                 c_first = chart_items[0] if isinstance(chart_items[0], dict) else {}
@@ -362,6 +367,7 @@ class AsyncTradingBot:
                     'fib_382': fib_382,
                     'fib_500': fib_500,
                     'fib_618': fib_618,
+                    'avg_volume': avg_vol,
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             except Exception as e:
@@ -565,20 +571,34 @@ class AsyncTradingBot:
         """
         감시 종목 피보나치 눌림목 매수 기회 포착
         - 0.382 / 0.5 / 0.618 눌림목 구간 지지 및 반등 감지 시 HIGH 우선순위 매수 발주
+        - 상세 디버깅 및 원인별 상태(타점 대기, 자금 부족, 필터 미충족 등) 실시간 로깅
         """
-        if not self.market_filter_passed or self.mdd_shutdown:
+        if self.mdd_shutdown:
+            print("⚠️ [매수 스킵] 계좌 MDD -5% 서킷 브레이커 발동 중으로 신규 매수가 중단되었습니다.")
+            return
+        if not self.market_filter_passed:
+            print(f"⚠️ [매수 스킵] KODEX 200 급락({self.kodex200_change_rate:.2f}%) 시장 필터 발동 중으로 신규 매수가 제한됩니다.")
             return
 
+        current_deposit = self.portfolio.current_capital
+
         for code, info in list(self.watchlist.items()):
-            # 포지션 한도 및 중복 매수 체크
+            name = info.get('name', code)
+            fib_382 = info.get('fib_382', 0)
+            fib_500 = info.get('fib_500', 0)
+            fib_618 = info.get('fib_618', 0)
+            period_high = info.get('period_high', 0)
+            period_low = info.get('period_low', 0)
+
+            # 1. 포지션 한도 및 중복 매수 체크
             if not await self.portfolio.can_buy(code):
-                continue
+                if code in self.portfolio.positions:
+                    continue
+                else:
+                    print(f"⚠️ [매수 스킵] {name}({code}) - 최대 보유 포지션 수({self.portfolio.max_stocks}개) 도달")
+                    break
 
-            name = info['name']
-            fib_382 = info['fib_382']
-            fib_618 = info['fib_618']
-
-            # 실시간 호가 및 시세 조회 (LOW 우선순위)
+            # 2. 실시간 호가 및 시세 조회 (LOW 우선순위)
             price_data = await self.client.get_price(code, priority=RequestPriority.LOW)
             if not price_data:
                 continue
@@ -587,38 +607,65 @@ class AsyncTradingBot:
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
 
-            cur_price_str = str(out.get('prpr', 0) or out.get('current_price', 0)).replace(',', '').strip()
+            cur_price_str = str(out.get('prpr', 0) or out.get('current_price', 0) or out.get('stck_prpr', 0) or 0).replace(',', '').strip()
             if not cur_price_str.isdigit() or int(cur_price_str) <= 0:
                 continue
 
             cur_price = float(cur_price_str)
-            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0)).replace(',', '').strip() or 0)
+            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0) or out.get('cntg_vol', 0) or 0).replace(',', '').strip() or 0)
             self.buffer.update_tick(code, cur_price, cur_volume)
             info['current_price'] = cur_price
 
-            # 지표 산출
+            # 시가 추출 (다중 키 호환)
+            raw_open = out.get('oprc') or out.get('stck_oprc') or out.get('open_pric') or out.get('open') or out.get('oprn') or cur_price
+            open_price = abs(float(str(raw_open).replace(',', '').strip() or cur_price))
+
+            # 3. 지표 산출
             candle_df = self.buffer.get_dataframe(code, limit=20)
             ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
             ind['avg_vol'] = info.get('avg_volume', 0)
-            ind['high10'] = info.get('high_price', cur_price)
-            ind['open'] = float(out.get('oprn', cur_price) or cur_price)
-            ind['fib_rebound'] = (info.get('fib_618', 0) <= cur_price <= info.get('fib_382', cur_price * 2))
+            ind['high10'] = period_high if period_high > 0 else cur_price
+            ind['period_high'] = period_high
+            ind['period_low'] = period_low
+            ind['fib_382'] = fib_382
+            ind['fib_500'] = fib_500
+            ind['fib_618'] = fib_618
+            ind['open'] = open_price
+            ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
             ind['skip_time_filter'] = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
 
-            # 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀)
+            # 4. 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀 & 피보나치)
             buy_signal, reason = await self.strategy.check_buy_signal(
                 code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
             )
+
+            # 5. 상세 디버그 로깅 및 주문 실행
+            diff_pct = ((cur_price - fib_382) / fib_382 * 100.0) if fib_382 > 0 else 0.0
 
             if buy_signal:
                 atr14 = ind.get('atr14', 0)
                 # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산
                 order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
+
                 if order_qty <= 0:
+                    print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
+                    await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
                     continue
 
                 print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
                 await self._execute_smart_buy(code, name, order_qty, cur_price)
+            else:
+                # 매수 대기 상세 이유 상태 가시화 출력
+                if cur_price > fib_382 and fib_382 > 0:
+                    status_desc = f"목표 타점(Fib 38.2% {int(fib_382):,}원) 미도달 ➔ 대기 중 (괴리율: {diff_pct:+.2f}%)"
+                elif cur_price < fib_618 and fib_618 > 0:
+                    status_desc = f"피보나치 61.8% 지지선({int(fib_618):,}원) 하회 ➔ 과대낙폭 관망"
+                elif reason:
+                    status_desc = f"전략 필터 ({reason})"
+                else:
+                    status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
+
+                print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
 
     async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float):
         """HIGH 우선순위로 매도 1호가 지정가 매수 발주"""

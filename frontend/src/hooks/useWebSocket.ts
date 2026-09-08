@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PortfolioSnapshot, LogMessage, BotStatus } from '../types';
+import { getApiUrl, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot>({
@@ -31,9 +32,9 @@ export function useTradingWebSocket() {
   const fetchRestData = useCallback(async () => {
     try {
       const [portRes, statusRes, watchRes] = await Promise.allSettled([
-        fetch('/api/portfolio'),
-        fetch('/api/status'),
-        fetch('/api/watchlist')
+        fetch(getApiUrl('/portfolio')),
+        fetch(getApiUrl('/status')),
+        fetch(getApiUrl('/watchlist'))
       ]);
 
       if (portRes.status === 'fulfilled' && portRes.value.ok) {
@@ -79,8 +80,8 @@ export function useTradingWebSocket() {
     function connectSockets() {
       if (!isSubscribed) return;
 
-      const portUrl = `${wsProto}//${wsHost}/ws/portfolio`;
-      const logUrl = `${wsProto}//${wsHost}/ws/logs`;
+      const portUrl = getWsUrl('/portfolio');
+      const logUrl = getWsUrl('/logs');
 
       try {
         portWs = new WebSocket(portUrl);

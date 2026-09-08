@@ -154,8 +154,32 @@ def test_api_server_endpoints():
     assert chart_data["fib_382"] == 150000.0
     print(f"  ✅ /api/chart/000660 정상 응답 (종목명: {chart_data['name']}, Fib 38.2%: {chart_data['fib_382']})")
 
+    # 13. /kiwoom 슬래시 리다이렉트 검증 (/kiwoom -> /kiwoom/)
+    print("▶ [Test 12] /kiwoom 슬래시 리다이렉트 검증...")
+    redirect_res = client.get("/kiwoom", follow_redirects=False)
+    assert redirect_res.status_code == 302
+    assert redirect_res.headers["location"] == "/kiwoom/"
+    print("  ✅ /kiwoom -> /kiwoom/ 302 리다이렉트 정상 동작")
+
+    # 14. /kiwoom 서브패스 REST API 및 WebSocket 검증
+    print("▶ [Test 13] /kiwoom/api 및 /kiwoom/ws 서브패스 라우팅 검증...")
+    sub_health = client.get("/kiwoom/api/health")
+    assert sub_health.status_code == 200
+    assert sub_health.json()["status"] == "healthy"
+
+    sub_status = client.get("/kiwoom/api/status")
+    assert sub_status.status_code == 200
+
+    with client.websocket_connect("/kiwoom/ws/portfolio") as websocket:
+        init_data = websocket.receive_json()
+        assert init_data["type"] == "PORTFOLIO_INIT"
+        websocket.send_text("ping")
+        pong = websocket.receive_text()
+        assert pong == "pong"
+    print("  ✅ /kiwoom/api/health 및 /kiwoom/ws/portfolio 서브패스 통신 완벽 통과")
+
     print("=" * 65)
-    print("🎉 Phase 4 FastAPI, 킬스위치, WebSocket & 실시간 차트 모든 테스트 100% 통과 완료!")
+    print("🎉 FastAPI, 서브패스(/kiwoom) 듀얼 라우팅, 킬스위치, WebSocket 모든 테스트 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

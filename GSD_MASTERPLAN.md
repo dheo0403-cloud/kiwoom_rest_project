@@ -167,27 +167,54 @@
 
 ---
 
-### Phase 7. 장 마감/유휴 상태 계좌 데이터 영속화 및 대시보드 상태 보존 (Priority 7 - 진행 중)
+### Phase 7. 장 마감/유휴 상태 계좌 데이터 영속화 및 대시보드 상태 보존 (Priority 7 - 완료)
 
-- [ ] **Task 7.1: api_server.py 기동 시 MariaDB 계좌/포지션 즉시 복원 및 WebSocket 브로드캐스트 보강**
+- [x] **Task 7.1: api_server.py 기동 시 MariaDB 계좌/포지션 즉시 복원 및 WebSocket 브로드캐스트 보강**
   - **설명:** 서버 기동 시 `ctx.db`에서 마지막 잔고(`balance`)와 보유 포지션(`portfolio`)을 즉시 읽어와 `ctx.portfolio`에 복원. 장 마감 또는 API 세션 종료 시에도 직전 계좌 상태가 0원으로 초기화되지 않도록 보장.
   - **수정 파일:** `api_server.py`, `database.py`
   - **검증 기준:** 장 마감/휴일 상태에서 api_server 재기동 시 0원이 아닌 직전 정산 잔고와 보유 종목이 즉시 조회됨.
 
-- [ ] **Task 7.2: main_rest_async.py 장 마감 정산 데이터 영속화 및 API 빈 응답 방어**
+- [x] **Task 7.2: main_rest_async.py 장 마감 정산 데이터 영속화 및 API 빈 응답 방어**
   - **설명:** 15:30 장 마감 시 최종 포트폴리오 스냅샷을 DB에 즉시 영속화하고, 야간/주말 키움 API가 빈 값을 반환하더라도 이전 DB 잔고를 0으로 덮어쓰지 않도록 방어 로직 강화.
   - **수정 파일:** `main_rest_async.py`
   - **검증 기준:** 장 마감 후 휴면 루프 진입 시 DB에 최종 잔고와 보유종목이 안전하게 보존됨.
 
-- [ ] **Task 7.3: 프론트엔드 대시보드 마지막 동기화 일시 표출 및 0원 덮어쓰기 방지**
+- [x] **Task 7.3: 프론트엔드 대시보드 마지막 동기화 일시 표출 및 0원 덮어쓰기 방지**
   - **설명:** 상단 4대 KPI 카드 및 헤더에 "마지막 동기화: YYYY-MM-DD HH:MM (장마감)" 배지 표출, WebSocket 일시 수신 공백 시 기존 유효 자산 데이터 유지.
   - **수정 파일:** `frontend/src/components/KpiMetricsRow.tsx`, `frontend/src/components/Header.tsx`, `frontend/src/hooks/useWebSocket.ts`
   - **검증 기준:** 장 마감 상태에서도 직전 평가자산/예수금/손익이 정상 노출되며 기준 일시가 명확히 표출됨.
 
-- [ ] **Task 7.4: 로컬/오프마켓 시뮬레이션 검증 및 Git 형상 관리(`fix/account-balance-after-market-close`)**
+- [x] **Task 7.4: 로컬/오프마켓 시뮬레이션 검증 및 Git 형상 관리(`fix/account-balance-after-market-close`)**
   - **설명:** 장 마감 오프마켓 상태 테스트 통과 후 브랜치 커밋 완료.
   - **수정 파일:** `test_api_server.py`, `WORK_HISTORY.md`
   - **검증 기준:** 모든 단위 테스트 통과 및 브랜치 커밋.
+
+---
+
+### Phase 8. 실시간 매매 실행 파이프라인 심층 디버깅 및 매수 판단 가시화 (Priority 8 - 신규)
+
+- [x] **Task 8.1: 실시간 가격 수신 및 감시종목 지표 메타데이터 보강 (`main_rest_async.py`, `strategy.py`)**
+  - **설명:** 감시종목 갱신 시 `avg_volume`, `period_high`, `period_low`, `fib_382`, `fib_500`, `fib_618`를 전략 지표 딕셔너리(`ind`)에 정확히 주입하고, 시가 추출 키(`oprc`, `stck_oprc`, `open_pric`, `open`) 다중화 지원.
+  - **수정 파일:** `main_rest_async.py`
+  - **검증 기준:** 30개 감시종목의 피보나치 레벨 및 시세 지표가 누락 없이 전략 엔진으로 전달됨.
+
+- [x] **Task 8.2: 매수 조건 판단부 상세 디버깅 로깅 및 원인별 상태 가시화 (`main_rest_async.py`, `strategy.py`)**
+  - **설명:** 봇이 매수를 안/못하는 상태를 즉시 파악할 수 있도록 3단계 상세 실시간 로그 출력:
+    1) 타점 대기: `⏱ [실시간 감시] 종목명 - 현재가: X원 / 목표 타점(Fib 38.2%): Y원 ➔ 대기 중 (괴리율: +Z%)`
+    2) 예수금 부족: `⚠️ [매수 실패/자금부족] 종목명 - 타점 도달했으나 예수금 부족 (현재 예수금: A원 / 필요: B원)`
+    3) 전략 필터/제한: `⚠️ [매수 스킵] 종목명 - 20일선 역배열 / 거래대금 부족 / 시간외 매수 제한`
+  - **수정 파일:** `main_rest_async.py`, `strategy.py`
+  - **검증 기준:** 정규 매매 루프 실행 시 각 감시종목의 상태와 매수 미실행 원인이 실시간으로 투명하게 로깅됨.
+
+- [x] **Task 8.3: 켈리 수량 계산 및 소액 예수금(11만 원대) 1주 매수 안전 처리 (`async_portfolio.py`)**
+  - **설명:** 총 자산 대비 켈리 비중(20%) 계산 시 소액 계좌에서 수량이 0이 되는 현상을 방지하기 위해, 가용 현금이 1주 가격 이상일 경우 최소 1주 매수를 허용하도록 보강.
+  - **수정 파일:** `async_portfolio.py`
+  - **검증 기준:** 114,922원 예수금 기준 73,000원 주식(삼성전자)은 1주 매수 가능, 150,000원 주식(SK하이닉스)은 자금 부족 로그 출력 확인.
+
+- [x] **Task 8.4: 단위/통합 테스트 검증 및 Git 형상 관리 (`feature/trading-pipeline-debug`)**
+  - **설명:** `test_async_trading_loop.py`에 상세 디버그 로깅 및 소액 예수금 매수 시뮬레이션 테스트를 추가하고 통과 확인 후 커밋.
+  - **수정 파일:** `test_async_trading_loop.py`, `WORK_HISTORY.md`
+  - **검증 기준:** 모든 단위 테스트 100% PASS.
 
 ---
 

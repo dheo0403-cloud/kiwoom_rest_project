@@ -12,7 +12,8 @@ import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter
+from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -250,9 +251,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ================= REST 엔드포인트 =================
+# ================= REST 엔드포인트 라우터 정의 =================
+api_router = APIRouter()
 
-@app.get("/api/health")
+@api_router.get("/health")
 async def health_check():
     """서버 및 핵심 컴포넌트 헬스체크"""
     return {
@@ -262,7 +264,7 @@ async def health_check():
         "mode": "DEMO" if (ctx.client and ctx.client.is_demo) else "REAL"
     }
 
-@app.get("/api/status")
+@api_router.get("/status")
 async def get_bot_status():
     """트레이딩 봇 상세 운영 상태 조회"""
     if not ctx.bot:
@@ -282,7 +284,7 @@ async def get_bot_status():
         "circuit_breaker_open": circuit_open
     }
 
-@app.get("/api/portfolio")
+@api_router.get("/portfolio")
 async def get_portfolio():
     """현재 포트폴리오 및 자산 스냅샷 조회 (인메모리 + DB 폴백)"""
     snapshot = None
@@ -346,7 +348,7 @@ async def get_portfolio():
     return snapshot
 
 
-@app.get("/api/watchlist")
+@api_router.get("/watchlist")
 async def get_watchlist():
     """감시 종목 목록 및 피보나치 레벨 조회 (인메모리 + DB 폴백)"""
     items_dict = {}
@@ -388,7 +390,7 @@ async def get_watchlist():
     }
 
 
-@app.get("/api/chart/{code}")
+@api_router.get("/chart/{code}")
 async def get_stock_chart_data(code: str, period: str = "1m"):
     """
     특정 종목의 실시간 OHLCV 캔들 및 피보나치 레벨 조회
@@ -548,7 +550,7 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
     }
 
 
-@app.post("/api/order/manual")
+@api_router.post("/order/manual")
 async def create_manual_order(req: ManualOrderRequest):
     """대시보드 수동 주문 접수 (HIGH 우선순위 발주)"""
     if not ctx.bot or not ctx.client:
@@ -580,7 +582,7 @@ async def create_manual_order(req: ManualOrderRequest):
         "response": res
     }
 
-@app.post("/api/bot/control")
+@api_router.post("/bot/control")
 async def control_bot(req: BotControlRequest):
     """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)"""
     if not ctx.bot:
@@ -610,7 +612,7 @@ async def control_bot(req: BotControlRequest):
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
 
-@app.post("/api/bot/emergency-stop")
+@api_router.post("/bot/emergency-stop")
 async def emergency_kill_switch():
     """
     🚨 긴급 비상 킬스위치 (Emergency Kill-Switch)
@@ -659,7 +661,7 @@ async def emergency_kill_switch():
         "orders": executed_orders
     }
 
-@app.post("/api/bot/params")
+@api_router.post("/bot/params")
 async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fraction: Optional[float] = None):
     """런타임 무중단 매매 파라미터 동적 조정"""
     if not ctx.bot:
@@ -679,9 +681,14 @@ async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fracti
         "updated_params": updated
     }
 
+# ================= REST 라우터 등록 (루트 및 /kiwoom 서브패스 동시 지원) =================
+app.include_router(api_router, prefix="/api")
+app.include_router(api_router, prefix="/kiwoom/api")
+
 # ================= WebSocket 엔드포인트 =================
 
 @app.websocket("/ws/portfolio")
+@app.websocket("/kiwoom/ws/portfolio")
 async def ws_portfolio_endpoint(websocket: WebSocket):
     """실시간 포트폴리오 스냅샷 WebSocket 스트리밍"""
     await ws_manager.connect_portfolio(websocket)
@@ -701,6 +708,7 @@ async def ws_portfolio_endpoint(websocket: WebSocket):
         await ws_manager.disconnect_portfolio(websocket)
 
 @app.websocket("/ws/logs")
+@app.websocket("/kiwoom/ws/logs")
 async def ws_logs_endpoint(websocket: WebSocket):
     """실시간 로그 스트리밍 WebSocket"""
     await ws_manager.connect_log(websocket)
@@ -715,8 +723,14 @@ async def ws_logs_endpoint(websocket: WebSocket):
         await ws_manager.disconnect_log(websocket)
 
 
-# ================= 정적 프론트엔드 서빙 (React Bento Grid Cockpit) =================
+# ================= 정적 프론트엔드 서빙 및 서브패스 리다이렉트 (React Bento Grid Cockpit) =================
 frontend_dist = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
+
+@app.get("/kiwoom", include_in_schema=False)
+async def redirect_kiwoom_slash():
+    """/kiwoom 접근 시 /kiwoom/ 으로 302 리다이렉트 (Starlette StaticFiles 트레일링 슬래시 보정)"""
+    return RedirectResponse(url="/kiwoom/", status_code=302)
+
 if os.path.exists(frontend_dist):
     app.mount("/kiwoom", StaticFiles(directory=frontend_dist, html=True), name="frontend_kiwoom")
     app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")

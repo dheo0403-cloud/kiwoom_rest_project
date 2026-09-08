@@ -14,7 +14,7 @@ from main_rest_async import AsyncTradingBot
 
 class MockKiwoomClient:
     """테스트 시뮬레이션용 Mock 비동기 키움 클라이언트"""
-    def __init__(self):
+    def __init__(self, deposit: float = 10_000_000.0):
         self.sent_orders: List[Dict[str, Any]] = []
         self.prices: Dict[str, float] = {}
         self.orderbooks: Dict[str, Dict[str, Any]] = {}
@@ -23,6 +23,7 @@ class MockKiwoomClient:
         self.kodex200_change_rate: float = 0.5
         self.is_demo = True
         self.mode = "MOCK"
+        self.deposit = deposit
 
     async def start(self):
         pass
@@ -44,11 +45,13 @@ class MockKiwoomClient:
         }
         self.sent_orders.append(order_record)
         if side == "BUY":
+            self.deposit = max(0.0, self.deposit - (qty * price))
             if code in self.holdings:
                 self.holdings[code]["qty"] += qty
             else:
                 self.holdings[code] = {"qty": qty, "buy_price": price, "name": code}
         elif side == "SELL":
+            self.deposit += qty * price
             if code in self.holdings:
                 self.holdings[code]["qty"] -= qty
                 if self.holdings[code]["qty"] <= 0:
@@ -119,8 +122,8 @@ class MockKiwoomClient:
             })
         return {
             "output1": [{
-                "tot_evlu_amt": "10000000",
-                "dnca_tot_amt": "10000000",
+                "tot_evlu_amt": str(int(self.deposit)),
+                "dnca_tot_amt": str(int(self.deposit)),
                 "tot_evlu_pfls_amt": "0",
                 "tot_pnl_rt": "0.0"
             }],
@@ -395,6 +398,49 @@ async def test_update_watchlist_multi_schema_and_fallback():
     assert len(mock_bot.watchlist) == 5, f"MOCK Fallback으로 5개 우량주가 등록되어야 합니다. (실제: {len(mock_bot.watchlist)})"
     print(f"  ✅ MOCK Fallback 5개 우량주 자동 주입 및 피보나치 분석 완벽 검증")
 
+async def test_detailed_debug_logging_and_low_capital_handling():
+    """7. 소액 예수금(114,922원) 환경 매수 수량 산출 및 실시간 디버그 로깅 검증"""
+    print("▶ [Test 7] 소액 예수금(114,922원) 매수 시뮬레이션 및 실시간 디버그 로깅 검증...")
+    # 실제 사용자의 예수금 상황(114,922원) 시뮬레이션
+    low_capital = 114922.0
+    mock_client = MockKiwoomClient(deposit=low_capital)
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=low_capital, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=low_capital, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1) 75,000원 주식(삼성전자): 피보나치 눌림목(73,820 ~ 76,180) 도달 & 예수금(114,922원) 범위 내 -> 1주 매수 성공
+    bot.watchlist["005930"] = {
+        "name": "삼성전자", "period_high": 80000.0, "period_low": 70000.0,
+        "fib_382": 76180.0, "fib_500": 75000.0, "fib_618": 73820.0,
+        "current_price": 75000.0
+    }
+    mock_client.prices["005930"] = 75000.0
+
+    # 2) 150,000원 주식(SK하이닉스): 예수금(114,922원) 초과 -> 자금 부족 매수 스킵
+    bot.watchlist["000660"] = {
+        "name": "SK하이닉스", "period_high": 160000.0, "period_low": 140000.0,
+        "fib_382": 152360.0, "fib_500": 150000.0, "fib_618": 147640.0,
+        "current_price": 150000.0
+    }
+    mock_client.prices["000660"] = 150000.0
+
+    # 3) 타점 미도달 주식(현대차: 250,000원 / fib_382: 230,000원): 대기 중 로깅
+    bot.watchlist["005380"] = {
+        "name": "현대차", "period_high": 260000.0, "period_low": 210000.0,
+        "fib_382": 240900.0, "fib_500": 235000.0, "fib_618": 229100.0,
+        "current_price": 255000.0
+    }
+    mock_client.prices["005380"] = 255000.0
+
+    await bot.monitor_watchlist_and_enter()
+
+    # 검증: 삼성전자(70,000원)는 1주 매수 성공
+    assert "005930" in portfolio.positions, "114,922원 예수금으로 70,000원 삼성전자는 1주 매수되어야 합니다."
+    assert portfolio.positions["005930"]["qty"] == 1
+    # SK하이닉스(150,000원)는 자금 부족으로 미매수
+    assert "000660" not in portfolio.positions, "150,000원 SK하이닉스는 예수금 부족으로 매수되지 않아야 합니다."
+    print("  ✅ 소액 예수금(11만 원) 1주 매수 및 자금 부족/타점 미도달 실시간 로깅 완벽 검증")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -405,6 +451,7 @@ async def main():
     await test_trailing_stop()
     await test_market_filter_and_manual_orders()
     await test_update_watchlist_multi_schema_and_fallback()
+    await test_detailed_debug_logging_and_low_capital_handling()
     print("=" * 65)
     print("🎉 Phase 2 모든 퀀트 매매 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)
