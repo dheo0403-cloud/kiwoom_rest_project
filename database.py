@@ -400,6 +400,36 @@ class DatabaseManager:
             return []
 
 
+    async def get_recent_logs(self, limit: int = 100):
+        """최근 시스템/매매/감시 로그 조회 (최신순 정렬)"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    # id 기준 최신순 정렬 (오류 방지 위해 SELECT * 후 가공)
+                    await cursor.execute("SELECT * FROM logs ORDER BY id DESC LIMIT %s", (limit,))
+                    rows = await cursor.fetchall()
+                    if not rows: return []
+                    res = []
+                    for r in rows:
+                        created = r.get('timestamp') or r.get('created_at') or r.get('time')
+                        if isinstance(created, datetime):
+                            ts = created.strftime('%H:%M:%S')
+                        elif created:
+                            ts = str(created)
+                        else:
+                            ts = datetime.now().strftime('%H:%M:%S')
+                        res.append({
+                            'id': str(r.get('id', '')),
+                            'level': r.get('level', 'INFO'),
+                            'message': r.get('message', ''),
+                            'timestamp': ts
+                        })
+                    return res
+        except Exception as e:
+            print(f"DB Logs 조회 에러: {e}")
+            return []
+
     # ================= 동기 버전 (Dashboard 용) =================
     def add_manual_order_sync(self, code, side, qty):
         """(동기) 대시보드에서 수동 주문 접수"""

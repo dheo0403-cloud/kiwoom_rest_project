@@ -2,9 +2,9 @@ import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { KpiMetricsRow } from './components/KpiMetricsRow';
 import { ActivePositionsBento } from './components/ActivePositionsBento';
-import { TradingViewChartBento } from './components/TradingViewChartBento';
+import { LogViewer } from './components/LogViewer';
 import { WatchlistBento } from './components/WatchlistBento';
-import { LiveTerminalBento } from './components/LiveTerminalBento';
+import { StrategyControlsBento } from './components/StrategyControlsBento';
 import { EmergencyModal } from './components/EmergencyModal';
 import { ParamsModal } from './components/ParamsModal';
 import { useTradingWebSocket } from './hooks/useWebSocket';
@@ -12,7 +12,7 @@ import { WatchlistItem } from './types';
 import { getApiUrl } from './utils/apiConfig';
 
 export function App() {
-  const { portfolio, logs, botStatus, isConnected, refreshData, addManualLog } = useTradingWebSocket();
+  const { portfolio, logs, botStatus, isConnected, refreshData, addManualLog, clearLogs } = useTradingWebSocket();
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [selectedStockCode, setSelectedStockCode] = useState<string>('');
@@ -117,17 +117,13 @@ export function App() {
 
         {/* 2. Main Bento Grid Cockpit (2-Column Asymmetric Layout) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1">
-          {/* Left Column (7/12: 58%): Chart & Universe Table */}
+          {/* Left Column (7/12: 58%): Realtime Log Viewer & Universe Table */}
           <div className="lg:col-span-7 flex flex-col gap-3.5">
-            {/* Bento A: TradingView Chart */}
-            <div className="h-[420px]">
-              <TradingViewChartBento
-                selectedStockCode={selectedStockCode}
-                selectedStockName={selectedStockName}
-                watchlist={watchlist}
-                positions={portfolio.positions}
-                colorMode={colorMode}
-                onSelectStock={handleSelectStock}
+            {/* Bento A: Terminal Live Log Viewer */}
+            <div className="h-[430px]">
+              <LogViewer
+                logs={logs}
+                onClearLogs={clearLogs}
               />
             </div>
 
@@ -142,10 +138,10 @@ export function App() {
             </div>
           </div>
 
-          {/* Right Column (5/12: 42%): Active Positions & Live Terminal */}
+          {/* Right Column (5/12: 42%): Active Positions & Strategy Controls */}
           <div className="lg:col-span-5 flex flex-col gap-3.5">
             {/* Bento B: Active Positions Cards */}
-            <div className="h-[420px]">
+            <div className="h-[430px]">
               <ActivePositionsBento
                 positions={portfolio.positions}
                 colorMode={colorMode}
@@ -155,9 +151,12 @@ export function App() {
               />
             </div>
 
-            {/* Bento D: Live WebSocket Terminal Logs & Parameter Tuner */}
+            {/* Bento D: Strategy Parameters & Bot Controls */}
             <div className="h-[360px]">
-              <LiveTerminalBento logs={logs} />
+              <StrategyControlsBento
+                botStatus={botStatus}
+                onRefresh={refreshData}
+              />
             </div>
           </div>
         </div>
@@ -179,5 +178,4 @@ export function App() {
     </div>
   );
 }
-
 export default App;

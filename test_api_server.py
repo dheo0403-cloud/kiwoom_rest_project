@@ -182,6 +182,16 @@ def test_api_server_endpoints():
     sub_status = client.get("/kiwoom/api/status")
     assert sub_status.status_code == 200
 
+    # 15. /api/logs 및 /kiwoom/api/logs 엔드포인트 검증
+    print("▶ [Test 14] /api/logs 및 /kiwoom/api/logs 실시간 로그 조회 검증...")
+    logs_res = client.get("/api/logs?limit=100")
+    assert logs_res.status_code == 200
+    assert "logs" in logs_res.json()
+    sub_logs_res = client.get("/kiwoom/api/logs?limit=100")
+    assert sub_logs_res.status_code == 200
+    assert "logs" in sub_logs_res.json()
+    print("  ✅ /api/logs 및 /kiwoom/api/logs REST 응답 정상 확인")
+
     with client.websocket_connect("/kiwoom/ws/portfolio") as websocket:
         init_data = websocket.receive_json()
         assert init_data["type"] == "PORTFOLIO_INIT"

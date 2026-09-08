@@ -93,8 +93,59 @@ class ServerContext:
         self.bot: Optional[AsyncTradingBot] = None
         self.bot_task: Optional[asyncio.Task] = None
         self.ws_broadcast_task: Optional[asyncio.Task] = None
+        self.log_broadcast_task: Optional[asyncio.Task] = None
 
 ctx = ServerContext()
+
+async def log_broadcast_loop():
+    """DB logs 테이블을 지속 감시하여 신규 실시간 로그를 웹소켓으로 브로드캐스팅"""
+    last_log_id = 0
+    if ctx.db and ctx.db.pool:
+        try:
+            async with ctx.db.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT MAX(id) as max_id FROM logs")
+                    row = await cursor.fetchone()
+                    if row and row.get('max_id'):
+                        last_log_id = int(row['max_id'])
+        except Exception:
+            pass
+
+    while True:
+        try:
+            await asyncio.sleep(0.5)
+            if ws_manager.log_connections and ctx.db and ctx.db.pool:
+                async with ctx.db.pool.acquire() as conn:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute(
+                            "SELECT * FROM logs WHERE id > %s ORDER BY id ASC LIMIT 50",
+                            (last_log_id,)
+                        )
+                        new_logs = await cursor.fetchall()
+                        for r in new_logs:
+                            last_log_id = max(last_log_id, int(r['id']))
+                            created = r.get('timestamp') or r.get('created_at') or r.get('time')
+                            if isinstance(created, datetime):
+                                ts = created.strftime('%H:%M:%S')
+                            elif created:
+                                ts = str(created)
+                            else:
+                                ts = datetime.now().strftime('%H:%M:%S')
+
+                            log_item = {
+                                "id": str(r.get('id', '')),
+                                "level": r.get('level', 'INFO'),
+                                "message": r.get('message', ''),
+                                "timestamp": ts
+                            }
+                            await ws_manager.broadcast_log({
+                                "type": "LOG_EVENT",
+                                "data": log_item
+                            })
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            await asyncio.sleep(1.0)
 
 async def portfolio_broadcast_loop():
     """1초 주기로 연결된 클라이언트에 최신 포트폴리오 스냅샷 브로드캐스팅 (인메모리 + DB 영속 캐시 연동)"""
@@ -212,8 +263,9 @@ async def lifespan(app: FastAPI):
         db=ctx.db
     )
 
-    # 2. 포트폴리오 브로드캐스트 태스크 시작
+    # 2. 포트폴리오 및 실시간 로그 브로드캐스트 태스크 시작
     ctx.ws_broadcast_task = asyncio.create_task(portfolio_broadcast_loop())
+    ctx.log_broadcast_task = asyncio.create_task(log_broadcast_loop())
 
     yield
 
@@ -228,6 +280,8 @@ async def lifespan(app: FastAPI):
 
     if ctx.ws_broadcast_task:
         ctx.ws_broadcast_task.cancel()
+    if ctx.log_broadcast_task:
+        ctx.log_broadcast_task.cancel()
 
     if ctx.client:
         await ctx.client.stop()
@@ -559,6 +613,15 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
     }
 
 
+@api_router.get("/logs")
+async def get_recent_logs_endpoint(limit: int = 100):
+    """최근 100건 로그 목록 조회 (REST Polling Fallback)"""
+    if ctx.db and hasattr(ctx.db, 'get_recent_logs'):
+        logs = await ctx.db.get_recent_logs(limit=limit)
+        return {"logs": logs, "count": len(logs)}
+    return {"logs": [], "count": 0}
+
+
 @api_router.post("/order/manual")
 async def create_manual_order(req: ManualOrderRequest):
     """대시보드 수동 주문 접수 (HIGH 우선순위 발주)"""
@@ -719,8 +782,18 @@ async def ws_portfolio_endpoint(websocket: WebSocket):
 @app.websocket("/ws/logs")
 @app.websocket("/kiwoom/ws/logs")
 async def ws_logs_endpoint(websocket: WebSocket):
-    """실시간 로그 스트리밍 WebSocket"""
+    """실시간 로그 스트리밍 WebSocket (연결 즉시 최근 100건 전송)"""
     await ws_manager.connect_log(websocket)
+    try:
+        if ctx.db and hasattr(ctx.db, 'get_recent_logs'):
+            recent_logs = await ctx.db.get_recent_logs(limit=100)
+            await websocket.send_json({
+                "type": "LOGS_INIT",
+                "data": recent_logs
+            })
+    except Exception as e:
+        print(f"WS Logs Init Error: {e}")
+
     try:
         while True:
             data = await websocket.receive_text()

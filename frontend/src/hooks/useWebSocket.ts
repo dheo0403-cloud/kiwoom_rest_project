@@ -31,10 +31,11 @@ export function useTradingWebSocket() {
   // REST API 초기 데이터 및 폴백 동기화
   const fetchRestData = useCallback(async () => {
     try {
-      const [portRes, statusRes, watchRes] = await Promise.allSettled([
+      const [portRes, statusRes, watchRes, logsRes] = await Promise.allSettled([
         fetch(getApiUrl('/portfolio')),
         fetch(getApiUrl('/status')),
-        fetch(getApiUrl('/watchlist'))
+        fetch(getApiUrl('/watchlist')),
+        fetch(getApiUrl('/logs?limit=100'))
       ]);
 
       if (portRes.status === 'fulfilled' && portRes.value.ok) {
@@ -59,6 +60,16 @@ export function useTradingWebSocket() {
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
         const statusData = await statusRes.value.json();
         setBotStatus(statusData);
+      }
+
+      if (logsRes.status === 'fulfilled' && logsRes.value.ok) {
+        const logsData = await logsRes.value.json();
+        if (logsData && Array.isArray(logsData.logs) && logsData.logs.length > 0) {
+          setLogs(prev => {
+            if (prev.length === 0) return logsData.logs;
+            return prev;
+          });
+        }
       }
     } catch (e) {
       console.warn("REST fallback fetch error:", e);
@@ -167,6 +178,10 @@ export function useTradingWebSocket() {
     setLogs(prev => [newLog, ...prev.slice(0, 99)]);
   }, []);
 
+  const clearLogs = useCallback(() => {
+    setLogs([]);
+  }, []);
+
   return {
     portfolio,
     logs,
@@ -174,6 +189,7 @@ export function useTradingWebSocket() {
     isConnected,
     latencyMs,
     addManualLog,
+    clearLogs,
     refreshData: fetchRestData
   };
 }

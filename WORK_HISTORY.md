@@ -2,6 +2,44 @@
 
 ---
 
+## 📅 [2026-09-08] 대시보드 실시간 터미널 LogViewer 개편, D+2 예수금 단일화 및 실시간 감시 쓰로틀링 루프 복구
+
+### 1. 작업 개요 및 목적
+- **대시보드 UI 전면 개편:** 미작동하던 '감시종목 차트'를 제거하고, 봇의 실시간 매매/감시 로그가 쏟아지는 검은색 배경의 터미널 스타일 `<LogViewer/>` 컴포넌트 신규 구현 및 WebSocket/REST 듀얼 스트리밍 연동.
+- **예수금 유령 차감 원인 해결 및 D+2 기준 단일화:** 당일 단순 예수금(`entr`)과 D+2 추정예수금(`dnca_tot_amt`/`ord_psbl_cash`) 간의 혼용으로 인해 114,922원에서 100,842원으로 차감되어 보이던 결함을 파악하고, 'D+2 실제 주문가능금액'으로 기준을 일원화하며 미체결 주문(`미체결: N건`) 및 증거금 차감 정산 로깅 추가.
+- **실시간 감시 1회성 중단 결함 해결 및 쓰로틀링 적용:** `trading_loop` 내 `try-finally` 배치 결함으로 1회 틱 처리 후 실시간 스트림 태스크가 취소되던 버그를 해결하고 Watchdog 자동 재가동 메커니즘을 구축. 매 틱마다 매수 평가는 무조건 실행하되, `⏱ [실시간 감시]` 로그 출력은 종목당 5초 또는 괴리율 0.5% 이상 변동 시에만 출력하도록 쓰로틀링 적용.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `frontend/src/components/LogViewer.tsx` (신규):
+  - macOS/Linux 터미널 윈도우 스타일, 순수 블랙 배경, 실시간 스트림 인디케이터, 자동 스크롤(Auto-scroll ON/OFF), 로그 레벨 필터(전체/감시/체결/경보/시스템), 키워드 검색, 복사/지우기 기능 탑재.
+- `frontend/src/components/StrategyControlsBento.tsx` (신규):
+  - 봇 제어(시작/정지/동기화), 실시간 K-Breakout & Kelly 비중 슬라이더 튜너, KODEX 200 시장 필터 및 서킷 브레이커 상태 인디케이터.
+- `frontend/src/App.tsx`:
+  - 좌측 상단에 `<LogViewer/>` 배치 및 우측 하단에 `<StrategyControlsBento/>` 배치하여 2x2 반응형 벤토 그리드 완성.
+- `frontend/src/hooks/useWebSocket.ts` & `frontend/src/types.ts`:
+  - `LogMessage`에 `'WATCH'` 레벨 추가, REST `/api/logs` 폴백 동기화 및 `clearLogs` 핸들러 제공.
+- `api_server.py`:
+  - `@api_router.get("/logs")` 엔드포인트 신설 (최근 100건 조회).
+  - `log_broadcast_loop` 백그라운드 태스크를 통해 MariaDB `logs` 테이블 신규 레코드 실시간 WebSocket 브로드캐스팅.
+  - `/ws/logs` 및 `/kiwoom/ws/logs` 접속 즉시 직전 100건 `LOGS_INIT` 전송.
+- `database.py`:
+  - `DatabaseManager.get_recent_logs(limit=100)` 비동기 메서드 추가.
+- `async_kiwoom_client.py`:
+  - `get_unexecuted_orders` (미체결 주문 조회) 메서드 추가.
+- `main_rest_async.py`:
+  - `_sync_account_balance`: D+2 주문가능금액(`dnca_tot_amt`, `ord_psbl_cash`) 우선 파싱 및 미체결 건수(`uncl_cnt`) 추적, 차감 내역 상세 로깅.
+  - `_evaluate_buy_condition`: 매수 조건 매 틱 전수 평가 유지 + 실시간 감시 대기 로그 5초/0.5%p 쓰로틀링 및 DB/WS 로깅.
+  - `trading_loop`: 루프 외부 `try-finally` 재배치 및 워커 자동 복구 Watchdog 탑재.
+- `test_api_server.py` & `test_async_trading_loop.py`:
+  - Test 14 (REST 로그 조회) 및 Test 8 (D+2 예수금 단일화 & 쓰로틀링 검증) 추가.
+
+### 3. 검증 결과
+- **프론트엔드 빌드:** `npm run build` Vite 5.4.21 번들링 성공 (0 errors)
+- **API 서버 테스트:** `python test_api_server.py` 14개 테스트 100% 통과
+- **트레이딩 루프 테스트:** `python test_async_trading_loop.py` 8개 테스트 100% 통과
+
+---
+
 ## 📅 [2026-09-08] CircuitBreaker is_open AttributeError 해결 및 상태 조회 방어 로직 강화
 
 ### 1. 작업 개요 및 목적

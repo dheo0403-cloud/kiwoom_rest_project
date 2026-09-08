@@ -71,6 +71,11 @@ class AsyncTradingBot:
         self.trailing_stop_drop = 0.025  # 최고점 대비 2.5% 반락 시 트레일링 스탑 매도
         self.realtime_stream_task: Optional[asyncio.Task] = None
 
+        # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
+        self._last_watch_log_time: Dict[str, float] = {}
+        self._last_watch_diff_pct: Dict[str, float] = {}
+        self.unclosed_orders_count = 0
+
     @property
     def running(self) -> bool:
         """봇 구동 상태 getter"""
@@ -174,7 +179,7 @@ class AsyncTradingBot:
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
     async def _sync_account_balance(self):
-        """계좌 잔고 및 예수금 비동기 동기화 (모의투자/실전투자 모든 API 응답 구조 100% 호환)"""
+        """계좌 잔고 및 예수금 비동기 동기화 (D+2 주문가능금액 기준 단일화 & 미체결 주문 추적)"""
         balance_data = await self.client.get_account_balance(priority=RequestPriority.MEDIUM)
         if not balance_data:
             return
@@ -193,30 +198,76 @@ class AsyncTradingBot:
 
         summary_candidates.append(balance_data)
 
-        deposit = self.portfolio.current_capital
-        possible_deposit_keys = [
+        # 1순위: D+2 추정예수금 / 주문가능금액
+        d2_deposit_keys = [
             'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
-            'ord_alowa', 'entr', 'prvs_rcdl_excc_amt', 'deposit', '주문가능금액'
+            'ord_alowa', 'd2_auto_amt', '주문가능금액'
         ]
+        # 2순위: 당일 단순 예수금
+        raw_entr_keys = ['entr', 'deposit', 'prvs_rcdl_excc_amt']
+
+        parsed_d2_deposit: Optional[float] = None
+        parsed_raw_entr: Optional[float] = None
+        unclosed_cnt: int = 0
 
         for s_dict in summary_candidates:
             if not isinstance(s_dict, dict):
                 continue
-            for key in possible_deposit_keys:
-                val = s_dict.get(key)
-                if val is not None:
-                    val_clean = str(val).strip().replace(',', '')
+
+            # D+2 주문가능금액 탐색
+            if parsed_d2_deposit is None:
+                for key in d2_deposit_keys:
+                    val = s_dict.get(key)
+                    if val is not None:
+                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            f_val = float(val_clean)
+                            if f_val > 0:
+                                parsed_d2_deposit = f_val
+                                break
+                        except ValueError:
+                            pass
+
+            # 당일 단순 예수금 탐색
+            if parsed_raw_entr is None:
+                for key in raw_entr_keys:
+                    val = s_dict.get(key)
+                    if val is not None:
+                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            f_val = float(val_clean)
+                            if f_val > 0:
+                                parsed_raw_entr = f_val
+                                break
+                        except ValueError:
+                            pass
+
+            # 미체결 수량/건수 탐색
+            for u_key in ['uncl_cnt', 'uncl_qty', 'unclosed_count', 'uncl_amt']:
+                if s_dict.get(u_key) is not None:
                     try:
-                        f_val = float(val_clean)
-                        if f_val > 0:
-                            deposit = f_val
-                            break
+                        u_val = int(float(str(s_dict[u_key]).replace(',', '')))
+                        if u_val > 0:
+                            unclosed_cnt = max(unclosed_cnt, u_val)
                     except ValueError:
                         pass
-            if deposit != self.portfolio.current_capital:
-                break
 
-        await self.portfolio.sync_capital(deposit)
+        # 미체결 조회 API 보강 (0건으로 감지된 경우 1회 확인)
+        if hasattr(self.client, 'get_unexecuted_orders'):
+            try:
+                uncl_data = await self.client.get_unexecuted_orders(priority=RequestPriority.LOW)
+                if uncl_data:
+                    u_list = uncl_data.get('output', uncl_data.get('output1', []))
+                    if isinstance(u_list, list):
+                        unclosed_cnt = max(unclosed_cnt, len(u_list))
+            except Exception:
+                pass
+
+        self.unclosed_orders_count = unclosed_cnt
+
+        # 최종 기준은 무조건 'D+2 실제 주문가능금액'
+        final_deposit = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
+        await self.portfolio.sync_capital(final_deposit)
 
         # 2. 보유 종목 동기화
         await self.portfolio.sync_positions(balance_data)
@@ -236,7 +287,18 @@ class AsyncTradingBot:
 
         await self.db.save_portfolio(self.portfolio.positions)
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
-        print(f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목")
+
+        # 상세 계좌 싱크 및 예수금 정산 로깅
+        sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 주문가능예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
+        if unclosed_cnt > 0:
+            sync_log += f" (미체결: {unclosed_cnt}건)"
+        print(sync_log)
+
+        if parsed_raw_entr and parsed_d2_deposit and parsed_raw_entr != parsed_d2_deposit:
+            diff = parsed_raw_entr - parsed_d2_deposit
+            diff_msg = f"💰 [예수금 정산] D+2 주문가능: {int(parsed_d2_deposit):,}원 확정 (당일 예수금: {int(parsed_raw_entr):,}원 / 증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
+            print(diff_msg)
+            await self.db.log_message("INFO", diff_msg)
 
     async def update_watchlist(self, top_n: Optional[int] = None):
         """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (기본 30종목, LOW 우선순위)"""
@@ -699,7 +761,19 @@ class AsyncTradingBot:
             else:
                 status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
 
-            print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
+            # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회 또는 괴리율 0.5%p 이상 변동 시에만 콘솔/DB/웹 출력)
+            import time
+            now_ts = time.time()
+            last_time = self._last_watch_log_time.get(code, 0.0)
+            last_diff = self._last_watch_diff_pct.get(code, -999.0)
+            time_elapsed = now_ts - last_time
+            diff_changed = abs(diff_pct - last_diff) >= 0.5
+
+            if time_elapsed >= 5.0 or diff_changed:
+                self._last_watch_log_time[code] = now_ts
+                self._last_watch_diff_pct[code] = diff_pct
+                print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
+                await self.db.log_message("WATCH", f"[실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
 
     async def _realtime_data_stream_worker(self):
         """
@@ -855,49 +929,61 @@ class AsyncTradingBot:
         if not self.realtime_stream_task or self.realtime_stream_task.done():
             self.realtime_stream_task = asyncio.create_task(self._realtime_data_stream_worker())
 
-        while self.is_running:
-            try:
-                loop_count += 1
-                now = datetime.now()
-                now_time = now.time()
+        try:
+            while self.is_running:
+                # 실시간 스트림 워커 생존 감시 및 자동 재가동 (Watchdog)
+                if self.realtime_stream_task and self.realtime_stream_task.done():
+                    exc = self.realtime_stream_task.exception() if not self.realtime_stream_task.cancelled() else None
+                    if exc:
+                        print(f"⚠️ [TradingLoop Watchdog] 실시간 스트림 워커 예외({exc}) 감지 -> 자동 재시작")
+                    self.realtime_stream_task = asyncio.create_task(self._realtime_data_stream_worker())
 
-                # 1. 수동 주문 큐 처리 (매 루프마다)
-                await self.process_manual_orders()
+                try:
+                    loop_count += 1
+                    now = datetime.now()
+                    now_time = now.time()
 
-                # 2. 시장 필터 및 계좌 싱크 (10초 주기)
-                if loop_count % 5 == 0:
-                    await self.check_market_filter()
-                    await self._sync_account_balance()
+                    # 1. 수동 주문 큐 처리 (매 루프마다)
+                    await self.process_manual_orders()
 
-                # 3. 감시 종목 갱신 (60초 주기)
-                if loop_count % 30 == 1:
-                    await self.update_watchlist()
+                    # 2. 시장 필터 및 계좌 싱크 (10초 주기)
+                    if loop_count % 5 == 0:
+                        await self.check_market_filter()
+                        await self._sync_account_balance()
 
-                # 4. 포지션 감시 및 출구 전략 (매 2초마다 최우선 감시)
-                await self.monitor_positions_and_exit()
+                    # 3. 감시 종목 갱신 (60초 주기)
+                    if loop_count % 30 == 1:
+                        await self.update_watchlist()
 
-                # 5. 신규 매수 기회 탐색 (매 2초마다)
-                await self.monitor_watchlist_and_enter()
+                    # 4. 포지션 감시 및 출구 전략 (매 2초마다 최우선 감시)
+                    await self.monitor_positions_and_exit()
 
-                # 6. 장 마감(15:30) 도달 시 당일 루프 종료 후 정산
-                if now_time.hour >= 15 and now_time.minute >= 30:
-                    print("🏁 [장 마감] 당일 정규 거래 시간이 종료되었습니다.")
-                    snap = await self.portfolio.get_snapshot()
-                    self.notifier.notify_daily_settlement(snap)
-                    await self.buffer.flush_all()
-                    await self.db.log_message("SYSTEM", "당일 정규장 마감. 일일 결산 알림 발송 완료.")
+                    # 5. 신규 매수 기회 탐색 (매 2초마다 2중 보완)
+                    await self.monitor_watchlist_and_enter()
+
+                    # 6. 장 마감(15:30) 도달 시 당일 루프 종료 후 정산
+                    if now_time.hour >= 15 and now_time.minute >= 30:
+                        print("🏁 [장 마감] 당일 정규 거래 시간이 종료되었습니다.")
+                        snap = await self.portfolio.get_snapshot()
+                        self.notifier.notify_daily_settlement(snap)
+                        await self.buffer.flush_all()
+                        await self.db.log_message("SYSTEM", "당일 정규장 마감. 일일 결산 알림 발송 완료.")
+                        break
+
+                    await asyncio.sleep(2.0)
+                except asyncio.CancelledError:
                     break
-
-                await asyncio.sleep(2.0)
-            except asyncio.CancelledError:
-                break
-            except Exception as e:
-                print(f"❌ [TradingLoop Error] {e}")
-                await self.db.log_message("ERROR", f"트레이딩 루프 오류: {e}")
-                await asyncio.sleep(2.0)
-            finally:
-                if self.realtime_stream_task and not self.realtime_stream_task.done():
-                    self.realtime_stream_task.cancel()
+                except Exception as e:
+                    print(f"❌ [TradingLoop Error] {e}")
+                    await self.db.log_message("ERROR", f"트레이딩 루프 오류: {e}")
+                    await asyncio.sleep(2.0)
+        finally:
+            if self.realtime_stream_task and not self.realtime_stream_task.done():
+                self.realtime_stream_task.cancel()
+                try:
+                    await self.realtime_stream_task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""

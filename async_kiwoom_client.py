@@ -338,6 +338,18 @@ class AsyncKiwoomClient:
         data, _ = await self.request("kt00005", url, payload, priority=priority)
         return data
 
+    async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        """미체결 주문 내역 조회 (ka10075 / kt00001 호환)"""
+        url = f"{self.base_url}/api/dostk/acnt"
+        payload = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password,
+            "qry_tp": "1"  # 1: 미체결
+        }
+        data, _ = await self.request("ka10075", url, payload, priority=priority)
+        return data
+
     async def get_top_trading_value(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """거래대금 상위 종목 조회 (KRX/통합 다중 거래소 파라미터 방어 지원)"""
         url = f"{self.base_url}/api/dostk/rkinfo"

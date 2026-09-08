@@ -41,7 +41,7 @@ export interface WatchlistItem {
 export interface LogMessage {
   id?: string;
   timestamp: string;
-  level: 'TRADE' | 'CRITICAL' | 'WARNING' | 'INFO' | 'SYSTEM' | 'ERROR' | 'MANUAL_ORDER';
+  level: 'TRADE' | 'CRITICAL' | 'WARNING' | 'INFO' | 'SYSTEM' | 'ERROR' | 'MANUAL_ORDER' | 'WATCH';
   message: string;
 }
 

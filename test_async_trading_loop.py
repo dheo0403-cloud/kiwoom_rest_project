@@ -441,6 +441,50 @@ async def test_detailed_debug_logging_and_low_capital_handling():
     assert "000660" not in portfolio.positions, "150,000원 SK하이닉스는 예수금 부족으로 매수되지 않아야 합니다."
     print("  ✅ 소액 예수금(11만 원) 1주 매수 및 자금 부족/타점 미도달 실시간 로깅 완벽 검증")
 
+async def test_d2_deposit_unification_and_throttling():
+    """8. D+2 주문가능금액 단일화 및 실시간 감시 쓰로틀링(Throttling) 검증"""
+    print("▶ [Test 8] D+2 주문가능금액 단일화 및 실시간 감시 쓰로틀링 검증...")
+
+    class MultiDepositMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "entr": "114922",            # 당일 단순 예수금
+                    "dnca_tot_amt": "100842",     # D+2 실제 주문 가능 금액
+                    "ord_psbl_cash": "100842",
+                    "uncl_cnt": "1"               # 미체결 1건
+                }],
+                "output2": []
+            }
+
+    mock_client = MultiDepositMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=114922.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 계좌 동기화 실행
+    await bot._sync_account_balance()
+    assert portfolio.current_capital == 100842.0, f"D+2 주문가능금액(100,842원)이 최종 확정되어야 합니다. (실제: {portfolio.current_capital})"
+    assert bot.unclosed_orders_count == 1, f"미체결 주문 건수가 1건으로 파싱되어야 합니다."
+    print("  ✅ D+2 주문가능금액 기준 단일화(100,842원) 및 미체결(1건) 추적 완벽 검증")
+
+    # 2. 쓰로틀링 검증
+    bot.watchlist["004310"] = {
+        "name": "현대약품", "period_high": 12000.0, "period_low": 8000.0,
+        "fib_382": 8900.0, "fib_500": 8500.0, "fib_618": 8100.0,
+        "current_price": 10360.0
+    }
+    # 1회차 틱 평가
+    await bot.OnReceiveRealData("004310", "주식체결", {"current_price": 10360.0, "volume": 100})
+    first_log_time = bot._last_watch_log_time.get("004310", 0.0)
+    assert first_log_time > 0, "1회차 틱 수신 시 로그 기록 시간이 저장되어야 합니다."
+
+    # 0.1초 후 동일 가격 틱 수신 -> 쓰로틀링 작동 (시간 갱신 안 됨)
+    await bot.OnReceiveRealData("004310", "주식체결", {"current_price": 10360.0, "volume": 150})
+    second_log_time = bot._last_watch_log_time.get("004310", 0.0)
+    assert second_log_time == first_log_time, "5초 이내 미세 변동 틱은 쓰로틀링되어 로그가 억제되어야 합니다."
+    print("  ✅ 실시간 틱 핸들러 연속 수신 시 쓰로틀링(Throttling) 방어 정상 검증")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -452,6 +496,7 @@ async def main():
     await test_market_filter_and_manual_orders()
     await test_update_watchlist_multi_schema_and_fallback()
     await test_detailed_debug_logging_and_low_capital_handling()
+    await test_d2_deposit_unification_and_throttling()
     print("=" * 65)
     print("🎉 Phase 2 모든 퀀트 매매 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)

@@ -218,7 +218,7 @@
 
 ---
 
-### Phase 9. 서킷 브레이커 is_open AttributeError 해결 및 상태 조회 방어 로직 강화 (Priority 9 - 진행 중)
+### Phase 9. 서킷 브레이커 is_open AttributeError 해결 및 상태 조회 방어 로직 강화 (Priority 9 - 완료)
 
 - [x] **Task 9.1: CircuitBreaker 클래스에 `is_open` 프로퍼티 및 헬퍼 메서드 추가 (`async_kiwoom_client.py`)**
   - **설명:** `CircuitBreaker` 객체에 `state == "OPEN"`을 반환하는 `@property is_open`을 추가하여 호출 규격을 일원화.
@@ -234,6 +234,30 @@
   - **설명:** `test_api_server.py` 단위 테스트 검증 및 전용 브랜치 커밋.
   - **수정 파일:** `test_api_server.py`, `WORK_HISTORY.md`
   - **검증 기준:** `test_api_server.py` 100% ALL PASS.
+
+---
+
+### Phase 10. 대시보드 실시간 터미널 LogViewer 개편, D+2 예수금 단일화 및 실시간 감시 쓰로틀링 루프 부활 (Priority 10 - 완료)
+
+- [x] **Task 10.1: 예수금 기준 D+2 주문가능금액 단일화 및 미체결 주문 추적 (`main_rest_async.py`, `async_kiwoom_client.py`, `database.py`)**
+  - **설명:** 당일 예수금(`entr`)과 D+2 추정예수금(`dnca_tot_amt`/`ord_psbl_cash`) 간의 혼용으로 인한 유령 차감 오해를 해결하고, 기준을 'D+2 실제 주문가능금액'으로 전면 통일. 미체결 주문 현황(`미체결: N건`) 로깅 및 정산 내역 표출.
+  - **수정 파일:** `main_rest_async.py`, `async_kiwoom_client.py`, `database.py`
+  - **검증 기준:** 계좌 싱크 시 D+2 주문가능금액이 정확히 계산되고 미체결 건수가 로그에 명시됨.
+
+- [x] **Task 10.2: 실시간 틱 수신 루프 버그 수정 및 감시 로그 쓰로틀링(Throttling) 적용 (`main_rest_async.py`)**
+  - **설명:** `trading_loop` 내 `try-finally` 배치 오류로 첫 틱 수신 후 워커 태스크가 즉각 취소되던 버그를 해결하고 자동 복구 Watchdog 추가. 매 틱마다 매수 평가는 무조건 실행하되, `⏱ [실시간 감시]` 로그는 종목당 5초 주기 또는 괴리율 0.5% 이상 변동 시에만 출력하도록 쓰로틀링 적용.
+  - **수정 파일:** `main_rest_async.py`
+  - **검증 기준:** 실시간 시세 스트림이 멈추지 않고 지속 동작하며, 터미널 로그가 적절한 주기로 매끄럽게 출력됨.
+
+- [x] **Task 10.3: 프론트엔드 미작동 차트 제거 및 터미널 감성 <LogViewer/> 컴포넌트 & WebSocket 로그 스트리밍 구현 (`frontend/src/`, `api_server.py`)**
+  - **설명:** 미작동하던 차트 컴포넌트를 완전히 걷어내고, 검은색 배경의 터미널 스타일 `<LogViewer/>` 컴포넌트 신규 구현. 최근 100줄 로그, 자동 스크롤(Auto-scroll), 로그 레벨 필터(전체/감시/체결/경보/시스템), REST `/api/logs` 및 WebSocket `/ws/logs` 듀얼 연동.
+  - **수정 파일:** `frontend/src/components/LogViewer.tsx`, `frontend/src/App.tsx`, `frontend/src/types.ts`, `frontend/src/hooks/useWebSocket.ts`, `api_server.py`
+  - **검증 기준:** 프론트엔드 대시보드에서 봇의 실시간 매매/감시 로그가 텍스트 스트리밍 방식으로 쏟아지며 자동 스크롤 동작.
+
+- [x] **Task 10.4: 로컬 통합 검증 및 Git 형상 관리 (`feat/dashboard-log-viewer-and-core-fixes`) & AKS 배포 파일 목록 추출**
+  - **설명:** 단위 테스트, 프론트엔드 빌드 검증, 신규 브랜치 커밋 및 AKS 배포 대상 파일 목록 추출.
+  - **수정 파일:** `test_api_server.py`, `test_async_trading_loop.py`, `WORK_HISTORY.md`
+  - **검증 기준:** 백엔드/프론트엔드 테스트 100% PASS, 브랜치 커밋 완료, AKS 배포 파일 목록 보고.
 
 ---
 
