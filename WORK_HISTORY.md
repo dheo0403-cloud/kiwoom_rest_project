@@ -2,6 +2,24 @@
 
 ---
 
+## 📅 [2026-09-08] CircuitBreaker is_open AttributeError 해결 및 상태 조회 방어 로직 강화
+
+### 1. 작업 개요 및 목적
+- `api_server.py`의 `get_bot_status` API 호출 시 발생하던 `AttributeError: 'CircuitBreaker' object has no attribute 'is_open'` 에러로 인한 콘솔 로그 도배 결함 해결.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `async_kiwoom_client.py`:
+  - `CircuitBreaker` 클래스에 `@property is_open` 추가 (`self.state == "OPEN"`)
+- `api_server.py`:
+  - `get_bot_status` 내 서킷 브레이커 상태 확인 시 `cb.state == "OPEN"`, `cb.is_open`, `can_proceed()` 다중 폴백 및 `try-except` 방어 로직 적용
+- `test_api_server.py`:
+  - 서킷 브레이커 CLOSED/OPEN 상태 연동 단위 테스트 케이스 추가 및 검증 완료
+
+### 3. 검증 결과
+- **백엔드 테스트:** `python test_api_server.py` 및 `python test_async_trading_loop.py` 100% ALL PASS
+
+---
+
 ## 📅 [2026-09-08] 키움 포털 URL(/kiwoom) 404 및 API/WebSocket 서브패스 라우팅 결함 해결
 
 ### 1. 작업 개요 및 목적
