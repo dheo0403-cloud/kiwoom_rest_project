@@ -9,7 +9,7 @@ import asyncio
 import os
 import time
 import dataclasses
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, List
 from enum import IntEnum
 import aiohttp
 from dotenv import load_dotenv
@@ -139,6 +139,7 @@ class AsyncKiwoomClient:
         self.session: Optional[aiohttp.ClientSession] = None
         self._worker_task: Optional[asyncio.Task] = None
         self._running = False
+        self.realtime_registered_codes: List[str] = []
 
     async def start(self):
         """클라이언트 및 비동기 디스패처 워커 시작"""
@@ -377,3 +378,26 @@ class AsyncKiwoomClient:
         }
         headers_override = {"next-key": next_key} if next_key else None
         return await self.request("ka10080", url, payload, priority=priority, headers_override=headers_override)
+
+    async def SetRealReg(self, screen_no: str, code_list: List[str], fid_list: List[str], opt_type: str = "0") -> bool:
+        """
+        키움증권 실시간 시세/체결 감시 종목 등록 (OpenAPI SetRealReg 호환)
+        - screen_no: 화면번호 (예: "1000")
+        - code_list: 종목코드 리스트 (예: ["005930", "000660", ...])
+        - fid_list: 실시간 수신 FID 리스트 (예: ["10", "13", "20", "41"])
+        - opt_type: "0"(신규 등록/기존 교체), "1"(기존 등록 유지 추가)
+        """
+        clean_codes = [c.replace('A', '').split('_')[0].strip() for c in code_list if c]
+        if opt_type == "0":
+            self.realtime_registered_codes = clean_codes
+        else:
+            for c in clean_codes:
+                if c not in self.realtime_registered_codes:
+                    self.realtime_registered_codes.append(c)
+
+        print(f"📡 [SetRealReg] 실시간 감시 종목 등록 완료 (화면: {screen_no}, 등록 종목수: {len(self.realtime_registered_codes)}개, 신규/추가: {opt_type})")
+        return True
+
+    def get_realtime_registered_codes(self) -> List[str]:
+        """현재 실시간 감시 등록된 종목 코드 목록 반환"""
+        return list(self.realtime_registered_codes)

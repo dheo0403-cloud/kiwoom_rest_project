@@ -69,6 +69,7 @@ class AsyncTradingBot:
         ]
         self.stop_loss_rate = -0.04  # -4.0% 하드 스탑로스 (CRITICAL 긴급 매도)
         self.trailing_stop_drop = 0.025  # 최고점 대비 2.5% 반락 시 트레일링 스탑 매도
+        self.realtime_stream_task: Optional[asyncio.Task] = None
 
     @property
     def running(self) -> bool:
@@ -79,6 +80,51 @@ class AsyncTradingBot:
     def running(self, value: bool):
         """봇 구동 상태 setter"""
         self.is_running = bool(value)
+
+    async def SetRealReg(self, screen_no: str, code_list: List[str], fid_list: List[str], opt_type: str = "0") -> bool:
+        """
+        키움증권 실시간 시세/체결 감시 등록 (OpenAPI SetRealReg 호환)
+        - Watchlist 30개 확정 즉시 호출하여 실시간 수신 파이프라인 활성화
+        """
+        if hasattr(self.client, 'SetRealReg'):
+            await self.client.SetRealReg(screen_no, code_list, fid_list, opt_type)
+        print(f"📡 [SetRealReg] Watchlist 실시간 시세 등록 완료: 총 {len(code_list)}개 종목 (화면: {screen_no}, FID: {','.join(fid_list)})")
+        return True
+
+    async def OnReceiveRealData(self, code: str, real_type: str, real_data: Dict[str, Any]):
+        """
+        실시간 데이터 수신 이벤트 핸들러 (OpenAPI OnReceiveRealData 호환)
+        - 실시간 틱 수신 시 최상단 핑(Ping) 디버그 로그 출력
+        - 인메모리 링버퍼 및 포트폴리오/워치리스트 현재가 즉각 갱신
+        - 피보나치 매수 조건 평가 함수(_evaluate_buy_condition) 즉시 호출
+        """
+        raw_p = real_data.get('current_price') or real_data.get('prpr') or real_data.get('stck_prpr') or real_data.get('cur_prc') or 0
+        raw_v = real_data.get('volume') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
+
+        try:
+            cur_price = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+        except (ValueError, TypeError):
+            cur_price = 0.0
+
+        try:
+            cur_volume = abs(float(str(raw_v).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+        except (ValueError, TypeError):
+            cur_volume = 0.0
+
+        if cur_price <= 0:
+            return
+
+        # 1. 핑(Ping) 디버그 로그 (실시간 틱 수신 가시화)
+        print(f"⚡ [실시간 틱 수신] 종목코드: {code}, 현재가: {int(cur_price):,}원")
+
+        # 2. 인메모리 링버퍼 및 상태 갱신
+        self.buffer.update_tick(code, cur_price, cur_volume)
+        await self.portfolio.update_current_price(code, cur_price)
+        if code in self.watchlist:
+            self.watchlist[code]['current_price'] = cur_price
+
+        # 3. 피보나치 매수 조건 평가 함수 즉각 호출
+        await self._evaluate_buy_condition(code, cur_price, cur_volume)
 
     async def run_daily_trading_loop(self):
         """api_server.py 호환 비동기 트레이딩 루프 실행 별칭"""
@@ -383,6 +429,11 @@ class AsyncTradingBot:
         await self.db.save_watchlist(list(self.watchlist.values()))
         print(f"✅ [Watchlist] {len(self.watchlist)}개 종목 피보나치 분석 완료 및 DB 저장")
 
+        # Watchlist 30개 확정 직후 키움 실시간 시세 등록 (SetRealReg) 호출
+        if self.watchlist:
+            watch_codes = list(self.watchlist.keys())
+            await self.SetRealReg("1000", watch_codes, ["10", "13", "20", "41"], "0")
+
     async def check_market_filter(self):
         """KODEX 200 (069500) 지수 급락 감지 (-1.5% 하락 시 신규 매수 제한)"""
         kodex_data = await self.client.get_price("069500", priority=RequestPriority.LOW)
@@ -475,13 +526,24 @@ class AsyncTradingBot:
             out = price_data.get('output', price_data)
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
+            elif not isinstance(out, dict):
+                out = {}
 
-            cur_price_str = str(out.get('prpr', 0) or out.get('current_price', 0)).replace(',', '').strip()
-            if not cur_price_str.isdigit() or int(cur_price_str) <= 0:
+            cur_price_raw = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
+            try:
+                cur_price = abs(float(str(cur_price_raw).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+            except (ValueError, TypeError):
                 continue
 
-            cur_price = float(cur_price_str)
-            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0)).replace(',', '').strip() or 0)
+            if cur_price <= 0:
+                continue
+
+            cur_volume_raw = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            try:
+                cur_volume = abs(float(str(cur_volume_raw).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+            except (ValueError, TypeError):
+                cur_volume = 0.0
+
             self.buffer.update_tick(code, cur_price, cur_volume)
             await self.portfolio.update_current_price(code, cur_price)
 
@@ -567,38 +629,144 @@ class AsyncTradingBot:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
             await self.db.log_message("ERROR", f"분할 익절 실패: {name}({code}) - {msg}")
 
-    async def monitor_watchlist_and_enter(self):
+    async def _evaluate_buy_condition(self, code: str, cur_price: float, cur_volume: float):
         """
-        감시 종목 피보나치 눌림목 매수 기회 포착
-        - 0.382 / 0.5 / 0.618 눌림목 구간 지지 및 반등 감지 시 HIGH 우선순위 매수 발주
-        - 상세 디버깅 및 원인별 상태(타점 대기, 자금 부족, 필터 미충족 등) 실시간 로깅
+        실시간 피보나치 눌림목 및 ATR 변동성 돌파 매수 조건 평가 함수
+        - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
         """
         if self.mdd_shutdown:
-            print("⚠️ [매수 스킵] 계좌 MDD -5% 서킷 브레이커 발동 중으로 신규 매수가 중단되었습니다.")
             return
         if not self.market_filter_passed:
-            print(f"⚠️ [매수 스킵] KODEX 200 급락({self.kodex200_change_rate:.2f}%) 시장 필터 발동 중으로 신규 매수가 제한됩니다.")
             return
 
+        info = self.watchlist.get(code)
+        if not info:
+            return
+
+        name = info.get('name', code)
+        fib_382 = info.get('fib_382', 0)
+        fib_500 = info.get('fib_500', 0)
+        fib_618 = info.get('fib_618', 0)
+        period_high = info.get('period_high', 0)
+        period_low = info.get('period_low', 0)
         current_deposit = self.portfolio.current_capital
 
-        for code, info in list(self.watchlist.items()):
-            name = info.get('name', code)
-            fib_382 = info.get('fib_382', 0)
-            fib_500 = info.get('fib_500', 0)
-            fib_618 = info.get('fib_618', 0)
-            period_high = info.get('period_high', 0)
-            period_low = info.get('period_low', 0)
+        # 1. 포지션 한도 및 중복 매수 체크
+        if not await self.portfolio.can_buy(code):
+            return
 
-            # 1. 포지션 한도 및 중복 매수 체크
-            if not await self.portfolio.can_buy(code):
-                if code in self.portfolio.positions:
+        # 2. 지표 산출 (인메모리 버퍼 기반)
+        candle_df = self.buffer.get_dataframe(code, limit=20)
+        ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
+        ind['avg_vol'] = info.get('avg_volume', 0)
+        ind['high10'] = period_high if period_high > 0 else cur_price
+        ind['period_high'] = period_high
+        ind['period_low'] = period_low
+        ind['fib_382'] = fib_382
+        ind['fib_500'] = fib_500
+        ind['fib_618'] = fib_618
+        ind['open'] = cur_price
+        ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
+        ind['skip_time_filter'] = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
+
+        # 3. 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀 & 피보나치)
+        buy_signal, reason = await self.strategy.check_buy_signal(
+            code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
+        )
+
+        diff_pct = ((cur_price - fib_382) / fib_382 * 100.0) if fib_382 > 0 else 0.0
+
+        if buy_signal:
+            atr14 = ind.get('atr14', 0)
+            # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산
+            order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
+
+            if order_qty <= 0:
+                print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
+                await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
+                return
+
+            print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
+            await self._execute_smart_buy(code, name, order_qty, cur_price)
+        else:
+            # 매수 대기 상세 이유 상태 가시화 출력
+            if cur_price > fib_382 and fib_382 > 0:
+                status_desc = f"목표 타점(Fib 38.2% {int(fib_382):,}원) 미도달 ➔ 대기 중 (괴리율: {diff_pct:+.2f}%)"
+            elif cur_price < fib_618 and fib_618 > 0:
+                status_desc = f"피보나치 61.8% 지지선({int(fib_618):,}원) 하회 ➔ 과대낙폭 관망"
+            elif reason:
+                status_desc = f"전략 필터 ({reason})"
+            else:
+                status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
+
+            print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
+
+    async def _realtime_data_stream_worker(self):
+        """
+        키움 실시간 틱 데이터 비동기 스트림 워커
+        - 등록된 감시 종목들을 지속 순회하며 실시간 시세를 수신하여 OnReceiveRealData 이벤트로 디스패치
+        """
+        print(f"📡 [RealtimeStream] 실시간 틱 데이터 스트림 워커 가동 시작")
+        while self.is_running:
+            try:
+                watch_codes = list(self.watchlist.keys())
+                if not watch_codes:
+                    await asyncio.sleep(1.0)
                     continue
-                else:
-                    print(f"⚠️ [매수 스킵] {name}({code}) - 최대 보유 포지션 수({self.portfolio.max_stocks}개) 도달")
-                    break
 
-            # 2. 실시간 호가 및 시세 조회 (LOW 우선순위)
+                for code in watch_codes:
+                    if not self.is_running:
+                        break
+
+                    # API Rate Limiter 준수 미세 분산 딜레이 (초당 약 3.3건)
+                    await asyncio.sleep(0.3)
+
+                    price_data = await self.client.get_price(code, priority=RequestPriority.LOW)
+                    if not price_data:
+                        continue
+
+                    out = price_data.get('output', price_data)
+                    if isinstance(out, list) and len(out) > 0:
+                        out = out[0]
+                    elif not isinstance(out, dict):
+                        out = {}
+
+                    raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
+                    raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+
+                    try:
+                        cur_p = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+                    except (ValueError, TypeError):
+                        cur_p = 0.0
+
+                    try:
+                        cur_v = abs(float(str(raw_v).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+                    except (ValueError, TypeError):
+                        cur_v = 0.0
+
+                    if cur_p > 0:
+                        await self.OnReceiveRealData(code, "주식체결", {
+                            "current_price": cur_p,
+                            "volume": cur_v,
+                            "raw": out
+                        })
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"⚠️ [RealtimeStream Error] {e}")
+                await asyncio.sleep(1.0)
+
+    async def monitor_watchlist_and_enter(self):
+        """
+        감시 종목 주기 순회 매수 기회 포착
+        - 실시간 스트림 워커와 함께 주기적으로 OnReceiveRealData를 트리거하여 2중 안전망 확보
+        """
+        if self.mdd_shutdown or not self.market_filter_passed:
+            return
+
+        for code in list(self.watchlist.keys()):
+            await asyncio.sleep(0.05)
             price_data = await self.client.get_price(code, priority=RequestPriority.LOW)
             if not price_data:
                 continue
@@ -606,66 +774,31 @@ class AsyncTradingBot:
             out = price_data.get('output', price_data)
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
+            elif not isinstance(out, dict):
+                out = {}
 
-            cur_price_str = str(out.get('prpr', 0) or out.get('current_price', 0) or out.get('stck_prpr', 0) or 0).replace(',', '').strip()
-            if not cur_price_str.isdigit() or int(cur_price_str) <= 0:
+            raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
+            raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+
+            try:
+                cur_price = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+            except (ValueError, TypeError):
                 continue
 
-            cur_price = float(cur_price_str)
-            cur_volume = float(str(out.get('acml_vol', 0) or out.get('volume', 0) or out.get('cntg_vol', 0) or 0).replace(',', '').strip() or 0)
-            self.buffer.update_tick(code, cur_price, cur_volume)
-            info['current_price'] = cur_price
+            if cur_price <= 0:
+                continue
 
-            # 시가 추출 (다중 키 호환)
-            raw_open = out.get('oprc') or out.get('stck_oprc') or out.get('open_pric') or out.get('open') or out.get('oprn') or cur_price
-            open_price = abs(float(str(raw_open).replace(',', '').strip() or cur_price))
+            try:
+                cur_volume = abs(float(str(raw_v).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+            except (ValueError, TypeError):
+                cur_volume = 0.0
 
-            # 3. 지표 산출
-            candle_df = self.buffer.get_dataframe(code, limit=20)
-            ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
-            ind['avg_vol'] = info.get('avg_volume', 0)
-            ind['high10'] = period_high if period_high > 0 else cur_price
-            ind['period_high'] = period_high
-            ind['period_low'] = period_low
-            ind['fib_382'] = fib_382
-            ind['fib_500'] = fib_500
-            ind['fib_618'] = fib_618
-            ind['open'] = open_price
-            ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
-            ind['skip_time_filter'] = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
-
-            # 4. 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀 & 피보나치)
-            buy_signal, reason = await self.strategy.check_buy_signal(
-                code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
-            )
-
-            # 5. 상세 디버그 로깅 및 주문 실행
-            diff_pct = ((cur_price - fib_382) / fib_382 * 100.0) if fib_382 > 0 else 0.0
-
-            if buy_signal:
-                atr14 = ind.get('atr14', 0)
-                # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산
-                order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
-
-                if order_qty <= 0:
-                    print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
-                    await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
-                    continue
-
-                print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
-                await self._execute_smart_buy(code, name, order_qty, cur_price)
-            else:
-                # 매수 대기 상세 이유 상태 가시화 출력
-                if cur_price > fib_382 and fib_382 > 0:
-                    status_desc = f"목표 타점(Fib 38.2% {int(fib_382):,}원) 미도달 ➔ 대기 중 (괴리율: {diff_pct:+.2f}%)"
-                elif cur_price < fib_618 and fib_618 > 0:
-                    status_desc = f"피보나치 61.8% 지지선({int(fib_618):,}원) 하회 ➔ 과대낙폭 관망"
-                elif reason:
-                    status_desc = f"전략 필터 ({reason})"
-                else:
-                    status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
-
-                print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
+            # OnReceiveRealData 이벤트로 통일 전달
+            await self.OnReceiveRealData(code, "주식체결", {
+                "current_price": cur_price,
+                "volume": cur_volume,
+                "raw": out
+            })
 
     async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float):
         """HIGH 우선순위로 매도 1호가 지정가 매수 발주"""
@@ -718,6 +851,10 @@ class AsyncTradingBot:
         loop_count = 0
         print(f"🔥 [TradingLoop] 정규장 실시간 매매 루프 가동 시작 ({datetime.now().strftime('%H:%M:%S')})")
 
+        # 실시간 틱 데이터 비동기 스트림 워커 시작
+        if not self.realtime_stream_task or self.realtime_stream_task.done():
+            self.realtime_stream_task = asyncio.create_task(self._realtime_data_stream_worker())
+
         while self.is_running:
             try:
                 loop_count += 1
@@ -758,6 +895,9 @@ class AsyncTradingBot:
                 print(f"❌ [TradingLoop Error] {e}")
                 await self.db.log_message("ERROR", f"트레이딩 루프 오류: {e}")
                 await asyncio.sleep(2.0)
+            finally:
+                if self.realtime_stream_task and not self.realtime_stream_task.done():
+                    self.realtime_stream_task.cancel()
 
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
@@ -816,6 +956,8 @@ class AsyncTradingBot:
         """시스템 종료 및 자원 정리 (Graceful Shutdown)"""
         self.is_running = False
         print("🛑 [AsyncTradingBot] 데몬 종료 및 자원 반환 중...")
+        if self.realtime_stream_task and not self.realtime_stream_task.done():
+            self.realtime_stream_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:
