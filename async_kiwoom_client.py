@@ -113,7 +113,11 @@ class AsyncKiwoomClient:
     - 서킷 브레이커 및 자동 재시도
     - 비동기 워커 디스패처
     """
-    def __init__(self, is_demo: bool = True, max_tps: float = None):
+    def __init__(self, is_demo: Optional[bool] = None, max_tps: float = None):
+        if is_demo is None:
+            # 환경변수 IS_REAL 또는 KIWOOM_MODE 기반 결정 (기본값: 실전투자 REAL)
+            env_is_mock = os.getenv("IS_REAL", "true").lower() in ("false", "0", "no") or os.getenv("KIWOOM_MODE", "REAL").upper() in ("MOCK", "DEMO")
+            is_demo = env_is_mock
         self.is_demo = is_demo
         if is_demo:
             self.base_url = "https://mockapi.kiwoom.com"

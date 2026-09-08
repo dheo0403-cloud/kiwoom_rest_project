@@ -171,7 +171,7 @@ export function useTradingWebSocket() {
   const addManualLog = useCallback((level: LogMessage['level'], message: string) => {
     const newLog: LogMessage = {
       id: Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toTimeString().split(' ')[0],
+      timestamp: new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false }),
       level,
       message
     };

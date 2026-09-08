@@ -7,10 +7,44 @@ Gate Info:
 """
 import aiomysql
 import os
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
+
+# 한국 표준시 (KST, Asia/Seoul, UTC+9) 고정
+KST = timezone(timedelta(hours=9))
+
+def get_kst_now() -> datetime:
+    """한국 표준시 (Asia/Seoul, UTC+9) 현재 일시 반환"""
+    return datetime.now(KST)
+
+def format_kst_time_str(dt=None) -> str:
+    """임의의 datetime/문자열을 한국 표준시(KST) 'HH:MM:SS' 포맷으로 보정 변환"""
+    if dt is None:
+        return get_kst_now().strftime('%H:%M:%S')
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            # DB가 UTC로 저장된 naive datetime일 경우 (00~08시 등) KST(+9시간)로 보정
+            now_utc_hour = datetime.now(timezone.utc).hour
+            if abs(dt.hour - now_utc_hour) <= 1:
+                return (dt + timedelta(hours=9)).strftime('%H:%M:%S')
+            return dt.strftime('%H:%M:%S')
+        return dt.astimezone(KST).strftime('%H:%M:%S')
+    if isinstance(dt, str):
+        try:
+            if len(dt) == 8 and ':' in dt:
+                h, m, s = map(int, dt.split(':'))
+                now_utc_hour = datetime.now(timezone.utc).hour
+                if abs(h - now_utc_hour) <= 1:
+                    h_kst = (h + 9) % 24
+                    return f"{h_kst:02d}:{m:02d}:{s:02d}"
+                return dt
+            d = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            return d.astimezone(KST).strftime('%H:%M:%S')
+        except Exception:
+            return dt
+    return str(dt)
 
 class DatabaseManager:
     def __init__(self):
@@ -413,12 +447,7 @@ class DatabaseManager:
                     res = []
                     for r in rows:
                         created = r.get('timestamp') or r.get('created_at') or r.get('time')
-                        if isinstance(created, datetime):
-                            ts = created.strftime('%H:%M:%S')
-                        elif created:
-                            ts = str(created)
-                        else:
-                            ts = datetime.now().strftime('%H:%M:%S')
+                        ts = format_kst_time_str(created)
                         res.append({
                             'id': str(r.get('id', '')),
                             'level': r.get('level', 'INFO'),

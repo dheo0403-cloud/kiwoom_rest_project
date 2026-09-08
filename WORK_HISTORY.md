@@ -2,6 +2,38 @@
 
 ---
 
+## 📅 [2026-09-08] 실전투자(LIVE) 전환, KST 타임존 고정, 상단 헤더 실시간 잔고 & 보유 포지션 드롭다운 UI 구현
+
+### 1. 작업 개요 및 목적
+- **실전투자(REAL/LIVE) 모드 전면 전환:** 기본 실행 모드를 모의투자(MOCK)에서 실제 주문이 체결되는 실전투자(LIVE)로 전환하고, 상단 헤더에 에메랄드 컬러의 `LIVE (실전투자)` 배지 표출.
+- **KST (Asia/Seoul, UTC+9) 타임존 고정:** MariaDB 로그 적재/조회 및 WebSocket 실시간 스트리밍 시 UTC로 표기되던 시간을 한국 표준시(KST)로 일괄 변환 고정.
+- **상단 헤더 실시간 계좌 잔고 & 보유 포지션 드롭다운 구현:** 상단 헤더 중앙에 `[ 💰 총자산: X원 | 💵 D+2 예수금: Y원 | 📦 보유 종목: Z개 ▾ ]` 상시 관제 뱃지 바를 배치하고, 클릭 시 보유 주식 상세 목록(종목명, 코드, 수량, 매입가, 현재가, 평가손익, 수익률)이 실시간으로 표출되는 인터랙티브 팝오버 드롭다운 구현.
+- **보유 포지션 파싱 다중 스키마 보강:** 키움 API `kt00005`의 `output2`, `Output2`, `list`, `acnt_dtl_list`, `holdings`, `output` 등 모든 필드 규격을 100% 포괄하여 보유 종목 누락 방지.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `async_kiwoom_client.py`:
+  - `__init__` 기본 모드를 실전투자(`self.mode = "REAL"`, `is_demo = False`)로 전환하고 환경 변수(`IS_REAL`, `KIWOOM_MODE`) 연동
+- `start.py` & `main_rest_async.py`:
+  - 기본 실행 인자를 실전투자(`--real`)로 통일
+- `database.py`:
+  - `KST = timezone(timedelta(hours=9))` 및 `format_kst_time_str` 도입, `get_recent_logs()` KST 변환 적용
+- `api_server.py`:
+  - `lifespan` 시 기본 실전투자 클라이언트 기동, `log_broadcast_loop` 내 KST 타임존 적용
+- `frontend/src/components/Header.tsx`:
+  - `LIVE (실전투자)` 에메랄드 뱃지 및 중앙 `[총자산 | D+2 예수금 | 보유 종목]` 실시간 바 + 포지션 상세 드롭다운 메뉴 탑재
+- `frontend/src/components/LogViewer.tsx`:
+  - 상단 윈도우 바에 `[ 총자산: X원 | 예수금: Y원 | 보유: Z개 ]` 실시간 서머리 인디케이터 추가
+- `frontend/src/App.tsx`:
+  - `portfolio` 상태를 `<Header />` 및 `<LogViewer />`에 직결 전달
+- `async_portfolio.py`:
+  - `sync_positions` 내 다중 스키마 키(`stk_cd`, `code`, `mksc_shrn_iscd`, `pdno`, `item_code` 등) 전수 파싱 지원
+
+### 3. 검증 결과
+- **프론트엔드 빌드:** `npm run build` Vite 5.4.21 번들링 성공 (0 errors, dist 갱신 완료)
+- **단위 테스트:** `test_async_trading_loop.py` (8/8 통과), `test_api_server.py` (14/14 통과), `test_notifier.py` (3/3 통과) 100% ALL PASS
+
+---
+
 ## 📅 [2026-09-08] 총 평가자산 및 D+2 주문가능 예수금 필드 독립 분리 & 장 마감 정산 리포트 기말자산 오류 해결
 
 ### 1. 작업 개요 및 목적

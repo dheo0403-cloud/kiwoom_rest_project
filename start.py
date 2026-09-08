@@ -59,13 +59,13 @@ def run_trading_bot(is_real):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="키움 퀀트 시스템 통합 슈퍼바이저 (24/365 가용성 보장)")
-    parser.add_argument('--real', action='store_true', help='실전투자 모드로 실행')
+    parser.add_argument('--real', action='store_true', default=True, help='실전투자 모드로 실행 (기본: True)')
+    parser.add_argument('--mock', action='store_true', default=False, help='모의투자 모드로 강제 실행')
     args = parser.parse_args()
 
-    # 환경변수 TRADING_MODE=real 또는 IS_REAL=true 지원 (Kubernetes 배포 호환)
-    env_mode = os.getenv("TRADING_MODE", "").lower()
-    env_is_real = os.getenv("IS_REAL", "false").lower() in ("true", "1", "yes")
-    is_real = args.real or env_mode == "real" or env_is_real
+    # 환경변수 TRADING_MODE 또는 IS_REAL / KIWOOM_MODE 지원 (기본값: 실전투자 REAL)
+    env_is_mock = os.getenv("IS_REAL", "true").lower() in ("false", "0", "no") or os.getenv("KIWOOM_MODE", "REAL").upper() in ("MOCK", "DEMO")
+    is_real = False if args.mock else (not env_is_mock)
 
     # 1. API 서버 (8000) 실행
     api_proc = run_api_server()

@@ -36,13 +36,16 @@ class AsyncTradingBot:
     - 텔레그램 실시간 비동기 알림 (AsyncNotifier)
     - 수동 주문 비동기 처리 및 DB 영속화
     """
-    def __init__(self, is_demo: bool = True, initial_capital: float = 10_000_000,
+    def __init__(self, is_demo: Optional[bool] = None, initial_capital: float = 10_000_000,
                  client: Optional[AsyncKiwoomClient] = None,
                  portfolio: Optional[AsyncPortfolioManager] = None,
                  db: Optional[AsyncDatabase] = None,
                  buffer: Optional[MarketDataBuffer] = None,
                  strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None,
                  notifier: Optional[AsyncNotifier] = None):
+        if is_demo is None:
+            env_is_mock = os.getenv("IS_REAL", "true").lower() in ("false", "0", "no") or os.getenv("KIWOOM_MODE", "REAL").upper() in ("MOCK", "DEMO")
+            is_demo = env_is_mock
         self.is_demo = is_demo
         self.client = client or AsyncKiwoomClient(is_demo=is_demo)
         self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=5)
@@ -1090,11 +1093,13 @@ class AsyncTradingBot:
 
 async def main():
     parser = argparse.ArgumentParser(description="키움 OpenAPI 비동기 퀀트 트레이딩 데몬 (24/365 무한 루프)")
-    parser.add_argument('--real', action='store_true', help='실전투자 모드 (미지정시 모의투자)')
+    parser.add_argument('--real', action='store_true', default=True, help='실전투자 모드 (기본값: True)')
+    parser.add_argument('--mock', action='store_true', default=False, help='모의투자 모드 강제 실행')
     parser.add_argument('--capital', type=float, default=10_000_000, help='초기 운용 자본금')
     args = parser.parse_args()
 
-    bot = AsyncTradingBot(is_demo=not args.real, initial_capital=args.capital)
+    is_demo = True if args.mock else (not args.real)
+    bot = AsyncTradingBot(is_demo=is_demo, initial_capital=args.capital)
     try:
         await bot.run_daemon()
     except KeyboardInterrupt:

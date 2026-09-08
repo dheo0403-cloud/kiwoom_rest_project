@@ -99,6 +99,7 @@ export function App() {
       {/* Top Header */}
       <Header
         botStatus={botStatus}
+        portfolio={portfolio}
         isConnected={isConnected}
         onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
         onOpenParams={() => setIsParamsOpen(true)}
@@ -123,6 +124,7 @@ export function App() {
             <div className="h-[430px]">
               <LogViewer
                 logs={logs}
+                portfolio={portfolio}
                 onClearLogs={clearLogs}
               />
             </div>

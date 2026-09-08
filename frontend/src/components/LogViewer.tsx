@@ -14,19 +14,24 @@ import {
   AlertTriangle,
   Info
 } from 'lucide-react';
-import { LogMessage } from '../types';
+import { LogMessage, PortfolioSnapshot } from '../types';
 
 interface LogViewerProps {
   logs: LogMessage[];
+  portfolio?: PortfolioSnapshot;
   onClearLogs?: () => void;
   className?: string;
 }
 
-export const LogViewer: React.FC<LogViewerProps> = ({ logs, onClearLogs, className = '' }) => {
+export const LogViewer: React.FC<LogViewerProps> = ({ logs, portfolio, onClearLogs, className = '' }) => {
   const [filterLevel, setFilterLevel] = useState<'ALL' | 'WATCH' | 'TRADE' | 'ALERT' | 'SYSTEM'>('ALL');
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [isCopied, setIsCopied] = useState<boolean>(false);
+
+  const totalAsset = portfolio?.total_asset || 0;
+  const currentCapital = portfolio?.current_capital || 0;
+  const positionsCount = portfolio?.positions?.length || 0;
 
   const terminalBodyRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -139,6 +144,15 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, onClearLogs, classNa
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping" />
               LIVE STREAM
             </span>
+            {totalAsset > 0 && (
+              <span className="hidden xl:inline-flex items-center gap-1.5 text-[10px] font-bold text-slate-300 bg-slate-900/80 px-2 py-0.5 rounded border border-slate-700">
+                <span>총자산: <strong className="text-white">{Math.round(totalAsset).toLocaleString()}원</strong></span>
+                <span className="text-slate-600">|</span>
+                <span>예수금: <strong className="text-amber-300">{Math.round(currentCapital).toLocaleString()}원</strong></span>
+                <span className="text-slate-600">|</span>
+                <span>보유: <strong className="text-cyan-400">{positionsCount}개</strong></span>
+              </span>
+            )}
           </div>
         </div>
 

@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 
 from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
-from database import DatabaseManager
+from database import DatabaseManager, format_kst_time_str, get_kst_now
 from main_rest_async import AsyncTradingBot
 
 # ================= Pydantic 요청/응답 모델 =================
@@ -125,12 +125,7 @@ async def log_broadcast_loop():
                         for r in new_logs:
                             last_log_id = max(last_log_id, int(r['id']))
                             created = r.get('timestamp') or r.get('created_at') or r.get('time')
-                            if isinstance(created, datetime):
-                                ts = created.strftime('%H:%M:%S')
-                            elif created:
-                                ts = str(created)
-                            else:
-                                ts = datetime.now().strftime('%H:%M:%S')
+                            ts = format_kst_time_str(created)
 
                             log_item = {
                                 "id": str(r.get('id', '')),
@@ -222,8 +217,11 @@ async def portfolio_broadcast_loop():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """서버 기동 및 종료 생명주기 관리"""
-    # 1. 컴포넌트 초기화
-    ctx.client = AsyncKiwoomClient()
+    # 1. 컴포넌트 초기화 (기본값: 실전투자 REAL)
+    env_is_mock = os.getenv("IS_REAL", "true").lower() in ("false", "0", "no") or os.getenv("KIWOOM_MODE", "REAL").upper() in ("MOCK", "DEMO")
+    is_demo = env_is_mock
+
+    ctx.client = AsyncKiwoomClient(is_demo=is_demo)
     await ctx.client.start()
 
     ctx.db = DatabaseManager()
@@ -257,7 +255,7 @@ async def lifespan(app: FastAPI):
             print(f"⚠️ [API Server] 초기 DB 계좌 복원 예외: {e}")
 
     ctx.bot = AsyncTradingBot(
-        is_demo=True,
+        is_demo=is_demo,
         initial_capital=ctx.portfolio.initial_capital,
         client=ctx.client,
         portfolio=ctx.portfolio,

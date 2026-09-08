@@ -280,6 +280,30 @@
 
 ---
 
+### Phase 12. 실전투자(LIVE) 전환, KST 타임존 고정 및 헤더 잔고/포지션 드롭다운 UI 구현 (Priority 12 - 완료)
+
+- [x] **Task 12.1: 키움 API 클라이언트 및 시스템 실전투자(REAL/LIVE) 모드 전면 전환 (`async_kiwoom_client.py`, `start.py`, `api_server.py`, `main_rest_async.py`)**
+  - **설명:** 기본 접속 모드를 실전투자(REAL)로 전환하고 `LIVE (실전투자)` 에메랄드 배지 연동.
+  - **수정 파일:** `async_kiwoom_client.py`, `start.py`, `api_server.py`, `main_rest_async.py`, `frontend/src/components/Header.tsx`
+  - **검증 기준:** API 서버 및 봇 기동 시 REAL 모드로 가동되고 프론트엔드 헤더에 LIVE 뱃지 표출.
+
+- [x] **Task 12.2: 백엔드 및 웹소켓 로그 타임존 KST(Asia/Seoul, UTC+9) 고정 (`database.py`, `api_server.py`, `frontend/src/hooks/useWebSocket.ts`)**
+  - **설명:** MariaDB 로그 적재/조회 및 실시간 스트리밍 시 UTC로 표기되던 시간을 한국 표준시(KST)로 일괄 변환.
+  - **수정 파일:** `database.py`, `api_server.py`, `frontend/src/hooks/useWebSocket.ts`
+  - **검증 기준:** 터미널 및 로그 뷰어에 현재 한국 시간 기준 타임스탬프 표출.
+
+- [x] **Task 12.3: 상단 헤더 실시간 잔고 & 보유 포지션 드롭다운 UI 및 다중 스키마 포지션 파싱 구현 (`Header.tsx`, `LogViewer.tsx`, `App.tsx`, `async_portfolio.py`)**
+  - **설명:** 상단 헤더 중앙에 `[총자산: X원 | D+2 예수금: Y원 | 보유 종목: Z개 ▾]` 뱃지 바를 배치하고 클릭 시 보유 종목 상세(종목명, 코드, 수량, 매입가, 현재가, 평가손익, 수익률) 드롭다운 팝오버 렌더링. `kt00005` 내 다중 스키마 키 전수 파싱.
+  - **수정 파일:** `frontend/src/components/Header.tsx`, `frontend/src/components/LogViewer.tsx`, `frontend/src/App.tsx`, `async_portfolio.py`
+  - **검증 기준:** 헤더 및 로그 뷰어 상단에 실시간 계좌 잔고가 상시 노출되며, 드롭다운 클릭 시 보유 포지션 목록이 정상 표출됨.
+
+- [x] **Task 12.4: 단위 테스트, Vite 빌드 검증 및 Git 형상 관리 (`feat/trading-environment-and-portfolio-ui`)**
+  - **설명:** 단위 테스트 및 프로덕션 빌드 통과 후 전용 브랜치 커밋.
+  - **수정 파일:** `WORK_HISTORY.md`, `GSD_MASTERPLAN.md`
+  - **검증 기준:** 100% ALL PASS 및 브랜치 커밋.
+
+---
+
 ## 📈 추진 일정 및 작업 진행 룰
 
 1. **원칙:** 선행 과제가 테스트를 완전히 통과해야만 다음 과제로 진행한다.
