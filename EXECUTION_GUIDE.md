@@ -33,8 +33,10 @@ KIWOOM_REAL_APP_SECRET=real_app_secret_here
 KIWOOM_REAL_ACCOUNT=87654321
 KIWOOM_REAL_PASSWORD=0000
 
-# 트레이딩 모드 (mock / real)
-TRADING_MODE=mock
+# 트레이딩 모드 (real / mock - 기본값: real)
+TRADING_MODE=real
+IS_REAL=true
+KIWOOM_MODE=REAL
 ```
 
 ---
@@ -43,20 +45,20 @@ TRADING_MODE=mock
 
 ### 방법 A. 통합 실행기 사용 (`start.py` - 봇 + 대시보드 동시 실행)
 ```bash
-# 모의투자 모드 실행
+# 기본 실행: 실전투자(REAL/LIVE) 모드로 시작
 python start.py
 
-# 실전투자 모드 실행
-python start.py --real
+# 모의투자(MOCK) 모드 강제 실행
+python start.py --mock
 ```
 
 ### 방법 B. 비동기 봇 데몬 독립 실행 (`main_rest_async.py`)
 ```bash
-# Linux/Mac (nohup 백그라운드)
+# 기본 실행 (실전투자 REAL)
 nohup python3 -u main_rest_async.py > trading.log 2>&1 &
 
-# 실전투자 모드
-nohup python3 -u main_rest_async.py --real > trading.log 2>&1 &
+# 모의투자 모드 강제 실행
+nohup python3 -u main_rest_async.py --mock > trading.log 2>&1 &
 
 # PM2 사용 시
 pm2 start main_rest_async.py --name "kiwoom_bot" --interpreter ./venv/bin/python -- -u

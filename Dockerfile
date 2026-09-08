@@ -35,6 +35,9 @@ ENV TZ=Asia/Seoul
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PATH=/root/.local/bin:$PATH
+ENV IS_REAL=true
+ENV KIWOOM_MODE=REAL
+ENV TRADING_MODE=real
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     tzdata \
