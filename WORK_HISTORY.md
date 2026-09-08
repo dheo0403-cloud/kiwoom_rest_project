@@ -2,6 +2,31 @@
 
 ---
 
+## 📅 [2026-09-08] 총 평가자산 및 D+2 주문가능 예수금 필드 독립 분리 & 장 마감 정산 리포트 기말자산 오류 해결
+
+### 1. 작업 개요 및 목적
+- **총 평가자산 및 주문가능 예수금 필드 독립 분리:** 키움 API 계좌 조회(`kt00005`) 시 '총 평가자산(`tot_evlu_amt`/`aset_evlt_amt`: 114,922원)'과 'D+2 주문가능금액(`dnca_tot_amt`/`ord_psbl_cash`: 100,842원)'이 별도의 독립된 필드로 정확히 분리 파싱되도록 구조 개선.
+- **장 마감 퀀트 정산 리포트 기말자산 모순 해결:** 당일 손익이 0원임에도 기말자산이 100,842원으로 표시되던 원인이 `total_asset`을 `current_capital`(가용현금)으로 덮어썼던 계산 버그임을 규명하고, 총 평가자산 기반으로 기말자산을 산출하도록 수정. D+2 가용 예수금 항목을 리포트에 명시.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `async_portfolio.py`:
+  - `AsyncPortfolioManager`에 `self.total_asset` 독립 인스턴스 변수 추가
+  - `sync_capital(available_cash, total_asset)` 시그니처 확장 및 `get_snapshot()` 내 총 자산과 주문가능 현금 분리 직렬화
+- `main_rest_async.py`:
+  - `_sync_account_balance`: API 응답 내 총 평가자산 키(`tot_evlu_amt`, `aset_evlt_amt`, `tot_asst_amt` 등)와 D+2 주문가능금액 키(`dnca_tot_amt`, `ord_psbl_cash` 등)를 독립 파싱하여 포트폴리오 관리자에 분리 주입
+  - 실시간 계좌 싱크 로그 포맷 개선: `총자산 114,922원 / D+2 예수금 100,842원 / 보유 0종목 (미체결: 1건)`
+- `notifier.py`:
+  - `notify_daily_settlement`: 기초자산(114,922원)과 기말자산(114,922원)의 정합성을 확립하고 `• D+2예수금: 100,842원 (주문가능 현금)` 항목 추가
+- `api_server.py`:
+  - `lifespan` 시 DB `balance`로부터 `total_asset`과 `current_capital` 각각 독립 복원
+- `test_async_trading_loop.py` & `test_notifier.py`:
+  - 총자산 및 D+2 예수금 독립 분리 및 정산 알림 포맷 단위 테스트 추가 및 검증 완료
+
+### 3. 검증 결과
+- **단위 테스트:** `python test_async_trading_loop.py` (8/8 통과), `python test_api_server.py` (14/14 통과), `python test_notifier.py` (3/3 통과) 100% ALL PASS
+
+---
+
 ## 📅 [2026-09-08] 대시보드 실시간 터미널 LogViewer 개편, D+2 예수금 단일화 및 실시간 감시 쓰로틀링 루프 복구
 
 ### 1. 작업 개요 및 목적

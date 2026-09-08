@@ -261,6 +261,25 @@
 
 ---
 
+### Phase 11. 총 평가자산 및 D+2 주문가능 예수금 필드 독립 분리 & 정산 리포트 기말자산 모순 해결 (Priority 11 - 완료)
+
+- [x] **Task 11.1: 총 평가자산 및 D+2 주문가능금액 독립 분리 파싱 (`main_rest_async.py`, `async_portfolio.py`)**
+  - **설명:** 키움 API 계좌 조회 시 `tot_evlu_amt`/`aset_evlt_amt`(총 평가자산: 114,922원)과 `dnca_tot_amt`/`ord_psbl_cash`(주문가능 예수금: 100,842원)를 독립된 필드로 추출하여 포트폴리오 스냅샷에 보존.
+  - **수정 파일:** `main_rest_async.py`, `async_portfolio.py`, `api_server.py`
+  - **검증 기준:** 계좌 싱크 로그 및 KPI 카드에 총자산과 예수금이 별개로 정확히 구분되어 표출됨.
+
+- [x] **Task 11.2: 일일 장 마감 정산 리포트 기말자산 계산 로직 교정 (`notifier.py`, `async_portfolio.py`)**
+  - **설명:** 기초자산(114,922원) 대비 당일 손익이 0원일 때 기말자산이 총 평가자산(114,922원)으로 정확히 일치하도록 수정하고, D+2 주문가능 현금(100,842원)을 별도 항목으로 리포팅.
+  - **수정 파일:** `notifier.py`, `test_notifier.py`
+  - **검증 기준:** `python test_notifier.py` 및 정산 리포트 검증 통과.
+
+- [x] **Task 11.3: 단위 테스트 및 Git 형상 관리 (`fix/account-balance-parsing-and-report`)**
+  - **설명:** 단위 테스트 통과 후 전용 브랜치 커밋.
+  - **수정 파일:** `test_async_trading_loop.py`, `WORK_HISTORY.md`, `GSD_MASTERPLAN.md`
+  - **검증 기준:** 100% ALL PASS 및 브랜치 커밋.
+
+---
+
 ## 📈 추진 일정 및 작업 진행 룰
 
 1. **원칙:** 선행 과제가 테스트를 완전히 통과해야만 다음 과제로 진행한다.

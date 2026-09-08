@@ -464,9 +464,11 @@ async def test_d2_deposit_unification_and_throttling():
 
     # 1. 계좌 동기화 실행
     await bot._sync_account_balance()
-    assert portfolio.current_capital == 100842.0, f"D+2 주문가능금액(100,842원)이 최종 확정되어야 합니다. (실제: {portfolio.current_capital})"
+    snap = await portfolio.get_snapshot()
+    assert snap['total_asset'] == 114922.0, f"총 평가자산(114,922원)이 독립적으로 유지되어야 합니다. (실제: {snap['total_asset']})"
+    assert snap['current_capital'] == 100842.0, f"D+2 주문가능금액(100,842원)이 주문 현금으로 확정되어야 합니다. (실제: {snap['current_capital']})"
     assert bot.unclosed_orders_count == 1, f"미체결 주문 건수가 1건으로 파싱되어야 합니다."
-    print("  ✅ D+2 주문가능금액 기준 단일화(100,842원) 및 미체결(1건) 추적 완벽 검증")
+    print("  ✅ 총 평가자산(114,922원) 및 D+2 주문가능금액(100,842원) 독립 분리 및 미체결(1건) 추적 완벽 검증")
 
     # 2. 쓰로틀링 검증
     bot.watchlist["004310"] = {

@@ -138,6 +138,7 @@ class KakaoNotifier:
         """15:35 장 마감 일일 정산 리포트"""
         initial = snapshot.get('initial_capital', 0)
         current = snapshot.get('total_asset', 0)
+        available = snapshot.get('current_capital', 0)
         pnl = snapshot.get('total_pnl', 0)
         yield_pct = snapshot.get('total_yield', 0)
         pos_count = snapshot.get('positions_count', 0)
@@ -146,7 +147,8 @@ class KakaoNotifier:
             f"📊 [일일 장 마감 퀀트 정산 리포트]\n"
             f"• 정산일시: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
             f"• 기초자산: {initial:,.0f}원\n"
-            f"• 기말자산: {current:,.0f}원\n"
+            f"• 기말자산: {current:,.0f}원 (총 평가자산)\n"
+            f"• D+2예수금: {available:,.0f}원 (주문가능 현금)\n"
             f"• 당일손익: {pnl:+,.0f}원 ({yield_pct:+.2f}%)\n"
             f"• 보유종목: {pos_count}개 종목 잔여\n"
             f"• 켈리비중: {snapshot.get('kelly_allocation_pct', 20):.1f}%\n"

@@ -237,6 +237,7 @@ async def lifespan(app: FastAPI):
             db_bal = await ctx.db.get_latest_balance()
             if db_bal and float(db_bal.get('total_asset', 0)) > 0:
                 ctx.portfolio.initial_capital = float(db_bal.get('total_asset', 10_000_000))
+                ctx.portfolio.total_asset = float(db_bal.get('total_asset', 10_000_000))
                 ctx.portfolio.current_capital = float(db_bal.get('deposit', 10_000_000))
 
             if hasattr(ctx.db, 'get_portfolio_positions'):

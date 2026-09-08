@@ -18,7 +18,8 @@ class AsyncPortfolioManager:
     def __init__(self, initial_capital: float = 10_000_000, max_stocks: int = 5,
                  kelly_fraction: float = 0.4):
         self.initial_capital = initial_capital
-        self.current_capital = initial_capital
+        self.current_capital = initial_capital  # 실제 주문 가능 현금 (D+2 예수금)
+        self.total_asset = initial_capital      # 계좌 총 평가 자산 (원금 + 주식평가금)
         self.max_stocks = max_stocks
         self.weight_per_stock = 1.0 / max_stocks
         self.kelly_fraction = kelly_fraction  # 40% Fractional Kelly
@@ -27,10 +28,14 @@ class AsyncPortfolioManager:
         self.trade_returns: collections.deque = collections.deque(maxlen=50)
         self._lock = asyncio.Lock()
 
-    async def sync_capital(self, deposit: float):
-        """예수금(주문가능 현금) 동기화"""
+    async def sync_capital(self, available_cash: float, total_asset: Optional[float] = None):
+        """주문가능 예수금(D+2) 및 총 평가자산 독립 동기화"""
         async with self._lock:
-            self.current_capital = float(deposit)
+            self.current_capital = float(available_cash)
+            if total_asset is not None and float(total_asset) > 0:
+                self.total_asset = float(total_asset)
+            elif self.total_asset == 0.0:
+                self.total_asset = float(available_cash)
 
     async def record_closed_trade(self, return_pct: float):
         """청산 완료된 매매의 수익률 기록 (켈리 계산용)"""
@@ -252,13 +257,19 @@ class AsyncPortfolioManager:
                     'yield_rate': yield_rate
                 })
 
-            total_asset = self.current_capital + invested_eval
+            # 총 평가자산: 명시적 total_asset이 예수금 이상이면 우선 적용, 없으면 (예수금 + 주식평가액)
+            if self.total_asset > 0:
+                total_asset = max(self.total_asset, self.current_capital + invested_eval)
+            else:
+                total_asset = self.current_capital + invested_eval
+
             total_pnl = invested_eval - invested_pchs
             total_yield = (total_pnl / self.initial_capital * 100.0) if self.initial_capital > 0 else 0.0
 
             return {
                 'initial_capital': self.initial_capital,
                 'current_capital': self.current_capital,
+                'available_cash': self.current_capital,
                 'total_asset': total_asset,
                 'invested_pchs': invested_pchs,
                 'invested_eval': invested_eval,

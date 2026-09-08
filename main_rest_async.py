@@ -179,7 +179,7 @@ class AsyncTradingBot:
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
     async def _sync_account_balance(self):
-        """계좌 잔고 및 예수금 비동기 동기화 (D+2 주문가능금액 기준 단일화 & 미체결 주문 추적)"""
+        """계좌 잔고 및 예수금 비동기 동기화 (총평가자산 및 D+2 주문가능금액 독립 분리 파싱 & 미체결 주문 추적)"""
         balance_data = await self.client.get_account_balance(priority=RequestPriority.MEDIUM)
         if not balance_data:
             return
@@ -198,14 +198,20 @@ class AsyncTradingBot:
 
         summary_candidates.append(balance_data)
 
-        # 1순위: D+2 추정예수금 / 주문가능금액
+        # 1) 총 평가자산 독립 키 목록 (키움 kt00005 / OPW00018 / OPW00001)
+        total_asset_keys = [
+            'tot_evlu_amt', 'aset_evlt_amt', 'tot_asst_amt', 'evlu_amt_tot',
+            'evlt_amt_tot', 'tot_amt', '총평가금액', '예탁자산평가액'
+        ]
+        # 2) D+2 추정예수금 / 주문가능금액 키 목록
         d2_deposit_keys = [
             'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
             'ord_alowa', 'd2_auto_amt', '주문가능금액'
         ]
-        # 2순위: 당일 단순 예수금
-        raw_entr_keys = ['entr', 'deposit', 'prvs_rcdl_excc_amt']
+        # 3) 당일 단순 예수금 키 목록 (결제/미체결 차감 전 원금)
+        raw_entr_keys = ['entr', 'deposit', 'prvs_rcdl_excc_amt', '예수금']
 
+        parsed_total_asset: Optional[float] = None
         parsed_d2_deposit: Optional[float] = None
         parsed_raw_entr: Optional[float] = None
         unclosed_cnt: int = 0
@@ -213,6 +219,20 @@ class AsyncTradingBot:
         for s_dict in summary_candidates:
             if not isinstance(s_dict, dict):
                 continue
+
+            # 총 평가자산 탐색
+            if parsed_total_asset is None:
+                for key in total_asset_keys:
+                    val = s_dict.get(key)
+                    if val is not None:
+                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            f_val = float(val_clean)
+                            if f_val > 0:
+                                parsed_total_asset = f_val
+                                break
+                        except ValueError:
+                            pass
 
             # D+2 주문가능금액 탐색
             if parsed_d2_deposit is None:
@@ -243,7 +263,7 @@ class AsyncTradingBot:
                             pass
 
             # 미체결 수량/건수 탐색
-            for u_key in ['uncl_cnt', 'uncl_qty', 'unclosed_count', 'uncl_amt']:
+            for u_key in ['uncl_cnt', 'uncl_qty', 'unclosed_count', 'uncl_amt', 'otst_qty', 'otst_cnt']:
                 if s_dict.get(u_key) is not None:
                     try:
                         u_val = int(float(str(s_dict[u_key]).replace(',', '')))
@@ -265,14 +285,26 @@ class AsyncTradingBot:
 
         self.unclosed_orders_count = unclosed_cnt
 
-        # 최종 기준은 무조건 'D+2 실제 주문가능금액'
-        final_deposit = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
-        await self.portfolio.sync_capital(final_deposit)
-
-        # 2. 보유 종목 동기화
+        # 2. 보유 종목 동기화 선행
         await self.portfolio.sync_positions(balance_data)
 
-        # 3. DB 저장 및 스냅샷 확인
+        # 보유 주식 평가액 계산
+        invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
+
+        # 3. 주문가능 현금 및 총 평가자산 독립 산출
+        available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
+
+        if parsed_total_asset and parsed_total_asset > 0:
+            final_total_asset = parsed_total_asset
+        elif parsed_raw_entr and parsed_raw_entr > 0:
+            final_total_asset = parsed_raw_entr + invested_eval
+        else:
+            final_total_asset = available_cash + invested_eval
+
+        # 포트폴리오 관리자에 독립 필드로 동기화
+        await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
+
+        # 4. DB 저장 및 스냅샷 확인
         snap = await self.portfolio.get_snapshot()
         if self.highest_total_asset == 0.0 or snap['total_asset'] > self.highest_total_asset:
             self.highest_total_asset = snap['total_asset']
@@ -289,14 +321,14 @@ class AsyncTradingBot:
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
 
         # 상세 계좌 싱크 및 예수금 정산 로깅
-        sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 주문가능예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
+        sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
         if unclosed_cnt > 0:
             sync_log += f" (미체결: {unclosed_cnt}건)"
         print(sync_log)
 
-        if parsed_raw_entr and parsed_d2_deposit and parsed_raw_entr != parsed_d2_deposit:
-            diff = parsed_raw_entr - parsed_d2_deposit
-            diff_msg = f"💰 [예수금 정산] D+2 주문가능: {int(parsed_d2_deposit):,}원 확정 (당일 예수금: {int(parsed_raw_entr):,}원 / 증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
+        if snap['total_asset'] != snap['current_capital'] and snap['stock_count'] == 0:
+            diff = snap['total_asset'] - snap['current_capital']
+            diff_msg = f"💰 [예수금 정산] 총 평가자산: {int(snap['total_asset']):,}원 / D+2 주문가능: {int(snap['current_capital']):,}원 확정 (증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
             print(diff_msg)
             await self.db.log_message("INFO", diff_msg)
 
