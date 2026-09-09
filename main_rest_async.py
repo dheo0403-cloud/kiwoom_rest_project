@@ -201,43 +201,63 @@ class AsyncTradingBot:
 
         summary_candidates.append(balance_data)
 
-        # 1) 총 평가자산 독립 키 목록 (키움 kt00005 / OPW00018 / OPW00001)
-        total_asset_keys = [
-            'tot_evlu_amt', 'aset_evlt_amt', 'tot_asst_amt', 'evlu_amt_tot',
-            'evlt_amt_tot', 'tot_amt', '총평가금액', '예탁자산평가액'
+        # 키움 계좌 TR 원본 필드 디버그 프리뷰 수집
+        raw_fields_debug: Dict[str, Any] = {}
+        for s_dict in summary_candidates:
+            if isinstance(s_dict, dict):
+                for k, v in s_dict.items():
+                    if k not in raw_fields_debug and not isinstance(v, (list, dict)):
+                        raw_fields_debug[k] = v
+
+        # 1) 당일 단순 예수금 원금 키 목록 (결제/정산 전 순수 현금 예수금: HTS 약 11만 원대)
+        # 키움 kt00005 / OPW00018 / OPW00001
+        raw_entr_keys = [
+            'prvs_rcdl_excc_amt', 'entr', 'deposit', '예수금',
+            'prvs_rcdl_excc_amt_smtl_amt', 'prvs_rcdl_amt'
         ]
-        # 2) D+2 추정예수금 / 주문가능금액 키 목록
+
+        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (미결제 정산 후 실제 매수가능 현금: HTS 약 10만 원대)
         d2_deposit_keys = [
             'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
-            'ord_alowa', 'd2_auto_amt', '주문가능금액'
+            'ord_psbl_amt', 'ord_alowa', 'd2_auto_amt', '주문가능금액', '주문가능현금'
         ]
-        # 3) 당일 단순 예수금 키 목록 (결제/미체결 차감 전 원금)
-        raw_entr_keys = ['entr', 'deposit', 'prvs_rcdl_excc_amt', '예수금']
 
-        parsed_total_asset: Optional[float] = None
-        parsed_d2_deposit: Optional[float] = None
+        # 3) 순수 총자산 / 자산평가금액 키 목록
+        pure_total_asset_keys = [
+            'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt', 'tot_amt',
+            'evlu_amt_tot', 'evlt_amt_tot', '예탁자산평가액', '자산평가금액', '총자산금액'
+        ]
+
+        # 4) 계좌 총평가금액 키 목록 (주식평가액 + D+2예수금)
+        tot_evlu_keys = [
+            'tot_evlu_amt', '총평가금액', 'evlu_amt_smtl_amt'
+        ]
+
         parsed_raw_entr: Optional[float] = None
+        parsed_d2_deposit: Optional[float] = None
+        parsed_pure_total_asset: Optional[float] = None
+        parsed_tot_evlu_amt: Optional[float] = None
         unclosed_cnt: int = 0
 
         for s_dict in summary_candidates:
             if not isinstance(s_dict, dict):
                 continue
 
-            # 총 평가자산 탐색
-            if parsed_total_asset is None:
-                for key in total_asset_keys:
+            # (1) 당일 단순 예수금 원금 탐색 (11만 원대)
+            if parsed_raw_entr is None:
+                for key in raw_entr_keys:
                     val = s_dict.get(key)
                     if val is not None:
                         val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
                         try:
                             f_val = float(val_clean)
                             if f_val > 0:
-                                parsed_total_asset = f_val
+                                parsed_raw_entr = f_val
                                 break
                         except ValueError:
                             pass
 
-            # D+2 주문가능금액 탐색
+            # (2) D+2 주문가능금액 / 추정예수금 탐색 (10만 원대)
             if parsed_d2_deposit is None:
                 for key in d2_deposit_keys:
                     val = s_dict.get(key)
@@ -251,16 +271,30 @@ class AsyncTradingBot:
                         except ValueError:
                             pass
 
-            # 당일 단순 예수금 탐색
-            if parsed_raw_entr is None:
-                for key in raw_entr_keys:
+            # (3) 순수 총자산/자산평가금액 필드 탐색
+            if parsed_pure_total_asset is None:
+                for key in pure_total_asset_keys:
                     val = s_dict.get(key)
                     if val is not None:
                         val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
                         try:
                             f_val = float(val_clean)
                             if f_val > 0:
-                                parsed_raw_entr = f_val
+                                parsed_pure_total_asset = f_val
+                                break
+                        except ValueError:
+                            pass
+
+            # (4) 총평가금액 필드 탐색
+            if parsed_tot_evlu_amt is None:
+                for key in tot_evlu_keys:
+                    val = s_dict.get(key)
+                    if val is not None:
+                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            f_val = float(val_clean)
+                            if f_val > 0:
+                                parsed_tot_evlu_amt = f_val
                                 break
                         except ValueError:
                             pass
@@ -294,15 +328,32 @@ class AsyncTradingBot:
         # 보유 주식 평가액 계산
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
-        # 3. 주문가능 현금 및 총 평가자산 독립 산출
+        # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
+        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 10만 원대)
         available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
 
-        if parsed_total_asset and parsed_total_asset > 0:
-            final_total_asset = parsed_total_asset
-        elif parsed_raw_entr and parsed_raw_entr > 0:
+        # (2) 총 평가자산 (HTS 단순 예수금 원금 + 주식평가액: 11만 원대)
+        if parsed_raw_entr and parsed_raw_entr > 0:
+            # Case A: 순수 예수금(11만 원) + 보유주식 평가액 -> HTS 일치 표준 공식
             final_total_asset = parsed_raw_entr + invested_eval
+        elif parsed_pure_total_asset and parsed_pure_total_asset > 0:
+            # Case B: 총자산/자산평가금액 필드
+            final_total_asset = parsed_pure_total_asset
+        elif parsed_tot_evlu_amt and parsed_tot_evlu_amt > (parsed_d2_deposit or 0):
+            # Case C: 총평가금액이 D+2예수금보다 큰 경우 (주식평가액이 포함된 경우)
+            final_total_asset = parsed_tot_evlu_amt
         else:
+            # Case D: Fallback
             final_total_asset = available_cash + invested_eval
+
+        # 키움 계좌 TR Raw Data 분석 로그 출력
+        preview_keys = ['prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt']
+        matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
+        print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
+        print(f"  ├─ 단순 예수금(원금): {int(parsed_raw_entr):,}원" if parsed_raw_entr else "  ├─ 단순 예수금(원금): None")
+        print(f"  ├─ D+2 추정예수금(주문가능): {int(parsed_d2_deposit):,}원" if parsed_d2_deposit else "  ├─ D+2 추정예수금: None")
+        print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
+        print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
 
         # 포트폴리오 관리자에 독립 필드로 동기화
         await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)

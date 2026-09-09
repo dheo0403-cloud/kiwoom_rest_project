@@ -161,6 +161,12 @@ class MockDatabaseManager:
     async def update_balance(self, total_asset: float, deposit: float, profit_loss: float, yield_rate: float):
         pass
 
+    async def get_latest_balance(self) -> Optional[Dict[str, Any]]:
+        return None
+
+    async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
+        return []
+
     async def save_watchlist(self, codes: Any, name_map: Optional[Dict[str, str]] = None):
         name_map = name_map or {}
         if isinstance(codes, dict):
@@ -487,9 +493,92 @@ async def test_d2_deposit_unification_and_throttling():
     assert second_log_time == first_log_time, "5초 이내 미세 변동 틱은 쓰로틀링되어 로그가 억제되어야 합니다."
     print("  ✅ 실시간 틱 핸들러 연속 수신 시 쓰로틀링(Throttling) 방어 정상 검증")
 
+async def test_kiwoom_real_balance_parsing_various_schemas():
+    """9. 키움 계좌 TR(kt00005/OPW00018) 다중 스키마 총자산 vs D+2 예수금 정밀 파싱 검증"""
+    print("▶ [Test 9] 키움 계좌 TR 다중 스키마 총자산(114,922원) vs D+2 예수금(100,842원) 정밀 분리 검증...")
+
+    # Case 1: 키움 실전 REST 표준 (tot_evlu_amt가 100,842원이고 prvs_rcdl_excc_amt가 114,922원인 경우)
+    class Schema1MockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "prvs_rcdl_excc_amt": "114,922", # HTS 표시 단순 예수금
+                    "dnca_tot_amt": "100,842",       # D+2 실제 주문가능금액
+                    "tot_evlu_amt": "100,842",       # 기존에 총자산으로 오인되던 필드
+                    "ord_psbl_cash": "100,842"
+                }],
+                "output2": []
+            }
+
+    mock_client1 = Schema1MockClient()
+    mock_db1 = MockDatabaseManager()
+    portfolio1 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
+    bot1 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client1, portfolio=portfolio1, db=mock_db1)
+
+    await bot1._sync_account_balance()
+    snap1 = await portfolio1.get_snapshot()
+    assert snap1['total_asset'] == 114922.0, f"Case 1: 총자산은 114,922원이어야 합니다. (실제: {snap1['total_asset']})"
+    assert snap1['current_capital'] == 100842.0, f"Case 1: D+2 예수금은 100,842원이어야 합니다. (실제: {snap1['current_capital']})"
+    print("  ✅ Case 1: prvs_rcdl_excc_amt(114,922원) 및 dnca_tot_amt(100,842원) 정밀 분리 검증 통과")
+
+    # Case 2: 순수 총자산 필드(tot_asst_amt / aset_evlt_amt)가 내려오는 경우
+    class Schema2MockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "tot_asst_amt": "114,922",
+                    "ord_psbl_cash": "100,842",
+                    "dnca_tot_amt": "100,842"
+                }],
+                "output2": []
+            }
+
+    mock_client2 = Schema2MockClient()
+    mock_db2 = MockDatabaseManager()
+    portfolio2 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
+    bot2 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client2, portfolio=portfolio2, db=mock_db2)
+
+    await bot2._sync_account_balance()
+    snap2 = await portfolio2.get_snapshot()
+    assert snap2['total_asset'] == 114922.0, f"Case 2: 총자산은 114,922원이어야 합니다. (실제: {snap2['total_asset']})"
+    assert snap2['current_capital'] == 100842.0, f"Case 2: D+2 예수금은 100,842원이어야 합니다. (실제: {snap2['current_capital']})"
+    print("  ✅ Case 2: tot_asst_amt(114,922원) 총자산 필드 매핑 검증 통과")
+
+    # Case 3: 주식 1종목 보유(70,000원) + 단순 예수금(44,922원) + D+2 예수금(30,842원)
+    class Schema3MockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "entr": "44,922",
+                    "dnca_tot_amt": "30,842",
+                    "tot_evlu_amt": "100,842",
+                    "ord_psbl_cash": "30,842"
+                }],
+                "output2": [{
+                    "stk_cd": "005930",
+                    "stk_nm": "삼성전자",
+                    "hldg_qty": "1",
+                    "pchs_avg_pric": "70000",
+                    "prpr": "70000"
+                }]
+            }
+
+    mock_client3 = Schema3MockClient()
+    mock_db3 = MockDatabaseManager()
+    portfolio3 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
+    bot3 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client3, portfolio=portfolio3, db=mock_db3)
+
+    await bot3._sync_account_balance()
+    snap3 = await portfolio3.get_snapshot()
+    # 총자산 = 예수금(44,922) + 주식(70,000) = 114,922원
+    assert snap3['total_asset'] == 114922.0, f"Case 3: 총자산은 114,922원이어야 합니다. (실제: {snap3['total_asset']})"
+    assert snap3['current_capital'] == 30842.0, f"Case 3: D+2 예수금은 30,842원이어야 합니다. (실제: {snap3['current_capital']})"
+    assert snap3['stock_count'] == 1, "Case 3: 보유 종목 1개여야 합니다."
+    print("  ✅ Case 3: 보유 주식 평가액 + 단순 예수금 합산 총자산(114,922원) 정합성 완벽 검증")
+
 async def main():
     print("=" * 65)
-    print("🚀 [Phase 2] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
+    print("🚀 [Phase 2 & Phase 13] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
     print("=" * 65)
     await test_fibonacci_pullback_entry()
     await test_three_stage_profit_taking()
@@ -499,8 +588,9 @@ async def main():
     await test_update_watchlist_multi_schema_and_fallback()
     await test_detailed_debug_logging_and_low_capital_handling()
     await test_d2_deposit_unification_and_throttling()
+    await test_kiwoom_real_balance_parsing_various_schemas()
     print("=" * 65)
-    print("🎉 Phase 2 모든 퀀트 매매 시뮬레이션 테스트 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

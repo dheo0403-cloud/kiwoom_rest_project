@@ -196,11 +196,11 @@ try:
     if not balance.empty:
         latest = balance.iloc[-1]
         col1.metric("총 평가자산", format_currency(latest['total_asset']))
-        col2.metric("예수금 (현금)", format_currency(latest['deposit']))
+        col2.metric("D+2 예수금 (주문가능)", format_currency(latest['deposit']))
         col3.metric("누적 수익금", format_currency(latest['profit_loss']), delta=f"{latest['yield']}%")
     else:
         col1.metric("총 평가자산", "0원")
-        col2.metric("예수금 (현금)", "0원")
+        col2.metric("D+2 예수금 (주문가능)", "0원")
         col3.metric("누적 수익금", "0원")
 
     today_orders = orders[orders['timestamp'].astype(str).str.startswith(datetime.now().strftime('%Y-%m-%d'))] if not orders.empty else pd.DataFrame()

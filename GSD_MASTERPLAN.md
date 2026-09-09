@@ -304,6 +304,30 @@
 
 ---
 
+### Phase 13. 키움 계좌 잔고 TR(kt00005/OPW00001/OPW00018) 총자산 vs D+2 예수금 필드 오맵핑 교정 및 정밀 파싱 엔진 구축 (Priority 13 - 진행 중)
+
+- [ ] **Task 13.1: 총자산(total_asset) 및 D+2 주문가능 예수금(available_cash) 키 우선순위 및 계산식 전면 교정 (`main_rest_async.py`, `async_portfolio.py`)**
+  - **설명:** `tot_evlu_amt`가 D+2 예수금(10만 원)과 동일하게 내려와 단순 예수금(11만 원)을 덮어씌우던 버그를 해결. `raw_entr_keys`(`prvs_rcdl_excc_amt`, `entr`, `deposit`, `asst_tot_amt`)를 최우선 순위로 파싱하여 `total_asset = (단순예수금 or 총자산필드) + 주식평가액`으로 산출하고, `available_cash`는 `d2_deposit_keys`(`dnca_tot_amt`, `d2_deposit`, `ord_psbl_cash`)로 엄격히 분리.
+  - **수정 파일:** `main_rest_async.py`, `async_portfolio.py`
+  - **검증 기준:** 키움 API 응답에서 11만 원대(예수금 원금/총자산)와 10만 원대(D+2 주문가능)가 독립적으로 정확히 파싱됨.
+
+- [ ] **Task 13.2: 계좌 동기화 시 수신된 API 원본 데이터(Raw Data) 필드별 상세 디버그 로깅 강화 (`main_rest_async.py`)**
+  - **설명:** 계좌 싱크 시 `prvs_rcdl_excc_amt`, `entr`, `deposit`, `dnca_tot_amt`, `tot_evlu_amt`, `ord_psbl_cash` 등 키움 API 응답의 주요 Raw 키/값들을 포맷팅하여 콘솔 및 DB 로그에 명확히 브리핑 출력.
+  - **수정 파일:** `main_rest_async.py`
+  - **검증 기준:** 봇 기동 및 계좌 싱크 시 Raw 필드 매핑 내역 및 총자산/D+2 예수금/정산 차감액이 명확히 로깅됨.
+
+- [ ] **Task 13.3: 백엔드 API/DB 및 프론트엔드 대시보드 렌더링 검증 & 단위 테스트 스위트 보강 (`test_async_trading_loop.py`, `api_server.py`, `database.py`)**
+  - **설명:** `test_async_trading_loop.py`에 총자산(114,922원)과 D+2 예수금(100,842원) 분리 파싱 테스트 케이스 추가 및 `api_server.py`, `database.py` 데이터 무결성 검증.
+  - **수정 파일:** `test_async_trading_loop.py`
+  - **검증 기준:** `python -m pytest` 및 단위 테스트 100% PASS, 상단 UI에 [총자산: 11X,XXX원 | 주문가능(D+2): 10X,XXX원] 독립 표출 확인.
+
+- [ ] **Task 13.4: Git 형상 관리 (`fix/account-balance-parsing-fields`) 및 WORK_HISTORY.md 갱신**
+  - **설명:** 전용 브랜치 생성 후 원자적 커밋 및 작업 히스토리 기록.
+  - **수정 파일:** `WORK_HISTORY.md`, `GSD_MASTERPLAN.md`
+  - **검증 기준:** Git 브랜치 클린 및 커밋 완료.
+
+---
+
 ## 📈 추진 일정 및 작업 진행 룰
 
 1. **원칙:** 선행 과제가 테스트를 완전히 통과해야만 다음 과제로 진행한다.

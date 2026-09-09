@@ -250,7 +250,7 @@ async def lifespan(app: FastAPI):
                         if code and qty > 0:
                             await ctx.portfolio.add_position(code, name, qty, buy_price)
                             await ctx.portfolio.update_current_price(code, cur_price)
-                    print(f"✅ [API Server] DB로부터 직전 계좌 잔고({ctx.portfolio.current_capital:,}원) 및 {len(db_pos)}개 포지션 복원 완료.")
+                    print(f"✅ [API Server] DB로부터 직전 계좌 잔고(총자산: {int(ctx.portfolio.total_asset):,}원 / D+2예수금: {int(ctx.portfolio.current_capital):,}원) 및 {len(db_pos)}개 포지션 복원 완료.")
         except Exception as e:
             print(f"⚠️ [API Server] 초기 DB 계좌 복원 예외: {e}")
 

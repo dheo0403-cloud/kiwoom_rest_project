@@ -2,7 +2,34 @@
 
 ---
 
-## 📅 [2026-09-08] 실전투자(LIVE) 전환, KST 타임존 고정, 상단 헤더 실시간 잔고 & 보유 포지션 드롭다운 UI 구현
+## 📅 [2026-09-09] 키움 계좌 잔고 TR(kt00005/OPW00018) 총자산 vs D+2 예수금 필드 오맵핑 전면 교정 및 정밀 파싱 엔진 구축
+
+### 1. 작업 개요 및 목적
+- **총자산 vs D+2 예수금 동일 수치 덮어쓰기 결함 해결:** 키움 API `kt00005` 응답에서 `tot_evlu_amt` 필드가 D+2 추정예수금(`dnca_tot_amt`: 100,842원)과 동일한 값으로 내려올 때, 단순 예수금 원금(`prvs_rcdl_excc_amt`/`entr`: 114,922원)이 무시되고 총자산과 D+2 예수금이 동일하게 10만 원대로 덮어씌워지던 문제를 전면 해결.
+- **키움 TR 응답 키 우선순위 및 계산식 재설계:**
+  - `total_asset` (총자산): HTS 기준 단순 예수금 원금(`prvs_rcdl_excc_amt`, `entr`, `deposit`) + 보유 주식 평가액(`invested_eval`) 또는 자산평가금액(`tot_asst_amt`, `aset_evlt_amt`)으로 산출 (약 11만 원대 값 확정).
+  - `available_cash` (D+2 주문가능금액): D+2 정산 추정예수금(`dnca_tot_amt`, `d2_deposit`, `ord_psbl_cash`, `ord_psbl_amt`)으로 엄격히 독립 분리 (약 10만 원대 값 확정).
+- **계좌 동기화 시 API 원본 Raw Data 상세 브리핑 로깅 탑재:** 계좌 싱크 시 수신된 주요 키(`prvs_rcdl_excc_amt`, `dnca_tot_amt`, `tot_evlu_amt`, `ord_psbl_cash`, `entr` 등)의 실제 수신 값을 콘솔과 로그에 명확히 표출.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `main_rest_async.py`:
+  - `_sync_account_balance()` 파싱 로직 개편: `raw_entr_keys`를 최우선 순위로 추출하여 `final_total_asset = parsed_raw_entr + invested_eval` 산출.
+  - `pure_total_asset_keys`(`tot_asst_amt`, `aset_evlt_amt`) 및 `tot_evlu_keys` 분리.
+  - `📊 [계좌 TR Raw Data]` 상세 분석 로그 추가 (수신 필드, 단순 예수금, D+2 예수금, 보유주식 평가금, 총자산/주문가능 최종값 표출).
+- `api_server.py`:
+  - 서버 기동 시 DB 복원 로그에 총자산과 D+2 예수금 각각 분리 표출.
+- `dashboard.py`:
+  - 상단 메트릭 카드의 예수금 레이블을 `D+2 예수금 (주문가능)`으로 최신화.
+- `test_async_trading_loop.py`:
+  - `test_kiwoom_real_balance_parsing_various_schemas` (Test 9) 신설: 키움 실전 REST 표준 패턴, 순수 총자산 필드 패턴, 주식 보유 + 예수금 분할 패턴 등 3대 시나리오 검증 통과.
+- `GSD_MASTERPLAN.md`: Phase 13 추가 및 완료 반영.
+
+### 3. 검증 결과
+- **단위 테스트:** `test_async_trading_loop.py` (9/9 100% ALL PASS), `test_api_server.py` (14/14 100% ALL PASS), `test_async_core.py`, `test_market_data_buffer.py`, `test_indicators.py`, `test_valuation.py`, `test_notifier.py`, `test_backtest.py` 전 스위트 무결성 검증 완료.
+- **프론트엔드 빌드:** `npm run build` 번들링 성공 (dist 갱신 완료).
+- **형상 관리:** `fix/account-balance-parsing-fields` 브랜치 커밋.
+
+---
 
 ### 1. 작업 개요 및 목적
 - **실전투자(REAL/LIVE) 모드 전면 전환:** 기본 실행 모드를 모의투자(MOCK)에서 실제 주문이 체결되는 실전투자(LIVE)로 전환하고, 상단 헤더에 에메랄드 컬러의 `LIVE (실전투자)` 배지 표출.
