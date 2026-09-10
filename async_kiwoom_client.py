@@ -123,16 +123,16 @@ class AsyncKiwoomClient:
             self.base_url = "https://mockapi.kiwoom.com"
             self.app_key = os.getenv("KIWOOM_MOCK_APP_KEY")
             self.app_secret = os.getenv("KIWOOM_MOCK_APP_SECRET")
-            self.account = os.getenv("KIWOOM_MOCK_ACCOUNT")
-            self.password = os.getenv("KIWOOM_MOCK_PASSWORD")
+            self.account = str(os.getenv("KIWOOM_MOCK_ACCOUNT") or "").replace('-', '').strip()
+            self.password = str(os.getenv("KIWOOM_MOCK_PASSWORD") or os.getenv("KIWOOM_PASSWORD") or "0000").strip()
             self.mode = "MOCK"
             default_tps = 2.0  # 모의투자는 초당 2건 제한
         else:
             self.base_url = "https://api.kiwoom.com"
             self.app_key = os.getenv("KIWOOM_REAL_APP_KEY")
             self.app_secret = os.getenv("KIWOOM_REAL_APP_SECRET")
-            self.account = os.getenv("KIWOOM_REAL_ACCOUNT")
-            self.password = os.getenv("KIWOOM_REAL_PASSWORD")
+            self.account = str(os.getenv("KIWOOM_REAL_ACCOUNT") or "").replace('-', '').strip()
+            self.password = str(os.getenv("KIWOOM_REAL_PASSWORD") or os.getenv("KIWOOM_PASSWORD") or "0000").strip()
             self.mode = "REAL"
             default_tps = 3.5  # 실전은 키움 게이트웨이 초당 5건 한도 대비 안전하게 3.5 TPS
 
@@ -293,46 +293,74 @@ class AsyncKiwoomClient:
                          priority: RequestPriority = RequestPriority.HIGH) -> Optional[Dict[str, Any]]:
         """
         주문 발송 (기본 Priority: HIGH, 긴급 매도시 CRITICAL 지정 가능)
+        - 계좌번호(accNo) 및 비밀번호(accPwd) 필수 포함
+        - 지정가(00) 및 시장가(03) 정규 파라미터 보장
+        - [안전 가드] BUY 주문은 항상 지정가(00)로 강제 (시장가 매수 시 ETF 증거금 부족(855056) 방지)
         """
+        clean_code = str(code).replace('A', '').strip()
+
+        # 매수(BUY) 주문 시 시장가(03) 사용을 원천 차단 — ETF 증거금 부족(855056) 에러 방지
+        if side.upper() == "BUY" and str(order_type) == "03":
+            print(f"🛡️ [send_order 가드] BUY 시장가→지정가 자동 전환: {clean_code} @ {price}원 (증거금 부족 방지)")
+            order_type = "00"
         url = f"{self.base_url}/api/dostk/ordr"
         api_id = "kt10000" if side == "BUY" else "kt10001"
         payload = {
             "dmst_stex_tp": "KRX",
-            "stk_cd": code,
+            "accNo": self.account,
+            "accPwd": self.password,
+            "stk_cd": clean_code,
             "ord_qty": str(int(qty)),
             "ord_uv": str(int(price)),
-            "trde_tp": order_type,   # "00": 보통, "03": 시장가
+            "trde_tp": str(order_type),   # "00": 보통(지정가), "03": 시장가
             "cond_uv": "0"
         }
         data, _ = await self.request(api_id, url, payload, priority=priority, retries=5)
         if not data:
-            print(f"❌ [ORDER_FAIL] 주문 응답 없음 ({side} {code} {qty}주)")
+            print(f"❌ [ORDER_FAIL] 주문 응답 없음 ({side} {clean_code} {qty}주 @ {price}원)")
             return None
 
         rt_cd = data.get('rt_cd') if data.get('rt_cd') is not None else data.get('return_code')
         if str(rt_cd) == '0':
-            print(f"✅ [ORDER_SUCCESS] 주문 완료 ({side} {code} {qty}주 @ {price}원)")
+            print(f"✅ [ORDER_SUCCESS] 주문 완료 ({side} {clean_code} {qty}주 @ {price}원, 계좌: {self.account})")
         else:
             msg = data.get('msg1') or data.get('return_msg') or '주문 거절'
-            print(f"⚠️ [ORDER_REJECTED] 주문 거절 ({side} {code}): {msg}")
+            print(f"⚠️ [ORDER_REJECTED] 주문 거절 ({side} {clean_code} @ {price}원, 계좌: {self.account}): {msg}")
         return data
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """현재가 시세 조회"""
+        clean_code = str(code).replace('A', '').strip()
         url = f"{self.base_url}/api/dostk/stkinfo"
-        payload = {"stk_cd": code}
+        payload = {"stk_cd": clean_code}
         data, _ = await self.request("ka10001", url, payload, priority=priority)
         return data
 
     async def get_orderbook(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """호가 잔량 조회"""
+        clean_code = str(code).replace('A', '').strip()
         url = f"{self.base_url}/api/dostk/mrkcond"
-        payload = {"stk_cd": code}
+        payload = {"stk_cd": clean_code}
         data, _ = await self.request("ka10004", url, payload, priority=priority)
         return data
 
+    async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        """
+        예수금 상세 현황 조회 (kt00001 / OPW00001 대응)
+        - 당일 순수 예수금(entr), 전일예수금(prvs_rcdl_excc_amt), D+2추정예수금(dnca_tot_amt), 주문가능금액(ord_psbl_cash)
+        """
+        url = f"{self.base_url}/api/dostk/acnt"
+        payload = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password,
+            "qry_tp": "3"  # 3: 추정조회(D+2)
+        }
+        data, _ = await self.request("kt00001", url, payload, priority=priority)
+        return data
+
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 예수금 조회"""
+        """계좌 잔고 및 보유 포지션 조회 (kt00005 / OPW00018 대응)"""
         url = f"{self.base_url}/api/dostk/acnt"
         payload = {
             "dmst_stex_tp": "KRX",

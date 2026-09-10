@@ -139,7 +139,12 @@ class KiwoomRest:
         """실제 운영 환경 대응 주문 발송 메서드 (재시도 로직 포함)"""
         url = f"{self.base_url}/api/dostk/ordr"
         api_id = "kt10000" if side == "BUY" else "kt10001"
-        
+
+        # [안전 가드] BUY 주문은 항상 지정가(00)로 강제 (시장가 매수 시 ETF 증거금 부족(855056) 방지)
+        if side.upper() == "BUY" and str(order_type) == "03":
+            print(f"🛡️ [send_order 가드] BUY 시장가→지정가 자동 전환: {code} @ {price}원 (증거금 부족 방지)")
+            order_type = "00"
+
         # 실전 API 규격: trde_tp(0:보통, 3:시장가), 계좌번호는 토큰에 포함
         payload = {
             "dmst_stex_tp": "KRX",

@@ -167,6 +167,7 @@ async def portfolio_broadcast_loop():
                     try:
                         db_bal = await ctx.db.get_latest_balance()
                         if db_bal:
+                            # total_asset이 0일 때만 DB에서 보강 (올바른 스냅샷 덮어쓰기 방지)
                             if snapshot.get("total_asset", 0) == 0:
                                 snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
                                 snapshot["current_capital"] = float(db_bal.get('deposit', 0))

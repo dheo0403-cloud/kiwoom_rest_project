@@ -102,6 +102,10 @@ class MockKiwoomClient:
         ]
         return {"output2": candles}
 
+    async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        """미체결 주문 조회"""
+        return {"output": []}
+
     async def get_market_daily_ohlcv(self, code: str, start_date: str = "", end_date: str = "", priority: RequestPriority = RequestPriority.LOW):
         import pandas as pd
         return pd.DataFrame([
@@ -122,12 +126,24 @@ class MockKiwoomClient:
             })
         return {
             "output1": [{
-                "tot_evlu_amt": str(int(self.deposit)),
-                "dnca_tot_amt": str(int(self.deposit)),
+                "prvs_rcdl_excc_amt": str(int(self.deposit)),    # 단순 예수금 원금 (총자산, 11만원대)
+                "tot_evlu_amt": str(int(self.deposit)),          # 총평가금액 (D+2와 동일할 수 있음)
+                "dnca_tot_amt": str(int(self.deposit * 0.87)),   # D+2 추정예수금 (10만원대)
                 "tot_evlu_pfls_amt": "0",
                 "tot_pnl_rt": "0.0"
             }],
             "output2": out2
+        }
+
+    async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        """예수금 상세 현황 조회 (kt00001 대응)"""
+        return {
+            "output1": [{
+                "entr": str(int(self.deposit)),                  # 당일 순수 예수금
+                "prvs_rcdl_excc_amt": str(int(self.deposit)),    # 전일 예수금
+                "dnca_tot_amt": str(int(self.deposit * 0.87)),   # D+2 추정예수금
+                "ord_psbl_cash": str(int(self.deposit * 0.87))   # 주문가능금액
+            }]
         }
 
 class MockDatabaseManager:

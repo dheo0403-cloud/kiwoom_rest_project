@@ -29,13 +29,22 @@ class AsyncPortfolioManager:
         self._lock = asyncio.Lock()
 
     async def sync_capital(self, available_cash: float, total_asset: Optional[float] = None):
-        """주문가능 예수금(D+2) 및 총 평가자산 독립 동기화"""
+        """주문가능 예수금(D+2) 및 총 평가자산 독립 동기화
+        - total_asset(총자산)은 항상 available_cash(D+2 예수금) 이상이어야 함
+        - 만약 total_asset < available_cash이면 총자산은 최소 available_cash로 보정
+        """
         async with self._lock:
             self.current_capital = float(available_cash)
             if total_asset is not None and float(total_asset) > 0:
-                self.total_asset = float(total_asset)
+                new_total = float(total_asset)
+                # 안전 가드: total_asset이 available_cash보다 작으면 방어 보정
+                if new_total < float(available_cash):
+                    print(f"⚠️ [Portfolio sync_capital] 총자산({int(new_total):,}원) < D+2예수금({int(available_cash):,}원) → 총자산 보정: {int(available_cash):,}원")
+                    new_total = float(available_cash)
+                self.total_asset = new_total
             elif self.total_asset == 0.0:
                 self.total_asset = float(available_cash)
+                print(f"⚠️ [Portfolio sync_capital] total_asset=0 초기화 → D+2예수금으로 대체: {int(available_cash):,}원")
 
     async def record_closed_trade(self, return_pct: float):
         """청산 완료된 매매의 수익률 기록 (켈리 계산용)"""
@@ -302,10 +311,17 @@ class AsyncPortfolioManager:
                 })
 
             # 총 평가자산: 명시적 total_asset이 예수금 이상이면 우선 적용, 없으면 (예수금 + 주식평가액)
+            # total_asset(총자산)은 항상 available_cash(D+2 예수금) 이상이어야 함 (원리: 예수금 + 보유주식평가액)
+            # 만약 total_asset < current_capital + invested_eval이면 시장가 하락 등으로 갱신된 값 사용
             if self.total_asset > 0:
-                total_asset = max(self.total_asset, self.current_capital + invested_eval)
+                calculated_total = self.current_capital + invested_eval
+                # 안전 가드: total_asset이 계산된 총자산보다 작으면 현재 시장 평가액 사용
+                total_asset = max(self.total_asset, calculated_total)
             else:
                 total_asset = self.current_capital + invested_eval
+                # total_asset이 0으로 초기화된 경우 경고 로그 출력 (디버깅용)
+                if total_asset > 0:
+                    print(f"⚠️ [Portfolio] total_asset이 0에서 초기화됨: 총자산={int(total_asset):,}원 (D+2예수금: {int(self.current_capital):,}원 + 평가액: {int(invested_eval):,}원)")
 
             total_pnl = invested_eval - invested_pchs
             total_yield = (total_pnl / self.initial_capital * 100.0) if self.initial_capital > 0 else 0.0

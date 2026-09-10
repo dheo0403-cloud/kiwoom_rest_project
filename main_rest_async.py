@@ -159,8 +159,13 @@ class AsyncTradingBot:
             try:
                 db_bal = await self.db.get_latest_balance()
                 if db_bal and float(db_bal.get('total_asset', 0)) > 0:
-                    self.portfolio.initial_capital = float(db_bal.get('total_asset'))
-                    self.portfolio.current_capital = float(db_bal.get('deposit', self.portfolio.initial_capital))
+                    db_total = float(db_bal.get('total_asset'))
+                    db_deposit = float(db_bal.get('deposit', db_total))
+                    self.portfolio.initial_capital = db_total
+                    # total_asset(총자산)과 current_capital(D+2 예수금)을 독립적으로 복원
+                    self.portfolio.total_asset = db_total
+                    self.portfolio.current_capital = db_deposit
+                    print(f"🔧 [Bot Init] DB 잔고 복원: 총자산={int(db_total):,}원 / D+2예수금={int(db_deposit):,}원")
                 if hasattr(self.db, 'get_portfolio_positions'):
                     db_pos = await self.db.get_portfolio_positions()
                     if db_pos:
@@ -182,9 +187,13 @@ class AsyncTradingBot:
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
     async def _sync_account_balance(self):
-        """계좌 잔고 및 예수금 비동기 동기화 (총평가자산 및 D+2 주문가능금액 독립 분리 파싱 & 미체결 주문 추적)"""
+        """계좌 잔고 및 예수금 비동기 동기화 (듀얼 TR: kt00001 예수금상세 + kt00005 계좌평가)"""
+        # 1) kt00005 계좌평가잔고 (보유종목, 총평가금액, D+2예수금)
         balance_data = await self.client.get_account_balance(priority=RequestPriority.MEDIUM)
-        if not balance_data:
+        # 2) kt00001 예수금상세현황 (당일 순수 예수금 원금, 전일예수금, D+2 추정예수금)
+        deposit_data = await self.client.get_deposit_info(priority=RequestPriority.MEDIUM)
+
+        if not balance_data and not deposit_data:
             return
 
         # 1. 예수금 및 총평가금액 파싱 (output1 / output / 루트 딕셔너리 순차 탐색)
@@ -355,6 +364,11 @@ class AsyncTradingBot:
         print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
         print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
 
+        # 안전 가드: 총자산은 항상 D+2 예수금 이상이어야 함 (원리: 예수금 + 주식평가액)
+        if final_total_asset < available_cash:
+            print(f"🚨 [sync_balance 가드] 총자산({int(final_total_asset):,}원) < D+2예수금({int(available_cash):,}원) → 총자산 보정: {int(available_cash):,}원")
+            final_total_asset = available_cash
+
         # 포트폴리오 관리자에 독립 필드로 동기화
         await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
 
@@ -454,8 +468,12 @@ class AsyncTradingBot:
             'no_chart_data': 0,
             'insufficient_candles': 0,
             'zero_price_diff': 0,
-            'analysis_error': 0
+            'analysis_error': 0,
+            'price_over_cash': 0  # 예수금 초과 고가 종목 탈락
         }
+
+        # D+2 주문가능 금액 기반 고가 종목 필터링에 사용할 현재 예수금 캐시
+        available_cash = self.portfolio.current_capital
 
         # 상위 target_top_n개 유효 종목을 채울 때까지 순회 (원본 items 전체 대상)
         for item in items:
@@ -552,6 +570,12 @@ class AsyncTradingBot:
                 )
                 cur_price = abs(float(str(cur_price_raw).replace(',', '').strip()))
 
+                # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist 제외
+                if available_cash > 0 and cur_price > available_cash:
+                    drop_reasons['price_over_cash'] += 1
+                    print(f"  🚫 [Watchlist 필터] 탈락: 잔고 부족 (현재가 {int(cur_price):,}원 > 예수금 {int(available_cash):,}원) - {name}({code})")
+                    continue
+
                 new_watchlist[code] = {
                     'code': code,
                     'name': name,
@@ -571,7 +595,9 @@ class AsyncTradingBot:
 
         # 단계별 필터링 디버그 리포트 출력
         total_dropped = sum(drop_reasons.values())
-        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']})")
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']})")
+        if drop_reasons['price_over_cash'] > 0:
+            print(f"  💰 [Watchlist 필터] 예수금({int(available_cash):,}원) 초과로 {drop_reasons['price_over_cash']}개 고가 종목이 감시 대상에서 제외되었습니다.")
 
         self.watchlist = new_watchlist
         await self.db.save_watchlist(list(self.watchlist.values()))
@@ -628,6 +654,10 @@ class AsyncTradingBot:
             print(f"⚡ [MANUAL_ORDER] 대시보드 수동 주문 실행: {side} {name}({code}) {qty}주 @ {price}원")
 
             order_type = "03" if price == 0 else "00"
+            # [안전 가드] 매수(BUY) 시장가 주문은 지정가(00)로 강제 전환 (ETF 증거금 부족(855056) 방지)
+            if side.upper() == "BUY" and order_type == "03":
+                print(f"🛡️ [매수 가드] 시장가→지정가 자동 전환: {name}({code}) @ {price}원")
+                order_type = "00"
             res = await self.client.send_order(code, qty, price, order_type=order_type, side=side, priority=RequestPriority.HIGH)
 
             rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
@@ -730,8 +760,8 @@ class AsyncTradingBot:
             bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
             if bid2 and str(bid2).isdigit() and int(bid2) > 0:
                 sell_price = int(bid2)
-            else:
-                order_type = "03"  # 시장가 전환
+            # 시장가 폴백 시에도 지정가(00) 사용 — 증거금 관리 일관성 유지
+            # (긴급 매도이므로 매수1호가 또는 현재가 기반 지정가로 충분히 빠른 체결 가능)
 
         res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
@@ -832,6 +862,13 @@ class AsyncTradingBot:
             if order_qty <= 0:
                 print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
                 await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
+                return
+
+            # [2차 방어] 실시간 매수 시 잔고 초과 최종 체크 (매수가 × 수량 > D+2 예수금 → 매수 스킵)
+            total_buy_amount = cur_price * order_qty
+            if total_buy_amount > current_deposit:
+                print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 예수금({int(current_deposit):,}원) (수량: {order_qty}주 × {int(cur_price):,}원)")
+                await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 예수금 {int(current_deposit):,}원")
                 return
 
             print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
