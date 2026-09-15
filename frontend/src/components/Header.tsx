@@ -17,7 +17,7 @@ interface HeaderProps {
   onToggleColorMode: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({
+export const Header: React.FC<HeaderProps> = React.memo(({
   botStatus,
   portfolio,
   isConnected,
@@ -51,7 +51,7 @@ export const Header: React.FC<HeaderProps> = ({
   const totalAsset = portfolio.total_asset || 0;
   const currentCapital = portfolio.current_capital || 0;
   const positions = portfolio.positions || [];
-  const stockCount = positions.length;
+  const stockCount = positions.length > 0 ? positions.length : (portfolio.stock_count || 0);
 
   const isDemo = botStatus.is_demo;
 
@@ -73,9 +73,9 @@ export const Header: React.FC<HeaderProps> = ({
           </div>
         </div>
 
-        {/* Live WS Status Badge */}
+        {/* Live WS Status Badge (안정적 정적 배지 - 깜빡임 제거) */}
         <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-slate-800/90 border border-slate-700/60 text-xs">
-          <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+          <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-400' : 'bg-rose-500'}`} />
           <span className="text-slate-300 font-semibold text-[10px]">
             {isConnected ? 'LIVE WS' : 'DISCONNECTED'}
           </span>
@@ -87,12 +87,12 @@ export const Header: React.FC<HeaderProps> = ({
             ? 'bg-emerald-500/15 text-emerald-400 border-emerald-500/40 shadow-emerald-950/40'
             : 'bg-amber-500/15 text-amber-400 border-amber-500/40 shadow-amber-950/40'
         }`}>
-          <Radio className="w-3 h-3 animate-pulse" />
+          <Radio className="w-3 h-3 text-emerald-400" />
           {!isDemo ? 'LIVE (실전투자)' : 'MOCK (모의투자)'}
         </div>
       </div>
 
-      {/* 2. Center: [총자산 | D+2 예수금 | 보유 종목] 실시간 계좌 잔고 & 포지션 뱃지 바 */}
+      {/* 2. Center: [총자산 | D+2 예수금 | 보유 종목] 실시간 계좌 잔고 & 포지션 뱃지 바 (Display State 연동으로 깜빡임 방지) */}
       <div className="flex items-center gap-2 relative" ref={dropdownRef}>
         <div className="flex items-center gap-2 px-3 py-1.5 bg-slate-950/90 border border-slate-700/80 rounded-xl shadow-inner font-mono text-xs">
           {/* 총자산 */}
@@ -221,7 +221,7 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           onClick={handleRefreshClick}
           className="p-1.5 sm:px-2.5 sm:py-1.5 text-xs rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition"
-          title="데이터 새로고침"
+          title="데이터 새로고침 (클릭 시 실시간 잔고 즉시 동기화)"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${isRefreshing ? 'animate-spin text-blue-400' : ''}`} />
         </button>
@@ -231,10 +231,11 @@ export const Header: React.FC<HeaderProps> = ({
           onClick={onOpenKillSwitch}
           className="px-3.5 py-1.5 text-xs font-bold rounded-lg bg-gradient-to-r from-rose-600 to-red-700 hover:from-rose-500 hover:to-red-600 text-white shadow-lg shadow-rose-900/30 border border-rose-500/50 flex items-center gap-1.5 transition active:scale-95"
         >
-          <ShieldAlert className="w-4 h-4 animate-pulse text-white" />
+          <ShieldAlert className="w-4 h-4 text-white" />
           <span>긴급 킬스위치</span>
         </button>
       </div>
     </header>
   );
-};
+});
+Header.displayName = 'Header';
