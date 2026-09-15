@@ -758,6 +758,94 @@ async def test_dynamic_watchlist_and_full_quant_workflow():
     assert "005930" not in portfolio.positions, "3차 전량 익절 후 포지션이 청산되어야 합니다."
     print("  ✅ 최종 3차 전량 청산(+8.5%) 및 매매 사이클 완벽 완료")
 
+async def test_actual_account_balance_with_images_data():
+    """12. 사용자 실계좌 스크린샷 데이터(D+2예수금 82,819원 / 당일 1,122원 / 3개 보유종목 64,400원 / 총자산 147,219원) 정밀 검증"""
+    print("▶ [Test 12] 사용자 실계좌 데이터(D+2 82,819원 / 3개 보유종목 비에이치·펄어비스·파인엠텍) 동기화 검증...")
+
+    class UserScreenshotAccountMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "147349",            # 총평가금액 (147,349원)
+                    "dnca_tot_amt": "1122",              # 당일 예수금 (1,122원) - D+2로 오맵핑 금지
+                    "entr": "1122",                      # 당일 예수금 (1,122원)
+                    "prvs_rcdl_excc_amt": "1122",        # 전일 예수금 (1,122원)
+                    "d2_deposit": "82819",               # D+2 추정예수금 (82,819원)
+                    "d2_auto_amt": "82819",
+                    "sub_amt": "45530",                  # 대용금 (45,530원)
+                    "pchs_amt_smtl_amt": "61280",        # 총매입 (61,280원)
+                    "evlu_amt_smtl_amt": "64400",        # 총평가 (64,400원)
+                    "tot_evlu_pfls_amt": "2993",         # 총손익 (+2,993원)
+                    "tot_pnl_rt": "+4.88",               # 총수익률 (+4.88%)
+                    "ord_psbl_cash": "82819"             # 주문가능금액 (82,819원)
+                }],
+                "output2": [
+                    {
+                        "stk_cd": "090460", "stk_nm": "비에이치", "hldg_qty": "1",
+                        "pchs_avg_pric": "19520", "pchs_amt": "19520", "prpr": "19630",
+                        "evlu_amt": "19630", "evlu_pfls_amt": "72", "evlu_pfls_rt": "+0.37"
+                    },
+                    {
+                        "stk_cd": "263750", "stk_nm": "펄어비스", "hldg_qty": "1",
+                        "pchs_avg_pric": "33600", "pchs_amt": "33600", "prpr": "35600",
+                        "evlu_amt": "35600", "evlu_pfls_amt": "1929", "evlu_pfls_rt": "+5.74"
+                    },
+                    {
+                        "stk_cd": "441270", "stk_nm": "파인엠텍", "hldg_qty": "1",
+                        "pchs_avg_pric": "8160", "pchs_amt": "8160", "prpr": "9170",
+                        "evlu_amt": "9170", "evlu_pfls_amt": "992", "evlu_pfls_rt": "+12.16"
+                    }
+                ]
+            }
+
+        async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "entr": "1122",
+                    "prvs_rcdl_excc_amt": "1122",
+                    "dnca_tot_amt": "1122",              # 당일 예수금 잔액
+                    "d2_deposit": "82819",               # D+2 추정예수금
+                    "d2_auto_amt": "82819",
+                    "sub_amt": "45530",                  # 대용금
+                    "ord_psbl_cash": "82819"
+                }]
+            }
+
+    mock_client = UserScreenshotAccountMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=147349.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=147349.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 계좌 동기화 실행
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    # 검증: D+2 예수금 82,819원 (1,122원으로 오맵핑되지 않고 82,819원으로 정상 동기화)
+    assert snap['current_capital'] == 82819.0, f"D+2 예수금은 82,819원이어야 합니다. (실제: {snap['current_capital']})"
+
+    # 검증: 3개 보유 종목 (비에이치, 펄어비스, 파인엠텍) 정상 동기화
+    assert snap['stock_count'] == 3, f"보유 종목 수는 3개여야 합니다. (실제: {snap['stock_count']})"
+    assert snap['invested_capital'] == 64400.0, f"보유 주식 평가액은 64,400원이어야 합니다. (실제: {snap['invested_capital']})"
+    assert snap['total_asset'] >= 147219.0, f"총 평가자산은 147,219원 이상이어야 합니다. (실제: {snap['total_asset']})"
+
+    pos_map = {p['code']: p for p in snap['positions']}
+    assert "090460" in pos_map, "비에이치(090460)가 포지션에 포함되어야 합니다."
+    assert pos_map["090460"]["qty"] == 1
+    assert pos_map["090460"]["buy_price"] == 19520.0
+    assert pos_map["090460"]["current_price"] == 19630.0
+
+    assert "263750" in pos_map, "펄어비스(263750)가 포지션에 포함되어야 합니다."
+    assert pos_map["263750"]["qty"] == 1
+    assert pos_map["263750"]["buy_price"] == 33600.0
+    assert pos_map["263750"]["current_price"] == 35600.0
+
+    assert "441270" in pos_map, "파인엠텍(441270)이 포지션에 포함되어야 합니다."
+    assert pos_map["441270"]["qty"] == 1
+    assert pos_map["441270"]["buy_price"] == 8160.0
+    assert pos_map["441270"]["current_price"] == 9170.0
+
+    print("  ✅ 사용자 실계좌 데이터(D+2 예수금 82,819원 / 보유 3종목 비에이치·펄어비스·파인엠텍 / 총자산 147,349원) 정밀 검증 100% 통과")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -773,6 +861,7 @@ async def main():
     await test_kiwoom_real_balance_parsing_various_schemas()
     await test_actual_account_balance_and_4_holdings_sync()
     await test_dynamic_watchlist_and_full_quant_workflow()
+    await test_actual_account_balance_with_images_data()
     print("=" * 65)
     print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)

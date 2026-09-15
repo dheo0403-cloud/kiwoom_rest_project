@@ -94,38 +94,65 @@ class AsyncPortfolioManager:
 
             # 1. 딕셔너리의 모든 리스트 키들을 검사하여 종목 리스트가 있는 키를 지능적으로 탐색
             raw_list = []
-            priority_keys = ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'stk_list', 'item_list', 'output', 'output1', 'data', 'grid', 'table']
-            for k in priority_keys:
-                v = account_data.get(k)
-                if isinstance(v, list) and v:
-                    # 리스트 원소 중에 종목코드(stk_cd, pdno, code 등)가 있는지 확인
-                    if any(isinstance(x, dict) and any(c_key in x for c_key in ['stk_cd', 'pdno', 'code', 'expcode', 'mksc_shrn_iscd', 'shcode', 'jongmok_code', 'item_code']) for x in v):
-                        raw_list = v
-                        break
-                elif isinstance(v, dict) and any(c_key in v for c_key in ['stk_cd', 'pdno', 'code', 'expcode', 'mksc_shrn_iscd']):
-                    raw_list = [v]
-                    break
+            code_keys = [
+                'stk_cd', 'pdno', 'code', 'expcode', 'mksc_shrn_iscd', 'shcode',
+                'jongmok_code', 'item_code', 'stck_shrn_iscd', 'item_cd', 'prdt_cd',
+                'stk_code', 'iscd', 'jong_cd', 'stck_cd', 'stk_no', 'isu_cd'
+            ]
+            name_keys = [
+                'stk_nm', 'name', 'prdt_name', 'jongmok_name', 'hts_kor_isnm',
+                'item_name', 'stck_nm', 'isu_nm', 'kor_isnm'
+            ]
+            qty_keys = [
+                'hldg_qty', 'ccls_qty_sum', 'qty', 'hold_qty', 'ord_psbl_qty',
+                'bal_qty', 'ccls_qty', 'rmnd_qty', 'tot_hldg_qty', 'hld_qty',
+                'jango_qty', 'now_qty', 'stck_qty', 'ccls_qty'
+            ]
+
+            def is_holding_item(d: Any) -> bool:
+                if not isinstance(d, dict):
+                    return False
+                has_code = any(k in d for k in code_keys)
+                has_name_or_qty = any(k in d for k in name_keys) or any(k in d for k in qty_keys)
+                return has_code or has_name_or_qty
+
+            def extract_candidate_lists(data: Any, depth: int = 0) -> List[List[Dict[str, Any]]]:
+                if depth > 3 or not isinstance(data, dict):
+                    return []
+                candidates = []
+                priority_keys = [
+                    'output2', 'Output2', 'output', 'Output', 'list', 'acnt_dtl_list',
+                    'holdings', 'stk_list', 'item_list', 'output1', 'Output1', 'data',
+                    'grid', 'table', 'rows', 'items'
+                ]
+                for k in priority_keys:
+                    v = data.get(k)
+                    if isinstance(v, list) and v:
+                        if any(is_holding_item(x) for x in v):
+                            candidates.append(v)
+                # 하위 딕셔너리 재귀 탐색 (data, body, response 등)
+                for k, v in data.items():
+                    if isinstance(v, dict):
+                        candidates.extend(extract_candidate_lists(v, depth + 1))
+                return candidates
+
+            candidate_lists = extract_candidate_lists(account_data)
+            if candidate_lists:
+                raw_list = candidate_lists[0]
 
             prev_positions = self.positions.copy()
             new_positions = {}
             for item in raw_list:
                 if not isinstance(item, dict):
                     continue
-                code = (
-                    item.get('stk_cd') or
-                    item.get('code') or
-                    item.get('pdno') or
-                    item.get('mksc_shrn_iscd') or
-                    item.get('expcode') or
-                    item.get('shcode') or
-                    item.get('item_code') or
-                    item.get('jongmok_code') or
-                    item.get('prdt_cd') or
-                    item.get('stck_shrn_iscd') or
-                    item.get('item_cd') or
-                    ''
-                )
-                code = str(code).replace('A', '').split('_')[0].strip()
+                code = ''
+                for k in code_keys:
+                    val = item.get(k)
+                    if val is not None and str(val).strip():
+                        code = str(val).strip()
+                        break
+
+                code = code.replace('A', '').split('_')[0].strip()
                 if not code:
                     continue
                 if len(code) > 6 and code[-6:].isdigit():
@@ -134,22 +161,12 @@ class AsyncPortfolioManager:
                     continue
 
                 # 보유수량 파싱
-                qty_val = (
-                    item.get('hldg_qty') or
-                    item.get('ccls_qty_sum') or
-                    item.get('qty') or
-                    item.get('hold_qty') or
-                    item.get('ord_psbl_qty') or
-                    item.get('bal_qty') or
-                    item.get('ccls_qty') or
-                    item.get('rmnd_qty') or
-                    item.get('tot_hldg_qty') or
-                    item.get('hld_qty') or
-                    item.get('jango_qty') or
-                    item.get('now_qty') or
-                    item.get('stck_qty') or
-                    0
-                )
+                qty_val = 0
+                for qk in qty_keys:
+                    if item.get(qk) is not None:
+                        qty_val = item.get(qk)
+                        break
+
                 qty_clean = str(qty_val).strip().replace(',', '').replace('+', '').replace('-', '')
                 try:
                     qty = int(float(qty_clean))
@@ -160,19 +177,17 @@ class AsyncPortfolioManager:
                     continue
 
                 # 매입평균단가 파싱
-                buy_p_val = (
-                    item.get('pchs_avg_pric') or
-                    item.get('buy_price') or
-                    item.get('pchs_price') or
-                    item.get('avg_buy_price') or
-                    item.get('buy_uv') or
-                    item.get('pchs_unit_amt') or
-                    item.get('pchs_avg_amt') or
-                    item.get('avg_pchs_price') or
-                    item.get('pchs_prc') or
-                    item.get('buy_prc') or
-                    0
-                )
+                buy_p_keys = [
+                    'pchs_avg_pric', 'buy_price', 'pchs_price', 'avg_buy_price',
+                    'buy_uv', 'pchs_unit_amt', 'pchs_avg_amt', 'avg_pchs_price',
+                    'pchs_prc', 'buy_prc'
+                ]
+                buy_p_val = 0
+                for bk in buy_p_keys:
+                    if item.get(bk) is not None:
+                        buy_p_val = item.get(bk)
+                        break
+
                 buy_p_clean = str(buy_p_val).strip().replace(',', '').replace('+', '').replace('-', '')
                 try:
                     buy_price = float(buy_p_clean)
@@ -191,17 +206,16 @@ class AsyncPortfolioManager:
                         pass
 
                 # 현재가 파싱
-                cur_p_val = (
-                    item.get('prpr') or
-                    item.get('current_price') or
-                    item.get('stck_prpr') or
-                    item.get('cur_prc') or
-                    item.get('clpr') or
-                    item.get('price') or
-                    item.get('now_prc') or
-                    item.get('stck_clpr') or
-                    0
-                )
+                cur_p_keys = [
+                    'prpr', 'current_price', 'stck_prpr', 'cur_prc', 'clpr',
+                    'price', 'now_prc', 'stck_clpr'
+                ]
+                cur_p_val = 0
+                for ck in cur_p_keys:
+                    if item.get(ck) is not None:
+                        cur_p_val = item.get(ck)
+                        break
+
                 cur_p_clean = str(cur_p_val).strip().replace(',', '').replace('+', '').replace('-', '')
                 try:
                     current_price = float(cur_p_clean)
@@ -237,16 +251,13 @@ class AsyncPortfolioManager:
                 except (ValueError, TypeError):
                     item_yield_rate = ((current_price / buy_price) - 1.0) * 100.0 if buy_price > 0 else 0.0
 
-                name = (
-                    item.get('stk_nm') or
-                    item.get('name') or
-                    item.get('prdt_name') or
-                    item.get('jongmok_name') or
-                    item.get('hts_kor_isnm') or
-                    item.get('item_name') or
-                    item.get('stck_nm') or
-                    code
-                )
+                name = ''
+                for nk in name_keys:
+                    if item.get(nk) is not None and str(item.get(nk)).strip():
+                        name = str(item.get(nk)).strip()
+                        break
+                if not name:
+                    name = code
 
                 prev_pos = prev_positions.get(code)
                 highest_price = max(prev_pos.get('highest_price', buy_price), current_price) if prev_pos else max(buy_price, current_price)
@@ -262,6 +273,14 @@ class AsyncPortfolioManager:
                     'pnl': item_pnl,
                     'yield_rate': item_yield_rate
                 }
+
+            if new_positions:
+                self.positions = new_positions
+                pos_summary = ", ".join([f"{p['name']}({code}) {p['qty']}주@{int(p['current_price']):,}원" for code, p in new_positions.items()])
+                print(f"📦 [Portfolio sync_positions] {len(new_positions)}개 보유 종목 동기화 완료: {pos_summary}")
+            elif prev_positions and (self.total_asset > self.current_capital):
+                # 임시 API 통신 에러 시 기존 포지션 보존
+                self.positions = prev_positions
 
             if new_positions:
                 self.positions = new_positions

@@ -1,10 +1,38 @@
 # 🚢 Azure Kubernetes Service (AKS) 배포 가이드 (AKS_DEPLOYMENT.md)
 
-본 문서는 고도화된 키움 비동기 퀀트 자동매매 시스템(`kiwoom_rest_project`)을 **Azure Container Registry(ACR)** 및 **Azure Kubernetes Service(AKS)** 환경에 24시간 365일 무중단으로 빌드하고 배포하는 전체 절차와 업로드 파일 목록을 안내합니다.
+본 문서는 고도화된 키움 비동기 퀀트 자동매매 시스템(`kiwoom_rest_project`)을 **GitHub Actions**, **Azure Storage**, **Azure Container Registry(ACR)** 및 **Azure Kubernetes Service(AKS)** 환경에 24시간 365일 무중단으로 빌드하고 배포하는 전체 절차와 자동화 파이프라인을 안내합니다.
+
+* **GitHub Repository:** `https://github.com/dheo0403-cloud/kiwoom_rest_project.git`
+* **자동 배포 워크플로우:** `.github/workflows/deploy.yml`
 
 ---
 
-## 1. 📂 업로드 대상 파일 목록 (Upload File Checklist)
+## 1. 🤖 GitHub Actions 원클릭 자동 배포 (추천)
+
+코드를 GitHub에 `git push`하면 GitHub Actions가 즉시 트리거되어 Azure Storage 업로드 ➔ ACR 이미지 빌드 ➔ AKS 무중단 롤아웃을 원스톱으로 자동 수행합니다.
+
+### 1단계: GitHub Secrets 8종 설정 (최초 1회)
+GitHub 저장소 ➔ **Settings ➔ Secrets and variables ➔ Actions**에 아래 8가지 값을 등록합니다:
+1. `AZURE_CLIENT_ID` (OIDC 클라이언트 ID)
+2. `AZURE_TENANT_ID` (Azure 테넌트 ID)
+3. `AZURE_SUBSCRIPTION_ID` (Azure 구독 ID)
+4. `AZURE_STORAGE_ACCOUNT` (스토리지 계정명)
+5. `AZURE_STORAGE_CONTAINER` (`portal-cloudshell`)
+6. `AZURE_ACR_NAME` (ACR 레지스트리명, 예: `portalregistries`)
+7. `AKS_CLUSTER_NAME` (AKS 클러스터명)
+8. `AKS_RESOURCE_GROUP` (리소스 그룹명)
+
+### 2단계: Git Push로 자동 배포 실행
+```bash
+git add -A
+git commit -m "feat: 기능 추가 및 배포"
+git push origin main
+```
+➔ 푸시 즉시 GitHub Actions가 실행되어 Azure Storage(`deploy/kiwoom_rest_project`), ACR(`kiwoom-bot:latest`), AKS(`deployment/kiwoom-bot -n mzc-apps`)로 자동 배포됩니다.
+
+---
+
+## 2. 📂 수동 업로드 대상 파일 목록 (Manual Upload Checklist)
 
 서버(`~/clouddrive/deploy/kiwoom_rest_project`)에 업로드해야 하는 파일 목록입니다. 
 
@@ -41,7 +69,7 @@
 
 ---
 
-## 2. 🛡️ 24시간 365일 무중단 아키텍처 동작 원리
+## 3. 🛡️ 24시간 365일 무중단 아키텍처 동작 원리
 
 과거에는 장 마감(15:30) 시 봇 프로세스가 완전히 exit하면서 부모 프로세스(`start.py`)가 대시보드까지 함께 종료시키는 현상이 있었습니다. 이를 완전히 해결하기 위해 **2단계 자가 치유 및 영구 데몬 아키텍처**를 적용하였습니다:
 
@@ -54,9 +82,9 @@
 
 ---
 
-## 3. 🚀 ACR 빌드 및 AKS 배포 명령어
+## 4. 🚀 (수동 배포 시) ACR 빌드 및 AKS 배포 명령어
 
-클라우드 쉘(Azure Cloud Shell) 또는 배포 서버 터미널에서 아래 명령어를 순서대로 실행합니다.
+만약 GitHub Actions를 사용하지 않고 Azure Cloud Shell 접속을 통해 수동으로 진행하실 경우 아래 절차를 따릅니다.
 
 ### 1단계: 업로드 디렉터리 이동
 ```bash

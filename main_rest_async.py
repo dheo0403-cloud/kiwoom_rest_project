@@ -232,26 +232,29 @@ class AsyncTradingBot:
                     if k not in raw_fields_debug and not isinstance(v, (list, dict)):
                         raw_fields_debug[k] = v
 
-        # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원)
-        # 키움 kt00005: tot_evlu_amt (총평가금액), tot_asst_amt, aset_evlt_amt, asst_tot_amt, evlu_amt_tot
+        # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원 / 64,400원 주식평가 + 82,819원 D+2예수금)
         tot_evlu_keys = [
             'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt',
             'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
-        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 매수가능 현금: 1,122원)
+        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 D+2 예수금: 82,819원)
+        # 중요: 키움 REST API에서 dnca_tot_amt는 당일 예수금(1,122원)으로 올 수 있으므로 진짜 D+2 키를 최우선 순위로 배치
         d2_deposit_keys = [
-            'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
-            'ord_psbl_amt', 'ord_alowa', 'd2_auto_amt', '주문가능금액', '주문가능현금'
+            'd2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
+            'd2_ccls_amt', 'd2_estm_amt', 'prvs_rcdl_excc_amt_smtl_amt',
+            'entr_d2', 'd2_entr', 'd2_ord_psbl_amt', 'ord_psbl_cash', 'ord_psbl_amt',
+            'ord_alowa', 'd2_psbl_amt', 'D+2예수금', 'D+2추정예수금', '추정예수금',
+            '주문가능금액', '주문가능현금', 'dnca_tot_amt'
         ]
 
-        # 3) 당일 단순 예수금 원금 키 목록 (1,122원)
+        # 3) 당일 단순 예수금 원금 / 인출가능금 키 목록 (1,122원)
         raw_entr_keys = [
-            'prvs_rcdl_excc_amt', 'entr', 'deposit', '예수금',
-            'prvs_rcdl_excc_amt_smtl_amt', 'prvs_rcdl_amt'
+            'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', '예수금',
+            '인출가능금액', '인출가능금', 'prvs_rcdl_amt', '당일예수금'
         ]
 
-        # 4) 대용금 키 목록 (103,890원 - 분리 및 로깅용, 절대 총자산으로 오맵핑 금지)
+        # 4) 대용금 키 목록 (45,530원 - 분리 및 로깅용, 절대 총자산으로 오맵핑 금지)
         sub_amt_keys = [
             'sub_amt', 'sub_tot_amt', '대용금', '대용금액', 'sub_dnca_amt'
         ]
@@ -353,12 +356,12 @@ class AsyncTradingBot:
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
         # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
-        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 1,122원)
+        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 82,819원)
         available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
 
-        # (2) 총 평가자산 (키움 HTS 공식 총평가금액 148,442원 매핑 및 예수금 원금 100% 방어)
+        # (2) 총 평가자산 (키움 HTS 공식 총평가금액 147,219원~148,442원 매핑 및 예수금+주식평가액 100% 방어)
+        calc_with_d2 = available_cash + invested_eval
         calc_with_raw = (parsed_raw_entr + invested_eval) if (parsed_raw_entr and parsed_raw_entr > 0) else 0.0
-        calc_with_d2 = (available_cash + invested_eval)
 
         candidates_total = [calc_with_d2]
         if parsed_tot_evlu_amt and parsed_tot_evlu_amt > 0:
@@ -368,10 +371,11 @@ class AsyncTradingBot:
 
         final_total_asset = max(candidates_total)
 
-        # 안전 가드: 총자산은 항상 D+2 예수금 이상이어야 함 (원리: 예수금 + 주식평가액)
-        if final_total_asset < available_cash:
-            print(f"🚨 [sync_balance 가드] 총자산({int(final_total_asset):,}원) < D+2예수금({int(available_cash):,}원) → 총자산 보정: {int(available_cash):,}원")
-            final_total_asset = available_cash
+        # 안전 가드: 총자산은 항상 (D+2 예수금 + 보유주식 평가액) 이상이어야 함
+        min_required_total = available_cash + invested_eval
+        if final_total_asset < min_required_total:
+            print(f"🚨 [sync_balance 가드] 총자산({int(final_total_asset):,}원) < 최소필요총자산({int(min_required_total):,}원) → 총자산 보정: {int(min_required_total):,}원")
+            final_total_asset = min_required_total
 
         # 키움 계좌 TR Raw Data 분석 로그 출력
         preview_keys = ['tot_evlu_amt', 'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']

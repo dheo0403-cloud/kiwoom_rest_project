@@ -347,7 +347,7 @@ class AsyncKiwoomClient:
     async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
         """
         예수금 상세 현황 조회 (kt00001 / OPW00001 대응)
-        - 당일 순수 예수금(entr), 전일예수금(prvs_rcdl_excc_amt), D+2추정예수금(dnca_tot_amt), 주문가능금액(ord_psbl_cash)
+        - 당일 순수 예수금(entr), 전일예수금(prvs_rcdl_excc_amt), D+2추정예수금(d2_deposit, d2_auto_amt, dnca_tot_amt 등), 주문가능금액(ord_psbl_cash)
         """
         url = f"{self.base_url}/api/dostk/acnt"
         payload = {
@@ -357,27 +357,72 @@ class AsyncKiwoomClient:
             "qry_tp": "3"  # 3: 추정조회(D+2)
         }
         data, _ = await self.request("kt00001", url, payload, priority=priority)
+        if not data or (isinstance(data, dict) and not any(k in data for k in ['output', 'output1', 'output2', 'd2_deposit', 'prvs_rcdl_excc_amt'])):
+            # Fallback: qry_tp 2 또는 기본 파라미터 재시도
+            payload["qry_tp"] = "2"
+            data2, _ = await self.request("kt00001", url, payload, priority=priority)
+            if data2:
+                data = data2
         return data
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 보유 포지션 조회 (kt00004: 계좌평가잔고 OPW00018 + kt00005: 체결잔고 듀얼 지원)"""
+        """계좌 잔고 및 보유 포지션 조회 (kt00004: 계좌평가잔고 OPW00018 + kt00005: 체결잔고 + kt00018 다중 TR 및 페이로드 안전 폴백)"""
         url = f"{self.base_url}/api/dostk/acnt"
-        payload = {
+
+        # 1차 시도: kt00004 (계좌평가잔고내역 OPW00018)
+        payload_qry1 = {
             "dmst_stex_tp": "KRX",
             "accNo": self.account,
             "accPwd": self.password,
             "qry_tp": "1"
         }
-        # 1차: kt00004 (계좌평가잔고내역 OPW00018 - 전체 보유 주식 목록 반환)
-        data, _ = await self.request("kt00004", url, payload, priority=priority)
-        if not data or (isinstance(data, dict) and not data.get('output2') and not data.get('Output2')):
-            # 2차: kt00005 (체결잔고)
-            data5, _ = await self.request("kt00005", url, payload, priority=priority)
-            if data5:
+        data, _ = await self.request("kt00004", url, payload_qry1, priority=priority)
+
+        has_pos = False
+        if data and isinstance(data, dict):
+            for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'stk_list', 'output', 'output1']:
+                v = data.get(k)
+                if isinstance(v, list) and v:
+                    has_pos = True
+                    break
+
+        # 2차 시도: kt00005 (체결잔고 - qry_tp 없는 순수 계좌 페이로드)
+        if not data or not has_pos:
+            payload_pure = {
+                "dmst_stex_tp": "KRX",
+                "accNo": self.account,
+                "accPwd": self.password
+            }
+            data5, _ = await self.request("kt00005", url, payload_pure, priority=priority)
+            if data5 and isinstance(data5, dict):
                 if not data:
                     data = data5
-                elif isinstance(data5, dict) and (data5.get('output2') or data5.get('Output2')):
-                    data['output2'] = data5.get('output2') or data5.get('Output2')
+                else:
+                    # 기존 데이터에 종목 리스트 병합
+                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
+                        if k in data5 and data5[k]:
+                            data[k] = data5[k]
+                            has_pos = True
+                            break
+
+        # 3차 시도: kt00004 with qry_tp="0" (전체 조회)
+        if not data or not has_pos:
+            payload_qry0 = {
+                "dmst_stex_tp": "KRX",
+                "accNo": self.account,
+                "accPwd": self.password,
+                "qry_tp": "0"
+            }
+            data4_0, _ = await self.request("kt00004", url, payload_qry0, priority=priority)
+            if data4_0 and isinstance(data4_0, dict):
+                if not data:
+                    data = data4_0
+                else:
+                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
+                        if k in data4_0 and data4_0[k]:
+                            data[k] = data4_0[k]
+                            break
+
         return data
 
     async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:

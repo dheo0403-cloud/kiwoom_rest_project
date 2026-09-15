@@ -15,14 +15,14 @@ permissions:
 
 jobs:
   build-and-deploy:
-    name: Build, Upload to Azure Storage, Push ACR & Rollout AKS
+    name: Build, Upload ./dist to Azure Storage, Push ACR & Rollout AKS
     runs-on: ubuntu-latest
 
     steps:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
-      - name: 2. Set up Node.js 20 for Frontend
+      - name: 2. Set up Node.js 20 for Frontend Build
         uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -36,44 +36,66 @@ jobs:
           npm ci
           npm run build
           cd ..
-          echo "✅ [Frontend Build] ./frontend/dist 번들 빌드 완료"
+          echo "✅ [Frontend Build] ./frontend/dist 정적 번들 빌드 완료"
 
-      - name: 4. Azure Login via OIDC (Passwordless Federated Credentials)
+      - name: 4. Package Production Artifacts into ./dist
+        run: |
+          echo "📦 [Packaging] 배포용 ./dist 디렉토리 패키징 시작..."
+          rm -rf ./dist
+          mkdir -p ./dist
+
+          # 1) 루트 핵심 소스코드 및 설정 파일 복사
+          cp -f Dockerfile requirements.txt .dockerignore start.py ./dist/ 2>/dev/null || true
+          cp -f *.py ./dist/ 2>/dev/null || true
+
+          # 2) 프론트엔드 빌드 산출물 복사
+          mkdir -p ./dist/frontend
+          cp -r frontend/dist ./dist/frontend/ 2>/dev/null || true
+          cp -f frontend/package.json ./dist/frontend/ 2>/dev/null || true
+
+          # 3) 테스트 및 불필요 파일 제외 정리
+          rm -f ./dist/test_*.py ./dist/check_db.py 2>/dev/null || true
+          rm -rf ./dist/__pycache__ ./dist/legacy 2>/dev/null || true
+
+          echo "✅ [Packaging] 배포용 ./dist 번들 구성 완료:"
+          ls -la ./dist
+
+      - name: 5. Azure Login via OIDC (Passwordless Federated Credentials)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: 5. Clean Old Files & Upload to Azure Storage (portal-cloudshell)
+      - name: 6. Clean Old Files & Upload ./dist to Azure Storage
         run: |
           STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT }}"
           CONTAINER_NAME="${{ secrets.AZURE_STORAGE_CONTAINER }}"
           TARGET_PATH="deploy/kiwoom_rest_project"
 
-          echo "🧹 [Azure Storage] 구버전 배포 파일 삭제 중: $CONTAINER_NAME/$TARGET_PATH..."
+          echo "🧹 [Azure Storage] 기존 구버전 배포 파일 삭제 중: $CONTAINER_NAME/$TARGET_PATH..."
           az storage blob delete-batch \
             --account-name "$STORAGE_ACCOUNT" \
             --source "$CONTAINER_NAME" \
             --pattern "$TARGET_PATH/*" \
             --auth-mode login || true
 
-          echo "🚀 [Azure Storage] 최신 프로젝트 소스 및 빌드 파일 일괄 업로드 중..."
+          echo "🚀 [Azure Storage] 최신 ./dist 폴더의 모든 내용 일괄 업로드 중..."
           az storage blob upload-batch \
             --account-name "$STORAGE_ACCOUNT" \
             --destination "$CONTAINER_NAME/$TARGET_PATH" \
-            --source . \
+            --source ./dist \
             --pattern "*" \
             --auth-mode login \
             --overwrite true
           echo "✅ [Azure Storage] 스토리지 업로드 완료: $CONTAINER_NAME/$TARGET_PATH"
 
-      - name: 6. Log in to Azure Container Registry (ACR)
+      - name: 7. Log in to Azure Container Registry (ACR)
         run: |
           echo "🔑 [ACR Login] Logging in to ${{ secrets.AZURE_ACR_NAME }}..."
           az acr login --name ${{ secrets.AZURE_ACR_NAME }}
 
-      - name: 7. Build and Push Docker Image (kiwoom-bot) to ACR
+      - name: 8. Build and Push Docker Image (kiwoom-bot) to ACR
         run: |
           ACR_REGISTRY="${{ secrets.AZURE_ACR_NAME }}.azurecr.io"
           IMAGE_NAME="kiwoom-bot"
@@ -88,22 +110,23 @@ jobs:
           echo "📤 [Docker Push] ACR 레지스트리로 이미지 푸시..."
           docker push $ACR_REGISTRY/$IMAGE_NAME:latest
           docker push $ACR_REGISTRY/$IMAGE_NAME:$COMMIT_TAG
-          echo "✅ [ACR Push] 도커 이미지 푸시 완료"
+          echo "✅ [ACR Push] 도커 이미지 푸시 완료: $ACR_REGISTRY/$IMAGE_NAME"
 
-      - name: 8. Set up Kubectl and Connect to AKS Cluster
+      - name: 9. Set up Kubectl and Connect to AKS Cluster
         uses: azure/aks-set-context@v4
         with:
           cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
 
-      - name: 9. Rollout Restart AKS Deployment (kiwoom-bot)
+      - name: 10. Rollout Restart AKS Deployment (kiwoom-bot)
         run: |
-          echo "🚀 [AKS Rollout] deployment/kiwoom-bot 무중단 롤아웃 재시작 실행..."
-          if kubectl get deployment kiwoom-bot -n mzc-apps >/dev/null 2>&1; then
-            kubectl rollout restart deployment/kiwoom-bot -n mzc-apps
-            kubectl rollout status deployment/kiwoom-bot -n mzc-apps --timeout=180s
+          DEPLOYMENT_NAME="kiwoom-bot"
+          echo "🚀 [AKS Rollout] deployment/$DEPLOYMENT_NAME 무중단 롤아웃 재시작 실행..."
+          if kubectl get deployment $DEPLOYMENT_NAME -n mzc-apps >/dev/null 2>&1; then
+            kubectl rollout restart deployment/$DEPLOYMENT_NAME -n mzc-apps
+            kubectl rollout status deployment/$DEPLOYMENT_NAME -n mzc-apps --timeout=180s
           else
-            kubectl rollout restart deployment/kiwoom-bot
-            kubectl rollout status deployment/kiwoom-bot --timeout=180s
+            kubectl rollout restart deployment/$DEPLOYMENT_NAME
+            kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s
           fi
-          echo "🎉 [AKS Deployment] kiwoom-bot 서비스 무중단 배포가 완벽하게 완료되었습니다."
+          echo "🎉 [AKS Deployment] $DEPLOYMENT_NAME 서비스 무중단 배포가 성공적으로 완료되었습니다."
