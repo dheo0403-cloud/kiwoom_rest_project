@@ -2,6 +2,46 @@
 
 ---
 
+## 📅 [2026-09-15] 키움 계좌 잔고 TR(kt00005/OPW00018) 실데이터(148,442원) 정합성 복원, 대용금 오맵핑 차단, 4개 보유 종목 UI 연동 및 데이터 요동 현상 완전 해결
+
+### 1. 작업 개요 및 목적
+- **실제 키움 앱 계좌 데이터와 대시보드 간 불일치 전면 해결:**
+  - 실제 키움증권 계좌(`국내잔고.png`: 총평가 148,442원, 총매입 147,400원, 총손익 +778원(+0.53%), 4개 보유 종목)와 `예수금.png` (D+2예수금 1,122원, 대용금 103,890원)의 수치를 100% 일치하도록 파싱 및 상태 동기화 로직 전면 개편.
+- **총자산 vs 대용금 오맵핑 및 계산식 오류 원천 차단:**
+  - 기존 `final_total_asset` 계산식에서 `parsed_raw_entr > 0`일 때 Case A로 강제 진입하여 `tot_evlu_amt`(148,442원)가 무시되고 예수금(1,122원) 또는 대용금(100,842원 근처)으로 오염되던 결함을 완벽 해결.
+  - 키움 TR의 `tot_evlu_amt`(총평가금액 = 148,442원)를 최우선 1순위로 매핑하고, 대용금(`sub_amt`: 103,890원)을 분리 로깅하도록 정규화.
+- **멀티데이터(`output2`) 4개 보유 주식 정밀 파싱 및 UI 연동:**
+  - 흥아해운(003280, 2주 @ 1,980원), 한국전력(015760, 1주 @ 32,950원), 비에이치(090460, 1주 @ 19,520원), KODEX 코스닥150(229200, 1주 @ 14,080원)의 수량, 매입단가, 현재가, 평가손익, 수익률을 누락 없이 파싱하여 `portfolio.positions`에 등록.
+- **Backend/Frontend 상태 관리 일원화 및 잔고 요동(Fluctuation) 완전 제거:**
+  - REST `/portfolio` 폴링과 WebSocket 브로드캐스트 간의 데이터 경합 및 덮어쓰기 충돌을 해결.
+  - `AsyncPortfolioManager`를 단일 진실 공급원(Single Source of Truth)으로 확립하고, 프론트엔드(`useWebSocket.ts`)에서 WS 실시간 메시지를 우선 반영하여 1,122원과 148,442원 사이의 요동 및 포지션 0개 깜빡임 현상 제거.
+- **동적 감시 목록(Dynamic Watchlist) 정상화 및 전체 퀀트 매매 워크플로우 시뮬레이션 검증:**
+  - 소액 잔고(1,122원)로 인해 우량 감시 종목이 전부 탈락하던 문제 해결: 감시 목록은 거래대금 상위 20~30개 종목을 온전히 유지하고, 매수 직전에만 잔고 체크하도록 분리.
+  - '피보나치 타점 매수 -> 포지션 편입 -> 보유 중 트레일링 감시 -> 3단계 분할 익절/스탑로스 전량 매도'의 전체 퀀트 매매 사이클 E2E 검증.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `main_rest_async.py`:
+  - `_sync_account_balance()` 파싱 로직 개편: `candidates_total` 계산식 도입으로 `tot_evlu_amt`(148,442원)를 최우선 적용하고, `sub_amt`(대용금 103,890원)를 명시적으로 분리.
+  - `update_watchlist()`: 고가 종목 탈락 대신 `affordable` 플래그 관리로 전환하여 20~30개 거래대금 상위 종목의 피보나치 감시 목록 유지.
+- `async_portfolio.py`:
+  - `sync_positions`: `pchs_avg_pric` 누락 시 `pchs_amt / qty`로 단가 자동 보정, `prpr` 누락 시 `evlu_amt / qty`로 현재가 보정, 평가손익(`pnl`)과 수익률(`yield_rate`) 정규화.
+  - `get_snapshot()`: `invested_pchs > 0`일 때 `total_yield_rate` 정확한 수익률 산출 및 `positions` 전수 직렬화.
+- `api_server.py`:
+  - `portfolio_broadcast_loop` 및 `get_portfolio`: `ctx.portfolio` 인메모리 스냅샷을 단일 진실 공급원으로 확립하여 DB 폴백과의 경합 요동 제거.
+- `frontend/src/hooks/useWebSocket.ts`:
+  - WebSocket 실시간 `PORTFOLIO_UPDATE` 우선 적용, REST 폴백 시 WS 연결 중 덮어쓰기 방지, `stock_count`와 `positions` 동기화.
+- `test_async_trading_loop.py`:
+  - Test 10 (`test_actual_account_balance_and_4_holdings_sync`) 신설: 실제 키움 앱 데이터(148,442원, 1,122원, 4개 보유 종목) 정밀 검증.
+  - Test 11 (`test_dynamic_watchlist_and_full_quant_workflow`) 신설: 동적 감시 목록 갱신 및 전체 매매 사이클(매수->1차익절->2차익절->전량청산) E2E 검증.
+- `GSD_MASTERPLAN.md`: Phase 14 완료 및 Phase 15 신설 반영.
+
+### 3. 검증 결과
+- **단위/통합 테스트:** `test_async_trading_loop.py` (11/11 100% ALL PASS), `test_api_server.py` (14/14 100% ALL PASS) 전 테스트 스위트 통과.
+- **프론트엔드 빌드:** `npm run build` Vite 프로덕션 번들링 성공 (0 errors).
+- **형상 관리:** `fix/actual-balance-match-and-portfolio-display` 브랜치 커밋.
+
+---
+
 ## 📅 [2026-09-09] 키움 계좌 잔고 TR(kt00005/OPW00018) 총자산 vs D+2 예수금 필드 오맵핑 전면 교정 및 정밀 파싱 엔진 구축
 
 ### 1. 작업 개요 및 목적

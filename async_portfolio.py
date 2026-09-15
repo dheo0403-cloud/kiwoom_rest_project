@@ -87,12 +87,12 @@ class AsyncPortfolioManager:
         return float(np.clip(adjusted_kelly, min_alloc, max_alloc))
 
     async def sync_positions(self, account_data: Dict[str, Any]):
-        """키움 계좌 잔고 API 응답(kt00005) 기반 포지션 동기화 (모의/실전/다중 스키마 100% 대응)"""
+        """키움 계좌 잔고 API 응답(kt00005/OPW00018) 기반 포지션 동기화 (모의/실전/다중 스키마 100% 대응)"""
         async with self._lock:
             if not account_data:
                 return
 
-            # output2 / Output2 / list / acnt_dtl_list / output 순차 탐색
+            # output2 / Output2 / list / acnt_dtl_list / holdings / output 순차 탐색
             raw_list = (
                 account_data.get('output2') or
                 account_data.get('Output2') or
@@ -123,9 +123,10 @@ class AsyncPortfolioManager:
                 ).strip()
                 if not code:
                     continue
-                # 종목코드 6자리 정규화
-                if code.startswith('A'):
-                    code = code[1:]
+                # 종목코드 6자리 정규화 (A접두사 및 _AL 등 제거)
+                code = code.replace('A', '').split('_')[0].strip()
+                if not code or (len(code) != 6 and not code.isdigit()):
+                    continue
 
                 qty_str = str(
                     item.get('hldg_qty') or
@@ -146,13 +147,27 @@ class AsyncPortfolioManager:
 
                 buy_p_str = str(
                     item.get('pchs_avg_pric') or
-                    item.get('pchs_amt') or
                     item.get('buy_price') or
                     item.get('pchs_price') or
                     item.get('avg_buy_price') or
                     item.get('buy_uv') or
                     0
                 ).replace(',', '').strip()
+
+                try:
+                    buy_price = float(buy_p_str)
+                except ValueError:
+                    buy_price = 0.0
+
+                # 만약 매입단가가 0이고 총매입금액(pchs_amt)이 있다면 단가 계산
+                if buy_price <= 0 and qty > 0:
+                    pchs_amt_str = str(item.get('pchs_amt') or item.get('buy_amt') or 0).replace(',', '').strip()
+                    try:
+                        pchs_amt = float(pchs_amt_str)
+                        if pchs_amt > 0:
+                            buy_price = pchs_amt / qty
+                    except ValueError:
+                        pass
 
                 cur_p_str = str(
                     item.get('prpr') or
@@ -161,18 +176,39 @@ class AsyncPortfolioManager:
                     item.get('cur_prc') or
                     item.get('clpr') or
                     item.get('price') or
-                    buy_p_str
+                    0
                 ).replace(',', '').strip()
 
                 try:
-                    buy_price = float(buy_p_str)
+                    current_price = float(cur_p_str)
                 except ValueError:
-                    buy_price = 0.0
+                    current_price = 0.0
 
-                try:
-                    current_price = float(cur_p_str) if float(cur_p_str) > 0 else buy_price
-                except ValueError:
+                # 만약 현재가가 0이고 평가금액(evlu_amt)이 있다면 단가 계산
+                if current_price <= 0 and qty > 0:
+                    evlu_amt_str = str(item.get('evlu_amt') or item.get('eval_amt') or 0).replace(',', '').strip()
+                    try:
+                        evlu_amt = float(evlu_amt_str)
+                        if evlu_amt > 0:
+                            current_price = evlu_amt / qty
+                    except ValueError:
+                        pass
+
+                if current_price <= 0:
                     current_price = buy_price
+
+                # 평가손익 및 수익률 추출 (API 응답 또는 직접 계산)
+                pnl_str = str(item.get('evlu_pfls_amt') or item.get('pnl') or 0).replace(',', '').strip()
+                try:
+                    item_pnl = float(pnl_str)
+                except ValueError:
+                    item_pnl = (current_price - buy_price) * qty
+
+                rt_str = str(item.get('evlu_pfls_rt') or item.get('yield_rate') or 0).replace(',', '').replace('%', '').strip()
+                try:
+                    item_yield_rate = float(rt_str)
+                except ValueError:
+                    item_yield_rate = ((current_price / buy_price) - 1.0) * 100.0 if buy_price > 0 else 0.0
 
                 name = item.get('stk_nm') or item.get('name') or item.get('prdt_name') or item.get('jongmok_name') or code
 
@@ -186,7 +222,9 @@ class AsyncPortfolioManager:
                     'buy_price': buy_price,
                     'current_price': current_price,
                     'highest_price': highest_price,
-                    'sell_stage': sell_stage
+                    'sell_stage': sell_stage,
+                    'pnl': item_pnl,
+                    'yield_rate': item_yield_rate
                 }
             self.positions = new_positions
 
@@ -324,19 +362,25 @@ class AsyncPortfolioManager:
                     print(f"⚠️ [Portfolio] total_asset이 0에서 초기화됨: 총자산={int(total_asset):,}원 (D+2예수금: {int(self.current_capital):,}원 + 평가액: {int(invested_eval):,}원)")
 
             total_pnl = invested_eval - invested_pchs
-            total_yield = (total_pnl / self.initial_capital * 100.0) if self.initial_capital > 0 else 0.0
+            if invested_pchs > 0:
+                total_yield = (total_pnl / invested_pchs * 100.0)
+            elif self.initial_capital > 0:
+                total_yield = (total_pnl / self.initial_capital * 100.0)
+            else:
+                total_yield = 0.0
 
             return {
                 'initial_capital': self.initial_capital,
                 'current_capital': self.current_capital,
                 'available_cash': self.current_capital,
                 'total_asset': total_asset,
+                'invested_capital': invested_eval,
                 'invested_pchs': invested_pchs,
                 'invested_eval': invested_eval,
                 'total_pnl': total_pnl,
                 'unrealized_pnl': total_pnl,
-                'total_yield': total_yield,
-                'total_yield_rate': total_yield,
+                'total_yield': round(total_yield, 2),
+                'total_yield_rate': round(total_yield, 2),
                 'kelly_allocation_pct': self.get_kelly_allocation_fraction() * 100.0,
                 'positions_count': len(pos_list),
                 'stock_count': len(pos_list),

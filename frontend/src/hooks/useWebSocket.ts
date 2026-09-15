@@ -40,18 +40,20 @@ export function useTradingWebSocket() {
 
       if (portRes.status === 'fulfilled' && portRes.value.ok) {
         const portData = await portRes.value.json();
+        const rawPositions = Array.isArray(portData.positions) ? portData.positions : [];
         setPortfolio(prev => {
-          const nextAsset = portData.total_asset > 0 ? portData.total_asset : prev.total_asset;
-          const nextCap = portData.current_capital > 0 ? portData.current_capital : prev.current_capital;
-          const nextPos = (portData.positions && portData.positions.length > 0) ? portData.positions : prev.positions;
+          // WS 연결 중이고 이미 유효한 자산 데이터가 있으면 REST 응답으로 덮어쓰지 않아 요동 방지
+          if (isConnected && prev.total_asset > 0) {
+            return prev;
+          }
           return {
-            total_asset: nextAsset,
-            current_capital: nextCap,
+            total_asset: portData.total_asset > 0 ? portData.total_asset : prev.total_asset,
+            current_capital: portData.current_capital > 0 ? portData.current_capital : prev.current_capital,
             invested_capital: portData.invested_capital || prev.invested_capital,
-            stock_count: portData.stock_count ?? nextPos.length,
+            stock_count: rawPositions.length,
             unrealized_pnl: portData.unrealized_pnl ?? prev.unrealized_pnl,
             total_yield_rate: portData.total_yield_rate ?? prev.total_yield_rate,
-            positions: nextPos,
+            positions: rawPositions,
             last_synced_at: portData.last_synced_at || prev.last_synced_at
           };
         });
@@ -74,7 +76,7 @@ export function useTradingWebSocket() {
     } catch (e) {
       console.warn("REST fallback fetch error:", e);
     }
-  }, []);
+  }, [isConnected]);
 
   useEffect(() => {
     fetchRestData();
@@ -107,20 +109,16 @@ export function useTradingWebSocket() {
             const msg = JSON.parse(event.data);
             if ((msg.type === 'PORTFOLIO_UPDATE' || msg.type === 'PORTFOLIO_INIT') && msg.data) {
               const d = msg.data;
-              setPortfolio(prev => {
-                const nextAsset = d.total_asset > 0 ? d.total_asset : prev.total_asset;
-                const nextCap = d.current_capital > 0 ? d.current_capital : prev.current_capital;
-                const nextPos = (d.positions && d.positions.length > 0) ? d.positions : prev.positions;
-                return {
-                  total_asset: nextAsset,
-                  current_capital: nextCap,
-                  invested_capital: d.invested_capital || prev.invested_capital,
-                  stock_count: d.stock_count ?? nextPos.length,
-                  unrealized_pnl: d.unrealized_pnl ?? prev.unrealized_pnl,
-                  total_yield_rate: d.total_yield_rate ?? prev.total_yield_rate,
-                  positions: nextPos,
-                  last_synced_at: d.last_synced_at || prev.last_synced_at
-                };
+              const rawPositions = Array.isArray(d.positions) ? d.positions : [];
+              setPortfolio({
+                total_asset: d.total_asset > 0 ? d.total_asset : (d.current_capital || 0),
+                current_capital: d.current_capital || 0,
+                invested_capital: d.invested_capital || d.invested_eval || 0,
+                stock_count: rawPositions.length,
+                unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
+                total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
+                positions: rawPositions,
+                last_synced_at: d.last_synced_at
               });
             }
           } catch (e) {

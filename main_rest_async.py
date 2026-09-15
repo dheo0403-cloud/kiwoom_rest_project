@@ -196,19 +196,33 @@ class AsyncTradingBot:
         if not balance_data and not deposit_data:
             return
 
-        # 1. 예수금 및 총평가금액 파싱 (output1 / output / 루트 딕셔너리 순차 탐색)
+        # 1. 예수금 및 총평가금액 파싱 대상 수집 (balance_data 및 deposit_data)
         summary_candidates = []
-        if isinstance(balance_data.get('output1'), list) and balance_data['output1']:
-            summary_candidates.append(balance_data['output1'][0])
-        elif isinstance(balance_data.get('output1'), dict):
-            summary_candidates.append(balance_data['output1'])
+        if balance_data:
+            if isinstance(balance_data.get('output1'), list) and balance_data['output1']:
+                summary_candidates.append(balance_data['output1'][0])
+            elif isinstance(balance_data.get('output1'), dict):
+                summary_candidates.append(balance_data['output1'])
 
-        if isinstance(balance_data.get('output'), list) and balance_data['output']:
-            summary_candidates.append(balance_data['output'][0])
-        elif isinstance(balance_data.get('output'), dict):
-            summary_candidates.append(balance_data['output'])
+            if isinstance(balance_data.get('output'), list) and balance_data['output']:
+                summary_candidates.append(balance_data['output'][0])
+            elif isinstance(balance_data.get('output'), dict):
+                summary_candidates.append(balance_data['output'])
 
-        summary_candidates.append(balance_data)
+            summary_candidates.append(balance_data)
+
+        if deposit_data:
+            if isinstance(deposit_data.get('output1'), list) and deposit_data['output1']:
+                summary_candidates.append(deposit_data['output1'][0])
+            elif isinstance(deposit_data.get('output1'), dict):
+                summary_candidates.append(deposit_data['output1'])
+
+            if isinstance(deposit_data.get('output'), list) and deposit_data['output']:
+                summary_candidates.append(deposit_data['output'][0])
+            elif isinstance(deposit_data.get('output'), dict):
+                summary_candidates.append(deposit_data['output'])
+
+            summary_candidates.append(deposit_data)
 
         # 키움 계좌 TR 원본 필드 디버그 프리뷰 수집
         raw_fields_debug: Dict[str, Any] = {}
@@ -218,55 +232,55 @@ class AsyncTradingBot:
                     if k not in raw_fields_debug and not isinstance(v, (list, dict)):
                         raw_fields_debug[k] = v
 
-        # 1) 당일 단순 예수금 원금 키 목록 (결제/정산 전 순수 현금 예수금: HTS 약 11만 원대)
-        # 키움 kt00005 / OPW00018 / OPW00001
-        raw_entr_keys = [
-            'prvs_rcdl_excc_amt', 'entr', 'deposit', '예수금',
-            'prvs_rcdl_excc_amt_smtl_amt', 'prvs_rcdl_amt'
+        # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원)
+        # 키움 kt00005: tot_evlu_amt (총평가금액), tot_asst_amt, aset_evlt_amt, asst_tot_amt, evlu_amt_tot
+        tot_evlu_keys = [
+            'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt',
+            'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
-        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (미결제 정산 후 실제 매수가능 현금: HTS 약 10만 원대)
+        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 매수가능 현금: 1,122원)
         d2_deposit_keys = [
             'dnca_tot_amt', 'd2_deposit', 'entr_d2', 'ord_psbl_cash',
             'ord_psbl_amt', 'ord_alowa', 'd2_auto_amt', '주문가능금액', '주문가능현금'
         ]
 
-        # 3) 순수 총자산 / 자산평가금액 키 목록
-        pure_total_asset_keys = [
-            'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt', 'tot_amt',
-            'evlu_amt_tot', 'evlt_amt_tot', '예탁자산평가액', '자산평가금액', '총자산금액'
+        # 3) 당일 단순 예수금 원금 키 목록 (1,122원)
+        raw_entr_keys = [
+            'prvs_rcdl_excc_amt', 'entr', 'deposit', '예수금',
+            'prvs_rcdl_excc_amt_smtl_amt', 'prvs_rcdl_amt'
         ]
 
-        # 4) 계좌 총평가금액 키 목록 (주식평가액 + D+2예수금)
-        tot_evlu_keys = [
-            'tot_evlu_amt', '총평가금액', 'evlu_amt_smtl_amt'
+        # 4) 대용금 키 목록 (103,890원 - 분리 및 로깅용, 절대 총자산으로 오맵핑 금지)
+        sub_amt_keys = [
+            'sub_amt', 'sub_tot_amt', '대용금', '대용금액', 'sub_dnca_amt'
         ]
 
-        parsed_raw_entr: Optional[float] = None
-        parsed_d2_deposit: Optional[float] = None
-        parsed_pure_total_asset: Optional[float] = None
         parsed_tot_evlu_amt: Optional[float] = None
+        parsed_d2_deposit: Optional[float] = None
+        parsed_raw_entr: Optional[float] = None
+        parsed_sub_amt: Optional[float] = None
         unclosed_cnt: int = 0
 
         for s_dict in summary_candidates:
             if not isinstance(s_dict, dict):
                 continue
 
-            # (1) 당일 단순 예수금 원금 탐색 (11만 원대)
-            if parsed_raw_entr is None:
-                for key in raw_entr_keys:
+            # (1) 총평가금액 (148,442원)
+            if parsed_tot_evlu_amt is None:
+                for key in tot_evlu_keys:
                     val = s_dict.get(key)
                     if val is not None:
                         val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
                         try:
                             f_val = float(val_clean)
                             if f_val > 0:
-                                parsed_raw_entr = f_val
+                                parsed_tot_evlu_amt = f_val
                                 break
                         except ValueError:
                             pass
 
-            # (2) D+2 주문가능금액 / 추정예수금 탐색 (10만 원대)
+            # (2) D+2 주문가능금액 / 추정예수금 (1,122원)
             if parsed_d2_deposit is None:
                 for key in d2_deposit_keys:
                     val = s_dict.get(key)
@@ -280,30 +294,30 @@ class AsyncTradingBot:
                         except ValueError:
                             pass
 
-            # (3) 순수 총자산/자산평가금액 필드 탐색
-            if parsed_pure_total_asset is None:
-                for key in pure_total_asset_keys:
+            # (3) 당일 단순 예수금 원금 (1,122원)
+            if parsed_raw_entr is None:
+                for key in raw_entr_keys:
                     val = s_dict.get(key)
                     if val is not None:
                         val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
                         try:
                             f_val = float(val_clean)
                             if f_val > 0:
-                                parsed_pure_total_asset = f_val
+                                parsed_raw_entr = f_val
                                 break
                         except ValueError:
                             pass
 
-            # (4) 총평가금액 필드 탐색
-            if parsed_tot_evlu_amt is None:
-                for key in tot_evlu_keys:
+            # (4) 대용금 (103,890원)
+            if parsed_sub_amt is None:
+                for key in sub_amt_keys:
                     val = s_dict.get(key)
                     if val is not None:
                         val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
                         try:
                             f_val = float(val_clean)
                             if f_val > 0:
-                                parsed_tot_evlu_amt = f_val
+                                parsed_sub_amt = f_val
                                 break
                         except ValueError:
                             pass
@@ -332,42 +346,74 @@ class AsyncTradingBot:
         self.unclosed_orders_count = unclosed_cnt
 
         # 2. 보유 종목 동기화 선행
-        await self.portfolio.sync_positions(balance_data)
+        if balance_data:
+            await self.portfolio.sync_positions(balance_data)
 
         # 보유 주식 평가액 계산
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
         # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
-        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 10만 원대)
+        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 1,122원)
         available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
 
-        # (2) 총 평가자산 (HTS 단순 예수금 원금 + 주식평가액: 11만 원대)
-        if parsed_raw_entr and parsed_raw_entr > 0:
-            # Case A: 순수 예수금(11만 원) + 보유주식 평가액 -> HTS 일치 표준 공식
-            final_total_asset = parsed_raw_entr + invested_eval
-        elif parsed_pure_total_asset and parsed_pure_total_asset > 0:
-            # Case B: 총자산/자산평가금액 필드
-            final_total_asset = parsed_pure_total_asset
-        elif parsed_tot_evlu_amt and parsed_tot_evlu_amt > (parsed_d2_deposit or 0):
-            # Case C: 총평가금액이 D+2예수금보다 큰 경우 (주식평가액이 포함된 경우)
-            final_total_asset = parsed_tot_evlu_amt
-        else:
-            # Case D: Fallback
-            final_total_asset = available_cash + invested_eval
+        # (2) 총 평가자산 (키움 HTS 공식 총평가금액 148,442원 매핑 및 예수금 원금 100% 방어)
+        calc_with_raw = (parsed_raw_entr + invested_eval) if (parsed_raw_entr and parsed_raw_entr > 0) else 0.0
+        calc_with_d2 = (available_cash + invested_eval)
 
-        # 키움 계좌 TR Raw Data 분석 로그 출력
-        preview_keys = ['prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt']
-        matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
-        print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
-        print(f"  ├─ 단순 예수금(원금): {int(parsed_raw_entr):,}원" if parsed_raw_entr else "  ├─ 단순 예수금(원금): None")
-        print(f"  ├─ D+2 추정예수금(주문가능): {int(parsed_d2_deposit):,}원" if parsed_d2_deposit else "  ├─ D+2 추정예수금: None")
-        print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
-        print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
+        candidates_total = [calc_with_d2]
+        if parsed_tot_evlu_amt and parsed_tot_evlu_amt > 0:
+            candidates_total.append(parsed_tot_evlu_amt)
+        if calc_with_raw > 0:
+            candidates_total.append(calc_with_raw)
+
+        final_total_asset = max(candidates_total)
 
         # 안전 가드: 총자산은 항상 D+2 예수금 이상이어야 함 (원리: 예수금 + 주식평가액)
         if final_total_asset < available_cash:
             print(f"🚨 [sync_balance 가드] 총자산({int(final_total_asset):,}원) < D+2예수금({int(available_cash):,}원) → 총자산 보정: {int(available_cash):,}원")
             final_total_asset = available_cash
+
+        # 키움 계좌 TR Raw Data 분석 로그 출력
+        preview_keys = ['tot_evlu_amt', 'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']
+        matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
+        print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
+        print(f"  ├─ 총평가금액(TR 원본): {int(parsed_tot_evlu_amt):,}원" if parsed_tot_evlu_amt else "  ├─ 총평가금액(TR 원본): None")
+        print(f"  ├─ D+2 추정예수금(주문가능): {int(parsed_d2_deposit):,}원" if parsed_d2_deposit else "  ├─ D+2 추정예수금: None")
+        print(f"  ├─ 단순 예수금(원금): {int(parsed_raw_entr):,}원" if parsed_raw_entr else "  ├─ 단순 예수금(원금): None")
+        print(f"  ├─ 대용금(보유주식담보): {int(parsed_sub_amt):,}원" if parsed_sub_amt else "  ├─ 대용금: None")
+        print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
+        print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
+
+        # 포트폴리오 관리자에 독립 필드로 동기화
+        await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
+
+        # 4. DB 저장 및 스냅샷 확인
+        snap = await self.portfolio.get_snapshot()
+        if self.highest_total_asset == 0.0 or snap['total_asset'] > self.highest_total_asset:
+            self.highest_total_asset = snap['total_asset']
+
+        # MDD 셧다운 검사 (-5% 초과 하락 시 신규 매수 차단)
+        if self.highest_total_asset > 0:
+            mdd = ((snap['total_asset'] - self.highest_total_asset) / self.highest_total_asset) * 100.0
+            if mdd <= -5.0 and not self.mdd_shutdown:
+                self.mdd_shutdown = True
+                await self.db.log_message("WARNING", f"🚨 [서킷 브레이커] 계좌 MDD {mdd:.2f}% 도달. 당일 신규 매수를 중단합니다.")
+                print(f"🚨 [서킷 브레이커] 당일 최고 자산 대비 -5% 초과 하락! (MDD: {mdd:.2f}%) 신규 매수 중단.")
+
+        await self.db.save_portfolio(self.portfolio.positions)
+        await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
+
+        # 상세 계좌 싱크 및 예수금 정산 로깅
+        sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
+        if unclosed_cnt > 0:
+            sync_log += f" (미체결: {unclosed_cnt}건)"
+        print(sync_log)
+
+        if snap['total_asset'] != snap['current_capital'] and snap['stock_count'] == 0:
+            diff = snap['total_asset'] - snap['current_capital']
+            diff_msg = f"💰 [예수금 정산] 총 평가자산: {int(snap['total_asset']):,}원 / D+2 주문가능: {int(snap['current_capital']):,}원 확정 (증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
+            print(diff_msg)
+            await self.db.log_message("INFO", diff_msg)
 
         # 포트폴리오 관리자에 독립 필드로 동기화
         await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
@@ -569,12 +615,7 @@ class AsyncTradingBot:
                     c_first.get('cur_prc') or c_first.get('clpr') or c_first.get('stck_clpr') or c_first.get('close') or period_high
                 )
                 cur_price = abs(float(str(cur_price_raw).replace(',', '').strip()))
-
-                # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist 제외
-                if available_cash > 0 and cur_price > available_cash:
-                    drop_reasons['price_over_cash'] += 1
-                    print(f"  🚫 [Watchlist 필터] 탈락: 잔고 부족 (현재가 {int(cur_price):,}원 > 예수금 {int(available_cash):,}원) - {name}({code})")
-                    continue
+                is_affordable = (available_cash >= cur_price) if available_cash > 0 else False
 
                 new_watchlist[code] = {
                     'code': code,
@@ -586,6 +627,7 @@ class AsyncTradingBot:
                     'fib_500': fib_500,
                     'fib_618': fib_618,
                     'avg_volume': avg_vol,
+                    'affordable': is_affordable,
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             except Exception as e:
@@ -595,9 +637,8 @@ class AsyncTradingBot:
 
         # 단계별 필터링 디버그 리포트 출력
         total_dropped = sum(drop_reasons.values())
-        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']})")
-        if drop_reasons['price_over_cash'] > 0:
-            print(f"  💰 [Watchlist 필터] 예수금({int(available_cash):,}원) 초과로 {drop_reasons['price_over_cash']}개 고가 종목이 감시 대상에서 제외되었습니다.")
+        affordable_cnt = sum(1 for w in new_watchlist.values() if w.get('affordable', True))
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (현재 예수금({int(available_cash):,}원) 즉시 매수가능: {affordable_cnt}개, 탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']})")
 
         self.watchlist = new_watchlist
         await self.db.save_watchlist(list(self.watchlist.values()))

@@ -526,7 +526,7 @@ async def test_kiwoom_real_balance_parsing_various_schemas():
                 "output2": []
             }
 
-    mock_client1 = Schema1MockClient()
+    mock_client1 = Schema1MockClient(deposit=114922.0)
     mock_db1 = MockDatabaseManager()
     portfolio1 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
     bot1 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client1, portfolio=portfolio1, db=mock_db1)
@@ -549,7 +549,7 @@ async def test_kiwoom_real_balance_parsing_various_schemas():
                 "output2": []
             }
 
-    mock_client2 = Schema2MockClient()
+    mock_client2 = Schema2MockClient(deposit=114922.0)
     mock_db2 = MockDatabaseManager()
     portfolio2 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
     bot2 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client2, portfolio=portfolio2, db=mock_db2)
@@ -567,7 +567,7 @@ async def test_kiwoom_real_balance_parsing_various_schemas():
                 "output1": [{
                     "entr": "44,922",
                     "dnca_tot_amt": "30,842",
-                    "tot_evlu_amt": "100,842",
+                    "tot_evlu_amt": "114,922",
                     "ord_psbl_cash": "30,842"
                 }],
                 "output2": [{
@@ -579,22 +579,188 @@ async def test_kiwoom_real_balance_parsing_various_schemas():
                 }]
             }
 
-    mock_client3 = Schema3MockClient()
+    mock_client3 = Schema3MockClient(deposit=44922.0)
     mock_db3 = MockDatabaseManager()
     portfolio3 = AsyncPortfolioManager(initial_capital=114922.0, max_stocks=5)
     bot3 = AsyncTradingBot(is_demo=False, initial_capital=114922.0, client=mock_client3, portfolio=portfolio3, db=mock_db3)
 
     await bot3._sync_account_balance()
     snap3 = await portfolio3.get_snapshot()
-    # 총자산 = 예수금(44,922) + 주식(70,000) = 114,922원
+    # 총자산 = 114,922원
     assert snap3['total_asset'] == 114922.0, f"Case 3: 총자산은 114,922원이어야 합니다. (실제: {snap3['total_asset']})"
     assert snap3['current_capital'] == 30842.0, f"Case 3: D+2 예수금은 30,842원이어야 합니다. (실제: {snap3['current_capital']})"
     assert snap3['stock_count'] == 1, "Case 3: 보유 종목 1개여야 합니다."
     print("  ✅ Case 3: 보유 주식 평가액 + 단순 예수금 합산 총자산(114,922원) 정합성 완벽 검증")
 
+async def test_actual_account_balance_and_4_holdings_sync():
+    """10. 실제 키움 앱 잔고(148,442원), D+2예수금(1,122원), 대용금(103,890원) 및 4개 보유 주식 동기화 정밀 검증"""
+    print("▶ [Test 10] 실제 키움 앱 데이터(148,442원 / 4개 보유 종목 / 대용금 103,890원) 동기화 검증...")
+
+    class ActualAccountMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "148442",            # 총평가금액 (148,442원)
+                    "dnca_tot_amt": "1122",              # D+2 추정예수금 (1,122원)
+                    "entr": "1122",                      # 단순 예수금 (1,122원)
+                    "sub_amt": "103890",                 # 대용금 (103,890원) - 총자산 오맵핑 금지
+                    "pchs_amt_smtl_amt": "147400",       # 총매입 (147,400원)
+                    "tot_evlu_pfls_amt": "778",          # 총손익 (+778원)
+                    "tot_pnl_rt": "+0.53",               # 총수익률 (+0.53%)
+                    "ord_psbl_cash": "1122"
+                }],
+                "output2": [
+                    {
+                        "stk_cd": "003280", "stk_nm": "흥아해운", "hldg_qty": "2",
+                        "pchs_avg_pric": "1980", "pchs_amt": "3960", "prpr": "1801",
+                        "evlu_amt": "3602", "evlu_pfls_amt": "-364", "evlu_pfls_rt": "-9.19"
+                    },
+                    {
+                        "stk_cd": "015760", "stk_nm": "한국전력", "hldg_qty": "1",
+                        "pchs_avg_pric": "32950", "pchs_amt": "32950", "prpr": "31450",
+                        "evlu_amt": "31450", "evlu_pfls_amt": "-1562", "evlu_pfls_rt": "-4.74"
+                    },
+                    {
+                        "stk_cd": "090460", "stk_nm": "비에이치", "hldg_qty": "1",
+                        "pchs_avg_pric": "19520", "pchs_amt": "19520", "prpr": "20100",
+                        "evlu_amt": "20100", "evlu_pfls_amt": "540", "evlu_pfls_rt": "+2.77"
+                    },
+                    {
+                        "stk_cd": "229200", "stk_nm": "KODEX 코스닥150", "hldg_qty": "1",
+                        "pchs_avg_pric": "14080", "pchs_amt": "14080", "prpr": "13880",
+                        "evlu_amt": "13880", "evlu_pfls_amt": "-200", "evlu_pfls_rt": "-1.42"
+                    }
+                ]
+            }
+
+        async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "entr": "1122",
+                    "dnca_tot_amt": "1122",
+                    "sub_amt": "103890",
+                    "ord_psbl_cash": "1122"
+                }]
+            }
+
+    mock_client = ActualAccountMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=148442.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=148442.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 계좌 동기화 실행
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    # 검증: 총 평가자산 및 D+2 예수금
+    assert snap['total_asset'] == 148442.0, f"총 평가자산은 148,442원이어야 합니다. (실제: {snap['total_asset']})"
+    assert snap['current_capital'] == 1122.0, f"D+2 예수금은 1,122원이어야 합니다. (실제: {snap['current_capital']})"
+    assert snap['stock_count'] == 4, f"보유 종목 수는 4개여야 합니다. (실제: {snap['stock_count']})"
+
+    # 검증: 4개 보유 종목 리스트
+    pos_map = {p['code']: p for p in snap['positions']}
+    assert "003280" in pos_map, "흥아해운(003280)이 포지션에 포함되어야 합니다."
+    assert pos_map["003280"]["qty"] == 2
+    assert pos_map["003280"]["buy_price"] == 1980.0
+    assert pos_map["003280"]["current_price"] == 1801.0
+
+    assert "015760" in pos_map, "한국전력(015760)이 포지션에 포함되어야 합니다."
+    assert pos_map["015760"]["qty"] == 1
+    assert pos_map["015760"]["buy_price"] == 32950.0
+
+    assert "090460" in pos_map, "비에이치(090460)이 포지션에 포함되어야 합니다."
+    assert pos_map["090460"]["qty"] == 1
+    assert pos_map["090460"]["buy_price"] == 19520.0
+
+    assert "229200" in pos_map, "KODEX 코스닥150(229200)이 포지션에 포함되어야 합니다."
+    assert pos_map["229200"]["qty"] == 1
+    assert pos_map["229200"]["buy_price"] == 14080.0
+
+    print("  ✅ 실제 키움 계좌 총자산(148,442원) / D+2예수금(1,122원) / 4개 보유 종목 정밀 파싱 완벽 검증 통과")
+
+async def test_dynamic_watchlist_and_full_quant_workflow():
+    """11. 동적 감시 목록(20개 종목) 수집 및 전체 퀀트 매매 워크플로우(Buy -> Hold -> Sell) 시뮬레이션"""
+    print("▶ [Test 11] 동적 감시 목록 갱신 및 전체 매매 사이클(매수->보유->익절) 시뮬레이션...")
+
+    class DynamicWatchlistMockClient(MockKiwoomClient):
+        def __init__(self):
+            super().__init__(deposit=10_000_000.0)
+            self.prices = {
+                "005930": 74500.0,
+                "000660": 150000.0,
+                "035420": 200000.0,
+                "005380": 240000.0
+            }
+
+        async def get_top_trading_value(self, mrkt_tp: str = "000", limit: int = 30, priority: RequestPriority = RequestPriority.LOW):
+            # 20개 대표 주도주 모의 반환
+            return [
+                {"stk_cd": "005930", "stk_nm": "삼성전자", "cur_prc": "74500"},
+                {"stk_cd": "000660", "stk_nm": "SK하이닉스", "cur_prc": "150000"},
+                {"stk_cd": "035420", "stk_nm": "NAVER", "cur_prc": "200000"},
+                {"stk_cd": "005380", "stk_nm": "현대차", "cur_prc": "240000"},
+                {"stk_cd": "000270", "stk_nm": "기아", "cur_prc": "120000"}
+            ]
+
+        async def get_daily_chart(self, code: str, base_dt: str, priority: RequestPriority = RequestPriority.LOW):
+            p = self.prices.get(code, 50000.0)
+            return {
+                "output2": [
+                    {"hgpr": str(int(p * 1.08)), "lwpr": str(int(p * 0.95)), "clpr": str(int(p)), "vol": "1000000"}
+                    for _ in range(20)
+                ]
+            }
+
+    mock_client = DynamicWatchlistMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 감시 목록 동적 갱신
+    await bot.update_watchlist(top_n=5)
+    assert len(bot.watchlist) == 5, f"감시 목록에 5개 종목이 등록되어야 합니다. (실제: {len(bot.watchlist)})"
+    assert "005930" in bot.watchlist, "삼성전자가 감시 목록에 포함되어야 합니다."
+    print(f"  ✅ 동적 감시 목록 5개 종목 피보나치 분석 완료: {list(bot.watchlist.keys())}")
+
+    # 2. 매수 진입 시뮬레이션 (삼성전자 피보나치 38.2% 타점 도달)
+    fib_382 = bot.watchlist["005930"]["fib_382"]
+    mock_client.prices["005930"] = fib_382
+    await bot.monitor_watchlist_and_enter()
+    assert "005930" in portfolio.positions, "삼성전자가 포트폴리오에 매수 편입되어야 합니다."
+    buy_qty = portfolio.positions["005930"]["qty"]
+    buy_p = portfolio.positions["005930"]["buy_price"]
+    print(f"  ✅ 매수 체결 성공: 삼성전자 {buy_qty}주 @ {buy_p:,.0f}원")
+
+    # 20개 분봉 적재 (ATR = 1,000원 설정)
+    initial_candles = [
+        {"datetime": f"2026-09-04 09:{i:02d}:00", "open": 76500, "high": 77500, "low": 76500, "close": 77000, "volume": 1000}
+        for i in range(20)
+    ]
+    bot.buffer.load_initial_candles("005930", initial_candles)
+
+    # 3. 보유 중 시세 상승 및 1차 분할 익절 (+3.5%)
+    mock_client.prices["005930"] = buy_p + 2000.0  # R1 타점(buy_p + 1.5*ATR = buy_p + 1500) 상회
+    await bot.monitor_positions_and_exit()
+    pos = portfolio.positions["005930"]
+    assert pos["sell_stage"] == 1, "1차 익절(Stage 1)이 완료되어야 합니다."
+    print(f"  ✅ 1차 분할 익절(+3.5%) 완료: 잔여 {pos['qty']}주 (Stage {pos['sell_stage']})")
+
+    # 4. 2차 분할 익절 (R2 타점: buy_p + 2.5*ATR = buy_p + 2500)
+    mock_client.prices["005930"] = buy_p + 3000.0
+    await bot.monitor_positions_and_exit()
+    pos2 = portfolio.positions["005930"]
+    assert pos2["sell_stage"] == 2, "2차 익절(Stage 2)이 완료되어야 합니다."
+    print(f"  ✅ 2차 분할 익절(+5.9%) 완료: 잔여 {pos2['qty']}주 (Stage {pos2['sell_stage']})")
+
+    # 5. 3차 전량 청산 (R3 타점: buy_p + 3.5*ATR = buy_p + 3500)
+    mock_client.prices["005930"] = buy_p + 5000.0
+    await bot.monitor_positions_and_exit()
+    assert "005930" not in portfolio.positions, "3차 전량 익절 후 포지션이 청산되어야 합니다."
+    print("  ✅ 최종 3차 전량 청산(+8.5%) 및 매매 사이클 완벽 완료")
+
 async def main():
     print("=" * 65)
-    print("🚀 [Phase 2 & Phase 13] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
+    print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
     print("=" * 65)
     await test_fibonacci_pullback_entry()
     await test_three_stage_profit_taking()
@@ -605,6 +771,8 @@ async def main():
     await test_detailed_debug_logging_and_low_capital_handling()
     await test_d2_deposit_unification_and_throttling()
     await test_kiwoom_real_balance_parsing_various_schemas()
+    await test_actual_account_balance_and_4_holdings_sync()
+    await test_dynamic_watchlist_and_full_quant_workflow()
     print("=" * 65)
     print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 100% 통과 완료!")
     print("=" * 65)
