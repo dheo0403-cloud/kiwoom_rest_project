@@ -223,7 +223,7 @@ class AsyncKiwoomClient:
                 await asyncio.sleep(0.1)
 
     async def _execute_request(self, req: QueuedRequest):
-        """실제 HTTP 요청 전송 및 에러/재시도 핸들링"""
+        """실제 HTTP 요청 전송 및 에러/재시도 핸들링 (Raw JSON 에러 투명화)"""
         if not self.access_token:
             await self.get_access_token()
 
@@ -245,20 +245,36 @@ class AsyncKiwoomClient:
                         await asyncio.sleep(1.0 * (attempt + 1))
                         continue
 
-                    response.raise_for_status()
-                    data = await response.json()
-                    self.circuit_breaker.record_success()
+                    # 4xx 또는 200 OK 모두 json/text 안전 파싱하여 에러 내용 보존
+                    try:
+                        data = await response.json()
+                    except Exception:
+                        text_body = await response.text()
+                        data = {"raw_text": text_body, "http_status": response.status}
 
+                    if response.status != 200:
+                        msg = data.get('msg1') or data.get('return_msg') or data.get('raw_text') or 'HTTP Error'
+                        print(f"❌ [API_HTTP_{response.status}] {req.api_id} 호출 실패: {msg} (Payload: {req.payload})")
+                        if attempt == req.retries - 1:
+                            if not req.future.done():
+                                req.future.set_result((data, response.headers))
+                            return
+                        await asyncio.sleep(0.5 * (attempt + 1))
+                        continue
+
+                    self.circuit_breaker.record_success()
                     if not req.future.done():
                         req.future.set_result((data, response.headers))
                     return
 
             except aiohttp.ClientError as e:
+                print(f"⚠️ [Network ClientError] {req.api_id} ({attempt+1}/{req.retries}): {e}")
                 if attempt == req.retries - 1:
                     if not req.future.done():
                         req.future.set_result((None, None))
                 await asyncio.sleep(0.5 * (attempt + 1))
             except Exception as e:
+                print(f"⚠️ [Request Exception] {req.api_id}: {e}")
                 if not req.future.done():
                     req.future.set_result((None, None))
                 return
@@ -346,84 +362,90 @@ class AsyncKiwoomClient:
 
     async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
         """
-        예수금 상세 현황 조회 (kt00001 / OPW00001 대응)
-        - 당일 순수 예수금(entr), 전일예수금(prvs_rcdl_excc_amt), D+2추정예수금(d2_deposit, d2_auto_amt, dnca_tot_amt 등), 주문가능금액(ord_psbl_cash)
+        예수금 상세 현황 조회 (kt00001 / OPW00001 다중 qry_tp 자동 순차 조회)
+        - qry_tp 3(D+2추정) -> 2(추정) -> 1(단순) -> 0(전체)
         """
         url = f"{self.base_url}/api/dostk/acnt"
-        payload = {
-            "dmst_stex_tp": "KRX",
-            "accNo": self.account,
-            "accPwd": self.password,
-            "qry_tp": "3"  # 3: 추정조회(D+2)
-        }
-        data, _ = await self.request("kt00001", url, payload, priority=priority)
-        if not data or (isinstance(data, dict) and not any(k in data for k in ['output', 'output1', 'output2', 'd2_deposit', 'prvs_rcdl_excc_amt'])):
-            # Fallback: qry_tp 2 또는 기본 파라미터 재시도
-            payload["qry_tp"] = "2"
-            data2, _ = await self.request("kt00001", url, payload, priority=priority)
-            if data2:
-                data = data2
-        return data
+        best_data: Optional[Dict[str, Any]] = None
+
+        for q_tp in ["3", "2", "1", "0"]:
+            payload = {
+                "dmst_stex_tp": "KRX",
+                "accNo": self.account,
+                "accPwd": self.password,
+                "qry_tp": q_tp
+            }
+            data, _ = await self.request("kt00001", url, payload, priority=priority)
+            if data and isinstance(data, dict):
+                # 유의미한 D+2 예수금이나 복수 필드가 있는지 확인
+                if not best_data:
+                    best_data = data
+                for k in ['d2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'ord_psbl_cash', 'output1']:
+                    if k in data and data[k]:
+                        return data
+
+        return best_data
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 보유 포지션 조회 (kt00004: 계좌평가잔고 OPW00018 + kt00005: 체결잔고 + kt00018 다중 TR 및 페이로드 안전 폴백)"""
+        """계좌 잔고 및 보유 포지션 조회 (4대 TR 다중 스캐너: kt00005 체결잔고 -> kt00018 계좌평가 -> kt00004 잔고내역)"""
         url = f"{self.base_url}/api/dostk/acnt"
+        merged_data: Dict[str, Any] = {}
+        has_pos = False
 
-        # 1차 시도: kt00004 (계좌평가잔고내역 OPW00018)
-        payload_qry1 = {
+        # 1차 시도: kt00005 (체결잔고 - qry_tp 없는 순수 계좌 페이로드)
+        payload_kt00005 = {
             "dmst_stex_tp": "KRX",
             "accNo": self.account,
-            "accPwd": self.password,
-            "qry_tp": "1"
+            "accPwd": self.password
         }
-        data, _ = await self.request("kt00004", url, payload_qry1, priority=priority)
-
-        has_pos = False
-        if data and isinstance(data, dict):
-            for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'stk_list', 'output', 'output1']:
-                v = data.get(k)
-                if isinstance(v, list) and v:
+        data5, _ = await self.request("kt00005", url, payload_kt00005, priority=priority)
+        if data5 and isinstance(data5, dict):
+            merged_data.update(data5)
+            for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
+                if k in data5 and isinstance(data5[k], list) and data5[k]:
                     has_pos = True
                     break
 
-        # 2차 시도: kt00005 (체결잔고 - qry_tp 없는 순수 계좌 페이로드)
-        if not data or not has_pos:
-            payload_pure = {
-                "dmst_stex_tp": "KRX",
-                "accNo": self.account,
-                "accPwd": self.password
-            }
-            data5, _ = await self.request("kt00005", url, payload_pure, priority=priority)
-            if data5 and isinstance(data5, dict):
-                if not data:
-                    data = data5
-                else:
-                    # 기존 데이터에 종목 리스트 병합
-                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
-                        if k in data5 and data5[k]:
-                            data[k] = data5[k]
-                            has_pos = True
-                            break
-
-        # 3차 시도: kt00004 with qry_tp="0" (전체 조회)
-        if not data or not has_pos:
-            payload_qry0 = {
+        # 2차 시도: kt00018 (계좌평가잔고개별합산 / OPW00018 - 실전 영웅문 표준 잔고 TR)
+        if not has_pos:
+            payload_kt00018 = {
                 "dmst_stex_tp": "KRX",
                 "accNo": self.account,
                 "accPwd": self.password,
                 "qry_tp": "0"
             }
-            data4_0, _ = await self.request("kt00004", url, payload_qry0, priority=priority)
-            if data4_0 and isinstance(data4_0, dict):
-                if not data:
-                    data = data4_0
-                else:
-                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
-                        if k in data4_0 and data4_0[k]:
-                            data[k] = data4_0[k]
-                            break
+            data18, _ = await self.request("kt00018", url, payload_kt00018, priority=priority)
+            if data18 and isinstance(data18, dict):
+                for k, v in data18.items():
+                    if k not in merged_data or (isinstance(v, list) and v):
+                        merged_data[k] = v
+                for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
+                    if k in data18 and isinstance(data18[k], list) and data18[k]:
+                        has_pos = True
+                        break
 
-        return data
+        # 3차 시도: kt00004 (계좌평가잔고내역 with qry_tp="1" 및 qry_tp="0")
+        if not has_pos:
+            for q_tp in ["1", "0"]:
+                payload_kt00004 = {
+                    "dmst_stex_tp": "KRX",
+                    "accNo": self.account,
+                    "accPwd": self.password,
+                    "qry_tp": q_tp
+                }
+                data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
+                if data4 and isinstance(data4, dict):
+                    for k, v in data4.items():
+                        if k not in merged_data or (isinstance(v, list) and v):
+                            merged_data[k] = v
+                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
+                        if k in data4 and isinstance(data4[k], list) and data4[k]:
+                            has_pos = True
+                            break
+                if has_pos:
+                    break
+
+        return merged_data if merged_data else None
 
     async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """미체결 주문 내역 조회 (ka10075 / kt00001 호환)"""

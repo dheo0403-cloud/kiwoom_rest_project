@@ -232,6 +232,12 @@ class AsyncTradingBot:
                     if k not in raw_fields_debug and not isinstance(v, (list, dict)):
                         raw_fields_debug[k] = v
 
+        # 키움 TR 디버그 로깅 강화: balance_data 및 deposit_data 수신 키 목록
+        bal_keys = list(balance_data.keys()) if isinstance(balance_data, dict) else []
+        dep_keys = list(deposit_data.keys()) if isinstance(deposit_data, dict) else []
+        if bal_keys or dep_keys:
+            print(f"📡 [TR 수신 상태] 잔고TR 키: {bal_keys} | 예수금TR 키: {dep_keys}")
+
         # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원 / 64,400원 주식평가 + 82,819원 D+2예수금)
         tot_evlu_keys = [
             'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt',
