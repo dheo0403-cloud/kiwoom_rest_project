@@ -107,13 +107,14 @@ class DatabaseManager:
                     await cursor.execute('''
                         INSERT INTO balance (date, total_asset, deposit, profit_loss, yield)
                         VALUES (%s, %s, %s, %s, %s)
-                        ON DUPLICATE KEY UPDATE 
-                        total_asset=VALUES(total_asset), deposit=VALUES(deposit), 
+                        ON DUPLICATE KEY UPDATE
+                        total_asset=VALUES(total_asset), deposit=VALUES(deposit),
                         profit_loss=VALUES(profit_loss), yield=VALUES(yield)
-                    ''', (today, total_asset, deposit, profit_loss, yield_rate))
+                    ''', (today, float(total_asset), float(deposit), float(profit_loss), float(yield_rate)))
                 await conn.commit()
+                print(f"💾 [DB Balance] 잔고 동기화 완료 (총자산: {int(total_asset):,}원 / D+2예수금: {int(deposit):,}원)")
         except Exception as e:
-            print(f"DB Balance Error: {e}")
+            print(f"❌ DB Balance Error: {e}")
 
     async def upsert_daily_ohlcv(self, df):
         if not self.pool or df.empty: return

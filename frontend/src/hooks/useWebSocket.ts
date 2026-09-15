@@ -3,7 +3,7 @@ import { PortfolioSnapshot, LogMessage, BotStatus } from '../types';
 import { getApiUrl, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
-  // 1. Engine용 실시간 계좌 상태 (실제 매매/내부 로직용 초저지연 상태)
+  // 1. 실시간 계좌 상태 (Realtime Portfolio State)
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot>({
     total_asset: 0,
     current_capital: 0,
@@ -14,7 +14,7 @@ export function useTradingWebSocket() {
     positions: []
   });
 
-  // 2. 화면 표시 전용 상태 (Display State: 10분 주기 갱신으로 깜빡임 및 빈번한 리렌더링 완전 방지)
+  // 2. 화면 표시 전용 상태 (Display State: 실시간 즉시 연동 및 부드러운 전환)
   const [displayPortfolio, setDisplayPortfolio] = useState<PortfolioSnapshot>({
     total_asset: 0,
     current_capital: 0,
@@ -29,30 +29,13 @@ export function useTradingWebSocket() {
   const latestPortfolioRef = useRef<PortfolioSnapshot>(portfolio);
   latestPortfolioRef.current = portfolio;
 
-  // 10분 주기 화면 표시 상태 동기화 함수
-  const syncDisplayState = useCallback(() => {
-    const cur = latestPortfolioRef.current;
-    if (cur.total_asset > 0 || (cur.positions && cur.positions.length > 0)) {
-      setDisplayPortfolio({ ...cur });
-      const now = new Date();
-      setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit' }));
-    }
+  // 실시간 포트폴리오 변경 시 displayPortfolio 즉시 실시간 동기화
+  const updateBothStates = useCallback((newSnap: PortfolioSnapshot) => {
+    setPortfolio(newSnap);
+    setDisplayPortfolio(newSnap);
+    const now = new Date();
+    setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
   }, []);
-
-  // 첫 데이터 수신 시 즉시 화면 표시 상태 1회 동기화
-  useEffect(() => {
-    if (displayPortfolio.total_asset === 0 && (portfolio.total_asset > 0 || portfolio.positions.length > 0)) {
-      setDisplayPortfolio({ ...portfolio });
-      const now = new Date();
-      setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit' }));
-    }
-  }, [portfolio, displayPortfolio.total_asset]);
-
-  // 10분(600,000ms) 간격 디스플레이 갱신 타이머
-  useEffect(() => {
-    const displayInterval = setInterval(syncDisplayState, 10 * 60 * 1000); // 10분 주기
-    return () => clearInterval(displayInterval);
-  }, [syncDisplayState]);
 
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus>({
@@ -83,28 +66,18 @@ export function useTradingWebSocket() {
       if (portRes.status === 'fulfilled' && portRes.value.ok) {
         const portData = await portRes.value.json();
         const rawPositions = Array.isArray(portData.positions) ? portData.positions : [];
-        setPortfolio(prev => {
-          // 동일한 수치일 경우 이전 객체 참조를 유지하여 불필요한 리렌더링 차단
-          if (
-            prev.total_asset === portData.total_asset &&
-            prev.current_capital === portData.current_capital &&
-            prev.positions.length === rawPositions.length &&
-            prev.unrealized_pnl === portData.unrealized_pnl &&
-            prev.stock_count === rawPositions.length
-          ) {
-            return prev;
-          }
-          return {
-            total_asset: portData.total_asset > 0 ? portData.total_asset : prev.total_asset,
-            current_capital: portData.current_capital > 0 ? portData.current_capital : prev.current_capital,
-            invested_capital: portData.invested_capital || prev.invested_capital,
-            stock_count: rawPositions.length,
-            unrealized_pnl: portData.unrealized_pnl ?? prev.unrealized_pnl,
-            total_yield_rate: portData.total_yield_rate ?? prev.total_yield_rate,
-            positions: rawPositions,
-            last_synced_at: portData.last_synced_at || prev.last_synced_at
-          };
-        });
+        const newSnap: PortfolioSnapshot = {
+          total_asset: portData.total_asset > 0 ? portData.total_asset : (portData.current_capital || 0),
+          current_capital: portData.current_capital || 0,
+          invested_capital: portData.invested_capital || 0,
+          stock_count: rawPositions.length,
+          unrealized_pnl: portData.unrealized_pnl ?? 0,
+          total_yield_rate: portData.total_yield_rate ?? 0,
+          positions: rawPositions,
+          last_synced_at: portData.last_synced_at
+        };
+
+        updateBothStates(newSnap);
       }
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
@@ -129,7 +102,7 @@ export function useTradingWebSocket() {
     } catch (e) {
       console.warn("REST fallback fetch error:", e);
     }
-  }, []);
+  }, [updateBothStates]);
 
   useEffect(() => {
     fetchRestData();
@@ -163,27 +136,17 @@ export function useTradingWebSocket() {
             if ((msg.type === 'PORTFOLIO_UPDATE' || msg.type === 'PORTFOLIO_INIT') && msg.data) {
               const d = msg.data;
               const rawPositions = Array.isArray(d.positions) ? d.positions : [];
-              setPortfolio(prev => {
-                if (
-                  prev.total_asset === d.total_asset &&
-                  prev.current_capital === d.current_capital &&
-                  prev.positions.length === rawPositions.length &&
-                  prev.unrealized_pnl === d.unrealized_pnl &&
-                  prev.stock_count === rawPositions.length
-                ) {
-                  return prev;
-                }
-                return {
-                  total_asset: d.total_asset > 0 ? d.total_asset : (d.current_capital || 0),
-                  current_capital: d.current_capital || 0,
-                  invested_capital: d.invested_capital || d.invested_eval || 0,
-                  stock_count: rawPositions.length,
-                  unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
-                  total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
-                  positions: rawPositions,
-                  last_synced_at: d.last_synced_at
-                };
-              });
+              const newSnap: PortfolioSnapshot = {
+                total_asset: d.total_asset > 0 ? d.total_asset : (d.current_capital || 0),
+                current_capital: d.current_capital || 0,
+                invested_capital: d.invested_capital || d.invested_eval || 0,
+                stock_count: rawPositions.length,
+                unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
+                total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
+                positions: rawPositions,
+                last_synced_at: d.last_synced_at
+              };
+              updateBothStates(newSnap);
             }
           } catch (e) {
             console.error("Portfolio WS parse error:", e);
@@ -247,8 +210,7 @@ export function useTradingWebSocket() {
   // 수동 새로고침 시 실시간 조회 및 화면 표시 상태 즉시 동기화
   const handleRefresh = useCallback(async () => {
     await fetchRestData();
-    syncDisplayState();
-  }, [fetchRestData, syncDisplayState]);
+  }, [fetchRestData]);
 
   return {
     portfolio,           // 실시간 엔진용 포트폴리오
