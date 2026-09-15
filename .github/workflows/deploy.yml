@@ -60,12 +60,13 @@ jobs:
           echo "✅ [Packaging] 배포용 ./dist 번들 구성 완료:"
           ls -la ./dist
 
-      - name: 5. Azure Login via OIDC (Passwordless Federated Credentials)
+      - name: 5. Azure Login (Supports Client Secret & OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
 
       - name: 6. Clean Old Files & Upload ./dist to Azure Storage
         run: |
