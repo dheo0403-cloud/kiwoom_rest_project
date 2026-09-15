@@ -162,18 +162,10 @@ async def portfolio_broadcast_loop():
                         "positions": []
                     }
 
-                # 만약 메모리 자산이 0원일 때만 DB에서 최신 잔고/포지션 보강
-                if snapshot.get("total_asset", 0) == 0 and ctx.db and hasattr(ctx.db, 'get_latest_balance'):
+                # DB로부터 최신 포지션 및 잔고 실시간 동기화 (독립 프로세스 봇 데몬의 저장 데이터 100% 반영)
+                if ctx.db:
                     try:
-                        db_bal = await ctx.db.get_latest_balance()
-                        if db_bal:
-                            snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
-                            snapshot["current_capital"] = float(db_bal.get('deposit', 0))
-                            snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
-                            snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
-                            snapshot["last_synced_at"] = str(db_bal.get('date', ''))
-
-                        if (not snapshot.get("positions")) and hasattr(ctx.db, 'get_portfolio_positions'):
+                        if hasattr(ctx.db, 'get_portfolio_positions'):
                             db_pos = await ctx.db.get_portfolio_positions()
                             if db_pos:
                                 formatted_pos = []
@@ -199,10 +191,18 @@ async def portfolio_broadcast_loop():
                                     })
                                 snapshot["positions"] = formatted_pos
                                 snapshot["stock_count"] = len(formatted_pos)
-                                if invested > 0 and snapshot.get("invested_capital", 0) == 0:
-                                    snapshot["invested_capital"] = invested
-                    except Exception:
-                        pass
+                                snapshot["invested_capital"] = invested
+
+                        if hasattr(ctx.db, 'get_latest_balance'):
+                            db_bal = await ctx.db.get_latest_balance()
+                            if db_bal and float(db_bal.get('total_asset', 0)) > 0:
+                                snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
+                                snapshot["current_capital"] = float(db_bal.get('deposit', 0))
+                                snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
+                                snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
+                                snapshot["last_synced_at"] = str(db_bal.get('date', ''))
+                    except Exception as e:
+                        print(f"DB Portfolio/Balance Sync Error: {e}")
 
                 await ws_manager.broadcast_portfolio({
                     "type": "PORTFOLIO_UPDATE",
@@ -367,18 +367,10 @@ async def get_portfolio():
             "positions": []
         }
 
-    # DB에 저장된 최신 잔고 및 포지션으로 보완 (인메모리가 0원일 때)
-    if ctx.db and snapshot.get("total_asset", 0) == 0:
+    # DB에 저장된 최신 잔고 및 포지션으로 보완 (독립 프로세스 봇 데몬의 저장 데이터 100% 반영)
+    if ctx.db:
         try:
-            db_bal = await ctx.db.get_latest_balance()
-            if db_bal:
-                snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
-                snapshot["current_capital"] = float(db_bal.get('deposit', 0))
-                snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
-                snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
-                snapshot["last_synced_at"] = str(db_bal.get('date', ''))
-
-            if (not snapshot.get("positions")) and hasattr(ctx.db, 'get_portfolio_positions'):
+            if hasattr(ctx.db, 'get_portfolio_positions'):
                 db_pos = await ctx.db.get_portfolio_positions()
                 if db_pos:
                     formatted_pos = []
@@ -404,8 +396,16 @@ async def get_portfolio():
                         })
                     snapshot["positions"] = formatted_pos
                     snapshot["stock_count"] = len(formatted_pos)
-                    if invested > 0 and snapshot.get("invested_capital", 0) == 0:
-                        snapshot["invested_capital"] = invested
+                    snapshot["invested_capital"] = invested
+
+            if hasattr(ctx.db, 'get_latest_balance'):
+                db_bal = await ctx.db.get_latest_balance()
+                if db_bal and float(db_bal.get('total_asset', 0)) > 0:
+                    snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
+                    snapshot["current_capital"] = float(db_bal.get('deposit', 0))
+                    snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
+                    snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
+                    snapshot["last_synced_at"] = str(db_bal.get('date', ''))
         except Exception as e:
             print(f"Portfolio DB sync error: {e}")
 

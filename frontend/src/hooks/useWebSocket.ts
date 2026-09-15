@@ -3,6 +3,7 @@ import { PortfolioSnapshot, LogMessage, BotStatus } from '../types';
 import { getApiUrl, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
+  // 1. Engine용 실시간 계좌 상태 (실제 매매/내부 로직용 초저지연 상태)
   const [portfolio, setPortfolio] = useState<PortfolioSnapshot>({
     total_asset: 0,
     current_capital: 0,
@@ -12,6 +13,47 @@ export function useTradingWebSocket() {
     total_yield_rate: 0,
     positions: []
   });
+
+  // 2. 화면 표시 전용 상태 (Display State: 10분 주기 갱신으로 깜빡임 및 빈번한 리렌더링 완전 방지)
+  const [displayPortfolio, setDisplayPortfolio] = useState<PortfolioSnapshot>({
+    total_asset: 0,
+    current_capital: 0,
+    invested_capital: 0,
+    stock_count: 0,
+    unrealized_pnl: 0,
+    total_yield_rate: 0,
+    positions: []
+  });
+
+  const [lastDisplaySyncTime, setLastDisplaySyncTime] = useState<string>('');
+  const latestPortfolioRef = useRef<PortfolioSnapshot>(portfolio);
+  latestPortfolioRef.current = portfolio;
+
+  // 10분 주기 화면 표시 상태 동기화 함수
+  const syncDisplayState = useCallback(() => {
+    const cur = latestPortfolioRef.current;
+    if (cur.total_asset > 0 || (cur.positions && cur.positions.length > 0)) {
+      setDisplayPortfolio({ ...cur });
+      const now = new Date();
+      setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit' }));
+    }
+  }, []);
+
+  // 첫 데이터 수신 시 즉시 화면 표시 상태 1회 동기화
+  useEffect(() => {
+    if (displayPortfolio.total_asset === 0 && (portfolio.total_asset > 0 || portfolio.positions.length > 0)) {
+      setDisplayPortfolio({ ...portfolio });
+      const now = new Date();
+      setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit' }));
+    }
+  }, [portfolio, displayPortfolio.total_asset]);
+
+  // 10분(600,000ms) 간격 디스플레이 갱신 타이머
+  useEffect(() => {
+    const displayInterval = setInterval(syncDisplayState, 10 * 60 * 1000); // 10분 주기
+    return () => clearInterval(displayInterval);
+  }, [syncDisplayState]);
+
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus>({
     running: true,
@@ -180,14 +222,22 @@ export function useTradingWebSocket() {
     setLogs([]);
   }, []);
 
+  // 수동 새로고침 시 실시간 조회 및 화면 표시 상태 즉시 동기화
+  const handleRefresh = useCallback(async () => {
+    await fetchRestData();
+    syncDisplayState();
+  }, [fetchRestData, syncDisplayState]);
+
   return {
-    portfolio,
+    portfolio,           // 실시간 엔진용 포트폴리오
+    displayPortfolio,    // 화면 표출 전용 포트폴리오 (10분 주기 갱신으로 깜빡임 방지)
+    lastDisplaySyncTime,
     logs,
     botStatus,
     isConnected,
     latencyMs,
     addManualLog,
     clearLogs,
-    refreshData: fetchRestData
+    refreshData: handleRefresh
   };
 }

@@ -615,7 +615,12 @@ class AsyncTradingBot:
                     c_first.get('cur_prc') or c_first.get('clpr') or c_first.get('stck_clpr') or c_first.get('close') or period_high
                 )
                 cur_price = abs(float(str(cur_price_raw).replace(',', '').strip()))
-                is_affordable = (available_cash >= cur_price) if available_cash > 0 else False
+
+                # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist에서 즉시 제외
+                if available_cash > 0 and cur_price > available_cash:
+                    drop_reasons['price_over_cash'] += 1
+                    print(f"  🚫 [Watchlist 필터] 탈락: 잔고 부족 (현재가 {int(cur_price):,}원 > 예수금 {int(available_cash):,}원) - {name}({code})")
+                    continue
 
                 new_watchlist[code] = {
                     'code': code,
@@ -627,7 +632,6 @@ class AsyncTradingBot:
                     'fib_500': fib_500,
                     'fib_618': fib_618,
                     'avg_volume': avg_vol,
-                    'affordable': is_affordable,
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             except Exception as e:
@@ -637,8 +641,9 @@ class AsyncTradingBot:
 
         # 단계별 필터링 디버그 리포트 출력
         total_dropped = sum(drop_reasons.values())
-        affordable_cnt = sum(1 for w in new_watchlist.values() if w.get('affordable', True))
-        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (현재 예수금({int(available_cash):,}원) 즉시 매수가능: {affordable_cnt}개, 탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']})")
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']})")
+        if drop_reasons['price_over_cash'] > 0:
+            print(f"  💰 [Watchlist 필터] 예수금({int(available_cash):,}원) 초과로 {drop_reasons['price_over_cash']}개 고가 종목이 감시 대상에서 제외되었습니다.")
 
         self.watchlist = new_watchlist
         await self.db.save_watchlist(list(self.watchlist.values()))

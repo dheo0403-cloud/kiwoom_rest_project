@@ -12,7 +12,7 @@ import { WatchlistItem } from './types';
 import { getApiUrl } from './utils/apiConfig';
 
 export function App() {
-  const { portfolio, logs, botStatus, isConnected, refreshData, addManualLog, clearLogs } = useTradingWebSocket();
+  const { portfolio, displayPortfolio, lastDisplaySyncTime, logs, botStatus, isConnected, refreshData, addManualLog, clearLogs } = useTradingWebSocket();
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [selectedStockCode, setSelectedStockCode] = useState<string>('');
@@ -56,22 +56,26 @@ export function App() {
   // 실제 보유 종목(1순위) 또는 감시 종목(2순위)으로 초기 종목 자동 선택
   useEffect(() => {
     if (!selectedStockCode) {
-      if (portfolio.positions && portfolio.positions.length > 0) {
-        setSelectedStockCode(portfolio.positions[0].code);
-        setSelectedStockName(portfolio.positions[0].name);
+      const targetPositions = displayPortfolio.positions && displayPortfolio.positions.length > 0
+        ? displayPortfolio.positions
+        : portfolio.positions;
+
+      if (targetPositions && targetPositions.length > 0) {
+        setSelectedStockCode(targetPositions[0].code);
+        setSelectedStockName(targetPositions[0].name);
       } else if (watchlist.length > 0) {
         setSelectedStockCode(watchlist[0].code);
         setSelectedStockName(watchlist[0].name);
       }
     }
-  }, [portfolio.positions, watchlist, selectedStockCode]);
+  }, [displayPortfolio.positions, portfolio.positions, watchlist, selectedStockCode]);
 
   const handleSelectStock = (code: string, name?: string) => {
     setSelectedStockCode(code);
     if (name) {
       setSelectedStockName(name);
     } else {
-      const item = watchlist.find(w => w.code === code) || portfolio.positions.find(p => p.code === code);
+      const item = watchlist.find(w => w.code === code) || displayPortfolio.positions.find(p => p.code === code) || portfolio.positions.find(p => p.code === code);
       if (item) setSelectedStockName(item.name);
     }
   };
@@ -96,10 +100,10 @@ export function App() {
 
   return (
     <div className="flex flex-col min-h-screen bg-slate-950 text-slate-100 selection:bg-blue-500 selection:text-white">
-      {/* Top Header */}
+      {/* Top Header - 화면 표시 전용 상태(displayPortfolio) 연동으로 실시간 깜빡임 방지 (10분 주기 갱신 + 수동 즉시 새로고침) */}
       <Header
         botStatus={botStatus}
-        portfolio={portfolio}
+        portfolio={displayPortfolio}
         isConnected={isConnected}
         onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
         onOpenParams={() => setIsParamsOpen(true)}
@@ -114,7 +118,7 @@ export function App() {
       {/* Main Cockpit Container */}
       <main className="flex-1 p-3.5 sm:p-5 max-w-[1920px] w-full mx-auto flex flex-col">
         {/* 1. 4-Card Top Bento KPI Metrics */}
-        <KpiMetricsRow portfolio={portfolio} colorMode={colorMode} />
+        <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} />
 
         {/* 2. Main Bento Grid Cockpit (2-Column Asymmetric Layout) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1">
@@ -124,7 +128,7 @@ export function App() {
             <div className="h-[430px]">
               <LogViewer
                 logs={logs}
-                portfolio={portfolio}
+                portfolio={displayPortfolio}
                 onClearLogs={clearLogs}
               />
             </div>
@@ -145,7 +149,7 @@ export function App() {
             {/* Bento B: Active Positions Cards */}
             <div className="h-[430px]">
               <ActivePositionsBento
-                positions={portfolio.positions}
+                positions={displayPortfolio.positions && displayPortfolio.positions.length > 0 ? displayPortfolio.positions : portfolio.positions}
                 colorMode={colorMode}
                 onSelectStock={handleSelectStock}
                 selectedStockCode={selectedStockCode}

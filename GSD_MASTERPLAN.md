@@ -352,9 +352,9 @@
 
 ---
 
-### Phase 15. 실제 키움 계좌 잔고(148,442원) 및 4개 보유 주식 UI 정밀 연동, 잔고 요동 현상 해결, 동적 감시 및 전체 매매 워크플로우 검증 (Priority 15 - 진행 중)
+### Phase 15. 실제 키움 계좌 잔고(148,442원) 및 4개 보유 주식 UI 정밀 연동, 잔고 요동 현상 해결, 동적 감시 및 전체 매매 워크플로우 검증 (Priority 15 - 완료)
 
-- [ ] **Task 15.1: 실제 키움 TR(kt00005/OPW00018) 싱글 데이터 파싱 전면 교정 및 대용금 오맵핑 원천 차단 (`main_rest_async.py`, `async_portfolio.py`)**
+- [x] **Task 15.1: 실제 키움 TR(kt00005/OPW00018) 싱글 데이터 파싱 전면 교정 및 대용금 오맵핑 원천 차단 (`main_rest_async.py`, `async_portfolio.py`)**
   - **설명:** 실제 앱 이미지(`국내잔고.png`: 총평가 148,442원, D+2예수금 1,122원, 대용금 103,890원)와 100% 일치하도록 파싱 로직 개편.
     - 총 평가자산(`total_asset`)을 키움 TR의 `tot_evlu_amt`(총평가금액 = 148,442원) 또는 `tot_asst_amt`/`aset_evlt_amt`를 최우선 1순위로 직접 매핑.
     - D+2 주문가능 예수금(`available_cash`)을 `dnca_tot_amt` / `d2_deposit` / `ord_psbl_cash` (1,122원)로 매핑.
@@ -363,7 +363,7 @@
   - **수정 파일:** `main_rest_async.py`, `async_portfolio.py`, `async_kiwoom_client.py`
   - **검증 기준:** 계좌 싱크 시 `총 평가자산: 148,442원` 및 `D+2 주문가능: 1,122원`이 정확히 산출되고 대용금이 혼동되지 않음.
 
-- [ ] **Task 15.2: 멀티데이터(`output2`) 4개 보유 종목(흥아해운, 한국전력, 비에이치, KODEX 코스닥150) 정밀 파싱 및 포지션 상태 연동 (`async_portfolio.py`, `main_rest_async.py`, `database.py`)**
+- [x] **Task 15.2: 멀티데이터(`output2`) 4개 보유 종목(흥아해운, 한국전력, 비에이치, KODEX 코스닥150) 정밀 파싱 및 포지션 상태 연동 (`async_portfolio.py`, `main_rest_async.py`, `database.py`)**
   - **설명:** 키움 `kt00005`의 `output2` 멀티데이터에서 종목코드(`stk_cd`), 종목명(`stk_nm`), 보유수량(`hldg_qty`), 매입단가(`pchs_avg_pric` / `pchs_amt`), 현재가(`prpr` / `evlu_amt`), 평가손익(`evlu_pfls_amt`), 수익률(`evlu_pfls_rt`)을 완벽하게 파싱.
     - `pchs_avg_pric` 누락 시 `pchs_amt / qty`로 단가 자동 계산.
     - `prpr` 누락 시 `evlu_amt / qty`로 현재가 자동 계산.
@@ -371,7 +371,7 @@
   - **수정 파일:** `async_portfolio.py`, `main_rest_async.py`, `database.py`
   - **검증 기준:** 4개 종목의 보유 수량/단가/현재가/평가손익이 `portfolio.positions`에 담기고 `stock_count: 4`로 표출.
 
-- [ ] **Task 15.3: Backend/Frontend 상태 관리 일원화 및 대시보드 잔고 요동(Fluctuation) 완전 제거 (`api_server.py`, `useWebSocket.ts`, `Header.tsx`, `ActivePositionsBento.tsx`)**
+- [x] **Task 15.3: Backend/Frontend 상태 관리 일원화 및 대시보드 잔고 요동(Fluctuation) 완전 제거 (`api_server.py`, `useWebSocket.ts`, `Header.tsx`, `ActivePositionsBento.tsx`)**
   - **설명:** REST API 폴링과 WebSocket 브로드캐스트 간의 데이터 경합 및 상태 덮어쓰기 충돌 해결.
     - Backend: `AsyncPortfolioManager`를 단일 진실 공급원(Single Source of Truth)으로 확립하고, REST `/portfolio`와 WS `PORTFOLIO_UPDATE`의 스냅샷 데이터 동기화.
     - Frontend (`useWebSocket.ts`): WS 실시간 메시지를 최우선 반영하고, `stock_count`와 `positions`의 정합성을 원자적으로 유지하여 1,122원과 100,842원 사이의 요동 및 포지션 0개 깜빡임 현상 제거.
@@ -379,17 +379,37 @@
   - **수정 파일:** `api_server.py`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/Header.tsx`, `frontend/src/components/ActivePositionsBento.tsx`
   - **검증 기준:** 대시보드 새로고침 및 실시간 수신 시 잔고가 148,442원으로 안정 유지되고 4개 보유 종목이 정확히 표시됨.
 
-- [ ] **Task 15.4: 동적 감시 목록(Dynamic Watchlist) 정상화 및 전체 퀀트 매매 워크플로우(Buy -> Hold -> Sell) 시뮬레이션 테스트 모드 구축 (`main_rest_async.py`, `test_async_trading_loop.py`)**
+- [x] **Task 15.4: 동적 감시 목록(Dynamic Watchlist) 정상화 및 전체 퀀트 매매 워크플로우(Buy -> Hold -> Sell) 시뮬레이션 테스트 모드 구축 (`main_rest_async.py`, `test_async_trading_loop.py`)**
   - **설명:**
     - 소액 잔고(1,122원)로 인해 고가 필터에서 모든 종목이 탈락하여 감시 목록이 2개로 고정되던 문제 해결: 감시 목록은 거래대금 상위 종목(20~30개)의 피보나치 분석을 온전히 유지하고, 매수 주문 직전에만 잔고 체크하도록 분리.
     - MOCK/TEST 모드에서 가상 자본을 주입하여 '피보나치 타점 매수 -> 포지션 편입 -> 보유 중 트레일링 감시 -> 3단계 분할 익절/스탑로스 전량 매도'의 전체 퀀트 매매 사이클을 E2E 검증하는 시뮬레이션 테스트 모드 신설.
   - **수정 파일:** `main_rest_async.py`, `test_async_trading_loop.py`
   - **검증 기준:** 감시 목록에 20~30개 종목이 동적으로 분석 및 갱신되며, 전체 매매 워크플로우 테스트 100% 통과.
 
-- [ ] **Task 15.5: 통합 로컬 테스트, UI 렌더링 검증 및 Git 형상 관리 (`fix/actual-balance-match-and-portfolio-display`)**
+- [x] **Task 15.5: 통합 로컬 테스트, UI 렌더링 검증 및 Git 형상 관리 (`fix/actual-balance-match-and-portfolio-display`)**
   - **설명:** `pytest` 전체 테스트 스위트 통과, 대시보드 UI 무결성 확인, 신규 브랜치 커밋 및 `WORK_HISTORY.md` 기록.
   - **수정 파일:** `test_async_trading_loop.py`, `test_api_server.py`, `WORK_HISTORY.md`
   - **검증 기준:** 단위/통합 테스트 ALL PASS 및 Git 커밋 완료.
+
+---
+
+### Phase 16. UI 렌더링 최적화(Display State 분리, 10분 주기 갱신), 보유 포지션 파이프라인 정합성 복원 및 감시 종목 고가 필터 1차 방어 로직 복원 (Priority 16 - 진행 중)
+
+- [ ] **Task 16.1: Frontend 화면 표시 전용 상태(Display State) 분리 및 10~20분 주기 갱신 (`useWebSocket.ts`, `App.tsx`, `Header.tsx`, `KpiMetricsRow.tsx`)**
+  - **설명:** 실시간 WebSocket 및 REST 데이터는 내부 엔진/로직용으로 실시간 수신하되, 헤더 및 KPI 카드 렌더링에 사용되는 `displayPortfolio` 상태를 분리. 10분(600,000ms) 타이머로만 동기화하고, 수동 새로고침 클릭 시 즉시 반영하여 실시간 패킷 유입에 따른 헤더 깜빡임/리렌더링 현상을 완전 제거.
+  - **수정 파일:** `frontend/src/hooks/useWebSocket.ts`, `frontend/src/App.tsx`, `frontend/src/components/Header.tsx`, `frontend/src/components/KpiMetricsRow.tsx`
+
+- [ ] **Task 16.2: 프로세스 분리 환경(start.py) 대응 보유 포지션 데이터 동기화 파이프라인 복원 (`api_server.py`, `database.py`)**
+  - **설명:** `start.py`에 의해 `api_server.py`와 `main_rest_async.py`가 독립 프로세스로 실행될 때, `api_server.py`가 DB의 `portfolio` 테이블과 `balance` 테이블을 상시 정확하게 조회하여 4개 보유 포지션을 WebSocket 및 REST로 누락 없이 브로드캐스팅하도록 파이프라인 교정 (`snapshot["total_asset"]` 유무와 무관하게 DB 최신 포지션 항상 연동).
+  - **수정 파일:** `api_server.py`, `database.py`
+
+- [ ] **Task 16.3: 감시 종목(Watchlist) 1차 방어 로직(현재가 > D+2 예수금 제외) 복원 (`main_rest_async.py`)**
+  - **설명:** `update_watchlist()`에서 `current_price > available_cash`인 고가 종목을 Watchlist 등록 단계에서 사전에 즉시 배제하는 1차 방어 가드와 전용 디버그 로그(`🚫 [Watchlist 필터] 탈락: 잔고 부족...`)를 복원. 매수 직전 2차 가드와 함께 2중 방어선 확립.
+  - **수정 파일:** `main_rest_async.py`
+
+- [ ] **Task 16.4: 로컬 테스트, 프론트엔드 빌드 및 Git 형상 관리 (`fix/rendering-optimization-and-safety-fixes`)**
+  - **설명:** 단위 테스트 및 프로덕션 빌드 무결성 검증, 브랜치 커밋 및 `WORK_HISTORY.md` 갱신.
+  - **수정 파일:** `test_async_trading_loop.py`, `test_api_server.py`, `WORK_HISTORY.md`
 
 ---
 

@@ -2,6 +2,36 @@
 
 ---
 
+## 📅 [2026-09-15 13:00] UI 렌더링 최적화(Display State 10분 주기 분리), 보유 포지션 파이프라인 정합성 복원 및 감시 종목 고가 필터 1차 방어 로직 복원 완료
+
+### 1. 작업 개요 및 목적
+- **1) Frontend UI 렌더링 최적화 및 깜빡임 해결 (Display State 분리):**
+  - 실시간 매매/트레이딩 엔진은 WebSocket 실시간 최신 데이터를 사용하되, 화면 표출 전용 상태(`displayPortfolio`)를 분리하여 10분(600,000ms) 정주기로만 동기화하도록 제어.
+  - 사용자가 헤더의 '새로고침' 버튼을 클릭하거나 최초 마운트 시에는 즉각 동기화하여, 실시간 틱 데이터 유입에 따른 헤더(총자산, D+2 예수금) 및 KPI 카드의 깜빡임/잦은 리렌더링을 완전히 방지.
+- **2) 프로세스 분리 환경(`start.py`) 대응 보유 포지션 데이터 파이프라인 복원:**
+  - `start.py`에 의해 `api_server.py`와 `main_rest_async.py`가 독립 프로세스로 실행될 때, `api_server.py`가 MariaDB의 `portfolio` 테이블과 `balance` 테이블을 상시 조회/동기화하도록 개선하여 대시보드에 4개 보유 종목이 누락 없이 표출되도록 정합성 복원.
+- **3) 감시 종목(Watchlist) 1차 방어 로직(현재가 > D+2 예수금 제외) 복원:**
+  - `update_watchlist()`에서 `current_price > available_cash`인 고가 종목을 Watchlist 등록 단계에서 사전에 즉시 배제하는 1차 방어 가드와 전용 디버그 로그(`🚫 [Watchlist 필터] 탈락: 잔고 부족...`)를 복원하여 안전성을 원천 확보.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `frontend/src/hooks/useWebSocket.ts`:
+  - `displayPortfolio` 화면 표출 전용 상태 신설 및 10분 정주기 타이머(`setInterval 10m`) 구축.
+  - `handleRefresh` 함수에서 수동 즉시 동기화 지원.
+- `frontend/src/App.tsx`:
+  - `<Header />`, `<KpiMetricsRow />`, `<LogViewer />`, `<ActivePositionsBento />`에 `displayPortfolio` 연동.
+- `api_server.py`:
+  - `portfolio_broadcast_loop` 및 `get_portfolio()`에서 `ctx.db`의 `portfolio` 테이블(`get_portfolio_positions()`) 및 `balance` 테이블(`get_latest_balance()`) 상시 조회/동기화 로직 탑재.
+- `main_rest_async.py`:
+  - `update_watchlist()` 내 `current_price > available_cash` 고가 종목 1차 방어 가드 및 `price_over_cash` 탈락 카운터/로그 복원.
+- `GSD_MASTERPLAN.md`: Phase 16 신설 및 완료 기록.
+
+### 3. 검증 결과
+- **단위/통합 테스트:** `test_async_trading_loop.py` (11/11 100% ALL PASS), `test_api_server.py` (14/14 100% ALL PASS) 전 테스트 스위트 통과.
+- **프론트엔드 빌드:** `npm run build` 번들링 성공 (0 errors).
+- **형상 관리:** `fix/rendering-optimization-and-safety-fixes` 브랜치 커밋.
+
+---
+
 ## 📅 [2026-09-15] 키움 계좌 잔고 TR(kt00005/OPW00018) 실데이터(148,442원) 정합성 복원, 대용금 오맵핑 차단, 4개 보유 종목 UI 연동 및 데이터 요동 현상 완전 해결
 
 ### 1. 작업 개요 및 목적
