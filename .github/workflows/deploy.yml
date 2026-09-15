@@ -67,28 +67,75 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
-      - name: 6. Clean Old Files & Upload ./dist to Azure Storage
+      - name: 6. Clean Old Files & Upload ./dist to Azure File Share (portal-cloudshell)
         run: |
           STORAGE_ACCOUNT="${{ secrets.AZURE_STORAGE_ACCOUNT }}"
-          CONTAINER_NAME="${{ secrets.AZURE_STORAGE_CONTAINER }}"
+          SHARE_NAME="${{ secrets.AZURE_STORAGE_CONTAINER }}"
           TARGET_PATH="deploy/kiwoom_rest_project"
 
-          echo "🧹 [Azure Storage] 기존 구버전 배포 파일 삭제 중: $CONTAINER_NAME/$TARGET_PATH..."
-          az storage blob delete-batch \
-            --account-name "$STORAGE_ACCOUNT" \
-            --source "$CONTAINER_NAME" \
-            --pattern "$TARGET_PATH/*" \
-            --auth-mode login || true
+          echo "📂 [Azure File Share] 파일 공유(File Share) 업로드 준비: $STORAGE_ACCOUNT / $SHARE_NAME / $TARGET_PATH..."
 
-          echo "🚀 [Azure Storage] 최신 ./dist 폴더의 모든 내용 일괄 업로드 중..."
-          az storage blob upload-batch \
-            --account-name "$STORAGE_ACCOUNT" \
-            --destination "$CONTAINER_NAME/$TARGET_PATH" \
-            --source ./dist \
-            --pattern "*" \
-            --auth-mode login \
-            --overwrite true
-          echo "✅ [Azure Storage] 스토리지 업로드 완료: $CONTAINER_NAME/$TARGET_PATH"
+          # 스토리지 계정 키 획득 시도 (파일 공유 전용 안전 인증)
+          ACCOUNT_KEY=$(az storage account keys list --account-name "$STORAGE_ACCOUNT" --query "[0].value" -o tsv 2>/dev/null || true)
+
+          if [ -n "$ACCOUNT_KEY" ]; then
+            echo "🔑 [Azure File Share] Storage Account Key를 사용하여 파일 공유 접근..."
+
+            # 대상 디렉토리 생성
+            az storage directory create \
+              --account-name "$STORAGE_ACCOUNT" \
+              --account-key "$ACCOUNT_KEY" \
+              --share-name "$SHARE_NAME" \
+              --name "deploy" || true
+
+            az storage directory create \
+              --account-name "$STORAGE_ACCOUNT" \
+              --account-key "$ACCOUNT_KEY" \
+              --share-name "$SHARE_NAME" \
+              --name "$TARGET_PATH" || true
+
+            echo "🧹 [Azure File Share] 기존 구버전 파일 일괄 삭제 중..."
+            az storage file delete-batch \
+              --account-name "$STORAGE_ACCOUNT" \
+              --account-key "$ACCOUNT_KEY" \
+              --source "$SHARE_NAME" \
+              --pattern "$TARGET_PATH/*" || true
+
+            echo "🚀 [Azure File Share] 최신 ./dist 폴더의 모든 내용 파일 공유로 일괄 업로드 중..."
+            az storage file upload-batch \
+              --account-name "$STORAGE_ACCOUNT" \
+              --account-key "$ACCOUNT_KEY" \
+              --destination "$SHARE_NAME" \
+              --destination-path "$TARGET_PATH" \
+              --source ./dist \
+              --pattern "*"
+          else
+            echo "🔑 [Azure File Share] OIDC 로그인 모드를 사용하여 파일 공유 접근..."
+
+            az storage directory create \
+              --account-name "$STORAGE_ACCOUNT" \
+              --share-name "$SHARE_NAME" \
+              --name "$TARGET_PATH" \
+              --auth-mode login || true
+
+            echo "🧹 [Azure File Share] 기존 구버전 파일 일괄 삭제 중..."
+            az storage file delete-batch \
+              --account-name "$STORAGE_ACCOUNT" \
+              --source "$SHARE_NAME" \
+              --pattern "$TARGET_PATH/*" \
+              --auth-mode login || true
+
+            echo "🚀 [Azure File Share] 최신 ./dist 폴더의 모든 내용 파일 공유로 일괄 업로드 중..."
+            az storage file upload-batch \
+              --account-name "$STORAGE_ACCOUNT" \
+              --destination "$SHARE_NAME" \
+              --destination-path "$TARGET_PATH" \
+              --source ./dist \
+              --pattern "*" \
+              --auth-mode login
+          fi
+
+          echo "✅ [Azure File Share] 파일 공유 업로드 완료: $SHARE_NAME/$TARGET_PATH"
 
       - name: 7. Log in to Azure Container Registry (ACR)
         run: |
