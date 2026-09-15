@@ -169,15 +169,7 @@ class AsyncTradingBot:
                 if hasattr(self.db, 'get_portfolio_positions'):
                     db_pos = await self.db.get_portfolio_positions()
                     if db_pos:
-                        for p in db_pos:
-                            code = p.get('code')
-                            name = p.get('name') or code
-                            qty = int(p.get('qty', 0))
-                            buy_p = float(p.get('buy_price', 0))
-                            cur_p = float(p.get('current_price') or buy_p)
-                            if code and qty > 0:
-                                await self.portfolio.add_position(code, name, qty, buy_p)
-                                await self.portfolio.update_current_price(code, cur_p)
+                        await self.portfolio.restore_positions_from_db(db_pos)
             except Exception as e:
                 print(f"⚠️ [Bot Init] DB 계좌 복원 예외: {e}")
 
@@ -354,25 +346,18 @@ class AsyncTradingBot:
 
         self.unclosed_orders_count = unclosed_cnt
 
-        # 2. 보유 종목 동기화 선행
+        # 2. 보유 종목 동기화 선행 (balance_data 및 deposit_data 양방향 스캔)
         if balance_data:
             await self.portfolio.sync_positions(balance_data)
+        if deposit_data and len(self.portfolio.positions) == 0:
+            await self.portfolio.sync_positions(deposit_data)
 
         # 포지션이 0개이고 DB에 저장된 포지션이 있는 경우 자가 복구 검사
         if len(self.portfolio.positions) == 0 and self.db and hasattr(self.db, 'get_portfolio_positions'):
             try:
                 db_pos = await self.db.get_portfolio_positions()
                 if db_pos:
-                    for p in db_pos:
-                        code = p.get('code')
-                        name = p.get('name') or code
-                        qty = int(p.get('qty', 0))
-                        buy_p = float(p.get('buy_price', 0))
-                        cur_p = float(p.get('current_price') or buy_p)
-                        if code and qty > 0:
-                            await self.portfolio.add_position(code, name, qty, buy_p)
-                            await self.portfolio.update_current_price(code, cur_p)
-                    print(f"🛡️ [포지션 자가 복구] DB로부터 {len(db_pos)}개 보유 종목 복원 완료: {[p.get('name', p.get('code')) for p in db_pos]}")
+                    await self.portfolio.restore_positions_from_db(db_pos)
             except Exception as e:
                 print(f"⚠️ [포지션 DB 복구 예외] {e}")
 

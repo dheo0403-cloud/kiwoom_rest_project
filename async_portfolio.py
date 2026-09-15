@@ -86,7 +86,7 @@ class AsyncPortfolioManager:
         adjusted_kelly = full_kelly * self.kelly_fraction
         return float(np.clip(adjusted_kelly, min_alloc, max_alloc))
 
-    async def sync_positions(self, account_data: Dict[str, Any]):
+    async def sync_positions(self, account_data: Any):
         """키움 계좌 잔고 API 응답(kt00004/kt00018/kt00005/OPW00018) 기반 포지션 동기화 (모의/실전/다중 스키마 100% 대응)"""
         async with self._lock:
             if not account_data:
@@ -127,11 +127,20 @@ class AsyncPortfolioManager:
                 for k in code_keys:
                     val = d.get(k)
                     if val is not None and str(val).strip():
-                        c = str(val).strip().replace('A', '').split('_')[0].strip()
-                        if len(c) > 6 and c[-6:].isdigit():
-                            return c[-6:]
-                        elif len(c) == 6 and c.isdigit():
+                        raw_c = str(val).strip()
+                        # ISIN 표준코드 (예: KR7090460005) 대응: 3번째부터 6자리 추출
+                        if raw_c.startswith('KR7') and len(raw_c) >= 9:
+                            cand = raw_c[3:9]
+                            if cand.isdigit():
+                                return cand
+                        # 'A' 접두사 및 '_AL', '_NX' 등 거래소 구분자 제거
+                        c = raw_c.replace('A', '').split('_')[0].strip()
+                        if len(c) == 6 and c.isdigit():
                             return c
+                        elif len(c) > 6 and c[-6:].isdigit():
+                            return c[-6:]
+                        elif 1 <= len(c) < 6 and c.isdigit():
+                            return c.zfill(6)
                         elif len(c) >= 3 and not c.startswith('KR'):
                             return c
                 return ''
@@ -155,24 +164,41 @@ class AsyncPortfolioManager:
                 return any(k in d and bool(str(d[k]).strip()) for k in name_keys)
 
             def extract_candidate_lists(data: Any, depth: int = 0) -> List[List[Dict[str, Any]]]:
-                if depth > 3 or not isinstance(data, dict):
+                if depth > 4:
                     return []
                 candidates = []
+                if isinstance(data, list) and data:
+                    valid_items = [x for x in data if isinstance(x, dict) and is_holding_item(x)]
+                    if valid_items:
+                        candidates.append(valid_items)
+                    for item in data:
+                        if isinstance(item, dict):
+                            candidates.extend(extract_candidate_lists(item, depth + 1))
+                    return candidates
+
+                if not isinstance(data, dict):
+                    return []
+
                 priority_keys = [
                     'output2', 'Output2', 'output_2', 'acnt_dtl_list', 'holdings',
                     'stk_list', 'item_list', 'list', 'data', 'grid', 'table',
-                    'rows', 'items', 'output', 'Output'
+                    'rows', 'items', 'output', 'Output', 'stocks', 'positions',
+                    '종목리스트', '잔고리스트'
                 ]
                 for k in priority_keys:
                     v = data.get(k)
                     if isinstance(v, list) and v:
-                        valid_items = [x for x in v if is_holding_item(x)]
+                        valid_items = [x for x in v if isinstance(x, dict) and is_holding_item(x)]
                         if valid_items:
-                            candidates.append(v)
-                # 하위 딕셔너리 재귀 탐색 (data, body, response 등)
+                            candidates.append(valid_items)
+
                 for k, v in data.items():
                     if isinstance(v, dict):
                         candidates.extend(extract_candidate_lists(v, depth + 1))
+                    elif isinstance(v, list) and v:
+                        valid_items = [x for x in v if isinstance(x, dict) and is_holding_item(x)]
+                        if valid_items and valid_items not in candidates:
+                            candidates.append(valid_items)
                 return candidates
 
             candidate_lists = extract_candidate_lists(account_data)
@@ -310,6 +336,40 @@ class AsyncPortfolioManager:
                 # 임시 API 통신 에러 시 기존 포지션 보존
                 self.positions = prev_positions
                 print(f"🛡️ [Portfolio sync_positions] API 응답 포지션 0건이나 총자산 차액 존재 ➔ 직전 {len(prev_positions)}개 포지션 안전 보존")
+
+    async def restore_positions_from_db(self, db_positions: List[Dict[str, Any]]):
+        """DB로부터 포지션을 안전 복원 (D+2 주문가능현금 current_capital을 차감하지 않고 독립 복원)"""
+        async with self._lock:
+            if not db_positions:
+                return
+            restored = {}
+            for p in db_positions:
+                raw_code = p.get('code') or p.get('stk_cd', '')
+                code = str(raw_code).replace('A', '').split('_')[0].strip()
+                if len(code) < 6 and code.isdigit():
+                    code = code.zfill(6)
+                name = p.get('name') or code
+                qty = int(p.get('qty', 0))
+                buy_p = float(p.get('buy_price', 0))
+                cur_p = float(p.get('current_price') or buy_p)
+                highest_p = float(p.get('highest_price') or max(buy_p, cur_p))
+                sell_stage = int(p.get('sell_stage', 0))
+                if code and qty > 0:
+                    pnl = (cur_p - buy_p) * qty
+                    yield_rate = ((cur_p / buy_p) - 1.0) * 100.0 if buy_p > 0 else 0.0
+                    restored[code] = {
+                        'name': name,
+                        'qty': qty,
+                        'buy_price': buy_p,
+                        'current_price': cur_p,
+                        'highest_price': highest_p,
+                        'sell_stage': sell_stage,
+                        'pnl': pnl,
+                        'yield_rate': yield_rate
+                    }
+            if restored:
+                self.positions = restored
+                print(f"🛡️ [Portfolio restore_positions_from_db] DB로부터 {len(restored)}개 포지션 안전 복원 완료: {[p['name'] for p in restored.values()]}")
 
     async def add_position(self, code: str, name: str, qty: int, buy_price: float):
         """신규 포지션 편입"""

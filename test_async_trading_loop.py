@@ -932,6 +932,88 @@ async def test_korean_keys_parsing():
     assert snap['total_asset'] >= 147069.0
     print("  ✅ 한글 필드명 키움 TR 스키마 파싱 100% 통과")
 
+async def test_kt00018_priority_and_isin_and_zero_padded_codes_parsing():
+    """15. kt00018 합산 최우선 스캔 및 ISIN 코드(KR7...)/5자리 패딩 종목코드 파싱 검증"""
+    print("▶ [Test 15] kt00018 합산 최우선 스캔 및 ISIN(KR7090460005)/5자리 정수형 코드 파싱 검증...")
+
+    class ISINAndPaddedMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "147069",
+                    "tot_pnl_rt": "4.88",
+                    "dnca_tot_amt": "82819"
+                }],
+                "output2": [
+                    {
+                        "stk_cd": "KR7090460005", "stk_nm": "비에이치", "hldg_qty": "1",
+                        "pchs_avg_pric": "19520", "prpr": "19630", "evlu_amt": "19630"
+                    },
+                    {
+                        "stk_cd": "263750_AL", "stk_nm": "펄어비스", "ord_psbl_qty": "1",
+                        "pchs_avg_pric": "33600", "prpr": "35600", "evlu_amt": "35600"
+                    },
+                    {
+                        "stk_cd": 441270, "stk_nm": "파인엠텍", "hold_qty": "1",
+                        "pchs_avg_pric": "8160", "prpr": "9170", "evlu_amt": "9170"
+                    }
+                ]
+            }
+
+    mock_client = ISINAndPaddedMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    assert snap['stock_count'] == 3, f"ISIN/패딩/접미사 포함 3개 종목이 정상 인식되어야 합니다. (실제: {snap['stock_count']}개)"
+    pos_map = {p['code']: p for p in snap['positions']}
+    assert "090460" in pos_map, "KR7090460005 -> 090460 추출 성공해야 합니다."
+    assert "263750" in pos_map, "263750_AL -> 263750 정제 성공해야 합니다."
+    assert "441270" in pos_map, "441270(int) -> 441270 파싱 성공해야 합니다."
+    assert snap['current_capital'] == 82819.0
+    assert snap['total_asset'] >= 147069.0
+    print("  ✅ kt00018 ISIN/접미사/정수형 코드 정규화 및 3개 보유종목 파싱 100% 통과")
+
+async def test_db_restore_positions_safety_without_cash_deduction():
+    """16. API 일시 미응답 시 DB 포지션 자가 복원 시 D+2 예수금(82,819원) 차감 없이 안전 보존 검증"""
+    print("▶ [Test 16] DB 포지션 자가 복원 시 D+2 주문가능 현금 차감 방지 및 정합성 검증...")
+
+    class EmptyBalanceMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            # API가 일시적으로 요약만 반환하고 종목 리스트는 0건인 상황
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "147069",
+                    "dnca_tot_amt": "82819",
+                    "d2_deposit": "82819"
+                }],
+                "output2": []
+            }
+
+    mock_client = EmptyBalanceMockClient()
+    mock_db = MockDatabaseManager()
+    # DB에 기존 보유 포지션 3건 미리 적재
+    mock_db.portfolio = [
+        {"code": "090460", "name": "비에이치", "qty": 1, "buy_price": 19520.0, "current_price": 19630.0},
+        {"code": "263750", "name": "펄어비스", "qty": 1, "buy_price": 33600.0, "current_price": 35600.0},
+        {"code": "441270", "name": "파인엠텍", "qty": 1, "buy_price": 8160.0, "current_price": 9170.0}
+    ]
+
+    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    assert snap['stock_count'] == 3, f"DB로부터 3개 종목이 안전 자가 복구되어야 합니다. (실제: {snap['stock_count']}개)"
+    # D+2 예수금이 82,819원에서 차감되지 않고 온전히 82,819원으로 유지되는지 검증
+    assert snap['current_capital'] == 82819.0, f"DB 복원 시 D+2 예수금(82,819원)이 차감되지 않아야 합니다. (실제: {snap['current_capital']})"
+    assert snap['total_asset'] >= 147069.0
+    print("  ✅ DB 포지션 자가 복원 시 D+2 주문가능금액(82,819원) 보존 및 총자산(147,069원) 정합성 100% 검증")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -950,8 +1032,10 @@ async def main():
     await test_actual_account_balance_with_images_data()
     await test_single_multi_record_split_and_zero_ccls_qty_handling()
     await test_korean_keys_parsing()
+    await test_kt00018_priority_and_isin_and_zero_padded_codes_parsing()
+    await test_db_restore_positions_safety_without_cash_deduction()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 14개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 16개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

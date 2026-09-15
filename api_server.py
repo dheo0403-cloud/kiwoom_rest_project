@@ -256,16 +256,8 @@ async def lifespan(app: FastAPI):
             if hasattr(ctx.db, 'get_portfolio_positions'):
                 db_pos = await ctx.db.get_portfolio_positions()
                 if db_pos:
-                    for p in db_pos:
-                        code = p.get('code')
-                        name = p.get('name') or code
-                        qty = int(p.get('qty', 0))
-                        buy_price = float(p.get('buy_price', 0))
-                        cur_price = float(p.get('current_price') or buy_price)
-                        if code and qty > 0:
-                            await ctx.portfolio.add_position(code, name, qty, buy_price)
-                            await ctx.portfolio.update_current_price(code, cur_price)
-                    print(f"✅ [API Server] DB로부터 직전 계좌 잔고(총자산: {int(ctx.portfolio.total_asset):,}원 / D+2예수금: {int(ctx.portfolio.current_capital):,}원) 및 {len(db_pos)}개 포지션 복원 완료.")
+                    await ctx.portfolio.restore_positions_from_db(db_pos)
+                    print(f"✅ [API Server] DB로부터 직전 계좌 잔고(총자산: {int(ctx.portfolio.total_asset):,}원 / D+2예수금: {int(ctx.portfolio.current_capital):,}원) 및 {len(db_pos)}개 포지션 안전 복원 완료.")
         except Exception as e:
             print(f"⚠️ [API Server] 초기 DB 계좌 복원 예외: {e}")
 

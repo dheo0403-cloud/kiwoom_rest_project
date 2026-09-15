@@ -12,7 +12,7 @@ echo "1. 변경 파일 스테이징 중..."
 git add -A
 
 echo "2. 자동 배포 커밋 생성 중..."
-COMMIT_MSG="fix: fix kiwoom TR holdings multi-record parsing and DB synchronization"
+COMMIT_MSG="fix: 런타임 키움 TR 멀티레코드 전달 및 보유종목 동기화 오류 수정"
 git commit -m "$COMMIT_MSG" || echo "이미 커밋된 상태이거나 변경사항이 없습니다."
 
 echo "3. GitHub 원격 저장소 푸시 중 (GitHub Actions 트리거)..."
