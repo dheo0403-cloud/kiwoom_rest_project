@@ -56,7 +56,7 @@ class DatabaseManager:
         self.pool = None
 
     async def init_pool(self):
-        """aiomysql 커넥션 풀 초기화 및 실계좌 보유 포지션 보강"""
+        """aiomysql 커넥션 풀 초기화"""
         try:
             self.pool = await aiomysql.create_pool(
                 host=self.host, port=self.port,
@@ -65,27 +65,6 @@ class DatabaseManager:
                 cursorclass=aiomysql.DictCursor
             )
             print(f"✅ DB Pool connected to '{self.db_name}'.")
-
-            # portfolio 테이블 기본 확인 및 실계좌 보유 포지션 기본 보강 (0건일 때)
-            try:
-                async with self.pool.acquire() as conn:
-                    async with conn.cursor() as cursor:
-                        await cursor.execute("SELECT COUNT(*) as cnt FROM portfolio")
-                        row = await cursor.fetchone()
-                        if row and row.get('cnt', 0) == 0:
-                            seed_sql = '''
-                                INSERT INTO portfolio (code, name, qty, buy_price, current_price)
-                                VALUES
-                                ('003280', '흥아해운', 2, 1980, 1801),
-                                ('015760', '한국전력', 1, 32950, 31450),
-                                ('090460', '비에이치', 1, 19520, 20100),
-                                ('229200', 'KODEX 코스닥150', 1, 14080, 13880)
-                            '''
-                            await cursor.execute(seed_sql)
-                            await conn.commit()
-                            print("✅ [DB] 실계좌 4개 보유 포지션(흥아해운, 한국전력, 비에이치, KODEX 코스닥150) 기본 적재 완료.")
-            except Exception as e:
-                print(f"⚠️ [DB] 초기 포지션 시딩 예외: {e}")
         except Exception as e:
             print(f"❌ Pool 생성 오류: {e}")
             return
