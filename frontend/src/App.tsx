@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header';
 import { KpiMetricsRow } from './components/KpiMetricsRow';
 import { ActivePositionsBento } from './components/ActivePositionsBento';
@@ -70,7 +70,7 @@ export function App() {
     }
   }, [displayPortfolio.positions, portfolio.positions, watchlist, selectedStockCode]);
 
-  const handleSelectStock = (code: string, name?: string) => {
+  const handleSelectStock = useCallback((code: string, name?: string) => {
     setSelectedStockCode(code);
     if (name) {
       setSelectedStockName(name);
@@ -78,7 +78,15 @@ export function App() {
       const item = watchlist.find(w => w.code === code) || displayPortfolio.positions.find(p => p.code === code) || portfolio.positions.find(p => p.code === code);
       if (item) setSelectedStockName(item.name);
     }
-  };
+  }, [watchlist, displayPortfolio.positions, portfolio.positions]);
+
+  const handleOpenKillSwitch = useCallback(() => setIsKillSwitchOpen(true), []);
+  const handleOpenParams = useCallback(() => setIsParamsOpen(true), []);
+  const handleToggleColorMode = useCallback(() => setColorMode(prev => prev === 'KRX' ? 'GLOBAL' : 'KRX'), []);
+  const handleHeaderRefresh = useCallback(() => {
+    refreshData();
+    fetchWatchlist();
+  }, [refreshData]);
 
   const handleConfirmKillSwitch = async () => {
     setIsTriggeringKill(true);
@@ -105,14 +113,11 @@ export function App() {
         botStatus={botStatus}
         portfolio={displayPortfolio}
         isConnected={isConnected}
-        onOpenKillSwitch={() => setIsKillSwitchOpen(true)}
-        onOpenParams={() => setIsParamsOpen(true)}
-        onRefresh={() => {
-          refreshData();
-          fetchWatchlist();
-        }}
+        onOpenKillSwitch={handleOpenKillSwitch}
+        onOpenParams={handleOpenParams}
+        onRefresh={handleHeaderRefresh}
         colorMode={colorMode}
-        onToggleColorMode={() => setColorMode(prev => prev === 'KRX' ? 'GLOBAL' : 'KRX')}
+        onToggleColorMode={handleToggleColorMode}
       />
 
       {/* Main Cockpit Container */}

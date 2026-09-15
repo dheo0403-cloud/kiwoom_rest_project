@@ -107,6 +107,15 @@ class AsyncPortfolioManager:
             elif not isinstance(raw_list, list):
                 raw_list = []
 
+            # 만약 raw_list가 비어있다면 다른 가능한 키 목록 전수 탐색
+            if not raw_list:
+                for k in ['output1', 'output', 'data', 'grid', 'table', 'acnt_dtl_list']:
+                    v = account_data.get(k)
+                    if isinstance(v, list) and v:
+                        if any(isinstance(x, dict) and any(c_key in x for c_key in ['stk_cd', 'pdno', 'code', 'expcode', 'mksc_shrn_iscd']) for x in v):
+                            raw_list = v
+                            break
+
             prev_positions = self.positions.copy()
             new_positions = {}
             for item in raw_list:
@@ -115,17 +124,26 @@ class AsyncPortfolioManager:
                 code = (
                     item.get('stk_cd') or
                     item.get('code') or
-                    item.get('mksc_shrn_iscd') or
                     item.get('pdno') or
+                    item.get('mksc_shrn_iscd') or
+                    item.get('expcode') or
+                    item.get('shcode') or
                     item.get('item_code') or
                     item.get('jongmok_code') or
+                    item.get('prdt_cd') or
+                    item.get('stck_shrn_iscd') or
+                    item.get('item_cd') or
                     ''
                 ).strip()
                 if not code:
                     continue
                 # 종목코드 6자리 정규화 (A접두사 및 _AL 등 제거)
                 code = code.replace('A', '').split('_')[0].strip()
-                if not code or (len(code) != 6 and not code.isdigit()):
+                if not code:
+                    continue
+                if len(code) > 6 and code[-6:].isdigit():
+                    code = code[-6:]
+                elif len(code) != 6 and not code.isdigit():
                     continue
 
                 qty_str = str(
@@ -135,6 +153,13 @@ class AsyncPortfolioManager:
                     item.get('hold_qty') or
                     item.get('ord_psbl_qty') or
                     item.get('bal_qty') or
+                    item.get('ccls_qty') or
+                    item.get('rmnd_qty') or
+                    item.get('tot_hldg_qty') or
+                    item.get('hld_qty') or
+                    item.get('jango_qty') or
+                    item.get('now_qty') or
+                    item.get('stck_qty') or
                     0
                 ).replace(',', '').strip()
                 try:
@@ -151,6 +176,11 @@ class AsyncPortfolioManager:
                     item.get('pchs_price') or
                     item.get('avg_buy_price') or
                     item.get('buy_uv') or
+                    item.get('pchs_unit_amt') or
+                    item.get('pchs_avg_amt') or
+                    item.get('avg_pchs_price') or
+                    item.get('pchs_prc') or
+                    item.get('buy_prc') or
                     0
                 ).replace(',', '').strip()
 
@@ -161,7 +191,7 @@ class AsyncPortfolioManager:
 
                 # 만약 매입단가가 0이고 총매입금액(pchs_amt)이 있다면 단가 계산
                 if buy_price <= 0 and qty > 0:
-                    pchs_amt_str = str(item.get('pchs_amt') or item.get('buy_amt') or 0).replace(',', '').strip()
+                    pchs_amt_str = str(item.get('pchs_amt') or item.get('buy_amt') or item.get('pchs_amt_smtl_amt') or 0).replace(',', '').strip()
                     try:
                         pchs_amt = float(pchs_amt_str)
                         if pchs_amt > 0:
@@ -176,6 +206,8 @@ class AsyncPortfolioManager:
                     item.get('cur_prc') or
                     item.get('clpr') or
                     item.get('price') or
+                    item.get('now_prc') or
+                    item.get('stck_clpr') or
                     0
                 ).replace(',', '').strip()
 
@@ -186,7 +218,7 @@ class AsyncPortfolioManager:
 
                 # 만약 현재가가 0이고 평가금액(evlu_amt)이 있다면 단가 계산
                 if current_price <= 0 and qty > 0:
-                    evlu_amt_str = str(item.get('evlu_amt') or item.get('eval_amt') or 0).replace(',', '').strip()
+                    evlu_amt_str = str(item.get('evlu_amt') or item.get('eval_amt') or item.get('evlu_amt_smtl_amt') or 0).replace(',', '').strip()
                     try:
                         evlu_amt = float(evlu_amt_str)
                         if evlu_amt > 0:
@@ -198,19 +230,28 @@ class AsyncPortfolioManager:
                     current_price = buy_price
 
                 # 평가손익 및 수익률 추출 (API 응답 또는 직접 계산)
-                pnl_str = str(item.get('evlu_pfls_amt') or item.get('pnl') or 0).replace(',', '').strip()
+                pnl_str = str(item.get('evlu_pfls_amt') or item.get('pnl') or item.get('evlt_pfls_amt') or 0).replace(',', '').strip()
                 try:
                     item_pnl = float(pnl_str)
                 except ValueError:
                     item_pnl = (current_price - buy_price) * qty
 
-                rt_str = str(item.get('evlu_pfls_rt') or item.get('yield_rate') or 0).replace(',', '').replace('%', '').strip()
+                rt_str = str(item.get('evlu_pfls_rt') or item.get('yield_rate') or item.get('evlt_pfls_rt') or 0).replace(',', '').replace('%', '').strip()
                 try:
                     item_yield_rate = float(rt_str)
                 except ValueError:
                     item_yield_rate = ((current_price / buy_price) - 1.0) * 100.0 if buy_price > 0 else 0.0
 
-                name = item.get('stk_nm') or item.get('name') or item.get('prdt_name') or item.get('jongmok_name') or code
+                name = (
+                    item.get('stk_nm') or
+                    item.get('name') or
+                    item.get('prdt_name') or
+                    item.get('jongmok_name') or
+                    item.get('hts_kor_isnm') or
+                    item.get('item_name') or
+                    item.get('stck_nm') or
+                    code
+                )
 
                 prev_pos = prev_positions.get(code)
                 highest_price = max(prev_pos.get('highest_price', buy_price), current_price) if prev_pos else max(buy_price, current_price)
@@ -226,6 +267,11 @@ class AsyncPortfolioManager:
                     'pnl': item_pnl,
                     'yield_rate': item_yield_rate
                 }
+
+            # 만약 new_positions가 비어있고 이전 포지션이 존재하면(장 마감/일시 API 오류) 보존
+            if not new_positions and prev_positions:
+                new_positions = prev_positions
+
             self.positions = new_positions
 
     async def add_position(self, code: str, name: str, qty: int, buy_price: float):

@@ -204,6 +204,21 @@ async def portfolio_broadcast_loop():
                     except Exception as e:
                         print(f"DB Portfolio/Balance Sync Error: {e}")
 
+                # 만약 DB에도 포지션이 없다면 키움 클라이언트로부터 직접 1회 폴링 시도 (자가 치유)
+                if (not snapshot.get("positions")) and ctx.client and hasattr(ctx.client, 'get_account_balance'):
+                    try:
+                        raw_bal = await ctx.client.get_account_balance(priority=RequestPriority.LOW)
+                        if raw_bal and ctx.portfolio:
+                            await ctx.portfolio.sync_positions(raw_bal)
+                            if ctx.portfolio.positions:
+                                snap_direct = await ctx.portfolio.get_snapshot()
+                                snapshot["positions"] = snap_direct.get("positions", [])
+                                snapshot["stock_count"] = len(snapshot["positions"])
+                                if ctx.db and hasattr(ctx.db, 'save_portfolio'):
+                                    await ctx.db.save_portfolio(ctx.portfolio.positions)
+                    except Exception as e:
+                        pass
+
                 await ws_manager.broadcast_portfolio({
                     "type": "PORTFOLIO_UPDATE",
                     "data": snapshot
@@ -408,6 +423,21 @@ async def get_portfolio():
                     snapshot["last_synced_at"] = str(db_bal.get('date', ''))
         except Exception as e:
             print(f"Portfolio DB sync error: {e}")
+
+    # 만약 DB에도 포지션이 없다면 키움 클라이언트로부터 직접 1회 폴링 시도
+    if (not snapshot.get("positions")) and ctx.client and hasattr(ctx.client, 'get_account_balance'):
+        try:
+            raw_bal = await ctx.client.get_account_balance(priority=RequestPriority.LOW)
+            if raw_bal and ctx.portfolio:
+                await ctx.portfolio.sync_positions(raw_bal)
+                if ctx.portfolio.positions:
+                    snap_direct = await ctx.portfolio.get_snapshot()
+                    snapshot["positions"] = snap_direct.get("positions", [])
+                    snapshot["stock_count"] = len(snapshot["positions"])
+                    if ctx.db and hasattr(ctx.db, 'save_portfolio'):
+                        await ctx.db.save_portfolio(ctx.portfolio.positions)
+        except Exception as e:
+            pass
 
     return snapshot
 

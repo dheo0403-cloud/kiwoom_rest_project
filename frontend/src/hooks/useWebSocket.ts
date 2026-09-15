@@ -84,8 +84,14 @@ export function useTradingWebSocket() {
         const portData = await portRes.value.json();
         const rawPositions = Array.isArray(portData.positions) ? portData.positions : [];
         setPortfolio(prev => {
-          // WS 연결 중이고 이미 유효한 자산 데이터가 있으면 REST 응답으로 덮어쓰지 않아 요동 방지
-          if (isConnected && prev.total_asset > 0) {
+          // 동일한 수치일 경우 이전 객체 참조를 유지하여 불필요한 리렌더링 차단
+          if (
+            prev.total_asset === portData.total_asset &&
+            prev.current_capital === portData.current_capital &&
+            prev.positions.length === rawPositions.length &&
+            prev.unrealized_pnl === portData.unrealized_pnl &&
+            prev.stock_count === rawPositions.length
+          ) {
             return prev;
           }
           return {
@@ -103,7 +109,12 @@ export function useTradingWebSocket() {
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
         const statusData = await statusRes.value.json();
-        setBotStatus(statusData);
+        setBotStatus(prev => {
+          if (prev.running === statusData.running && prev.circuit_breaker_open === statusData.circuit_breaker_open) {
+            return prev;
+          }
+          return statusData;
+        });
       }
 
       if (logsRes.status === 'fulfilled' && logsRes.value.ok) {
@@ -118,7 +129,7 @@ export function useTradingWebSocket() {
     } catch (e) {
       console.warn("REST fallback fetch error:", e);
     }
-  }, [isConnected]);
+  }, []);
 
   useEffect(() => {
     fetchRestData();
@@ -152,15 +163,26 @@ export function useTradingWebSocket() {
             if ((msg.type === 'PORTFOLIO_UPDATE' || msg.type === 'PORTFOLIO_INIT') && msg.data) {
               const d = msg.data;
               const rawPositions = Array.isArray(d.positions) ? d.positions : [];
-              setPortfolio({
-                total_asset: d.total_asset > 0 ? d.total_asset : (d.current_capital || 0),
-                current_capital: d.current_capital || 0,
-                invested_capital: d.invested_capital || d.invested_eval || 0,
-                stock_count: rawPositions.length,
-                unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
-                total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
-                positions: rawPositions,
-                last_synced_at: d.last_synced_at
+              setPortfolio(prev => {
+                if (
+                  prev.total_asset === d.total_asset &&
+                  prev.current_capital === d.current_capital &&
+                  prev.positions.length === rawPositions.length &&
+                  prev.unrealized_pnl === d.unrealized_pnl &&
+                  prev.stock_count === rawPositions.length
+                ) {
+                  return prev;
+                }
+                return {
+                  total_asset: d.total_asset > 0 ? d.total_asset : (d.current_capital || 0),
+                  current_capital: d.current_capital || 0,
+                  invested_capital: d.invested_capital || d.invested_eval || 0,
+                  stock_count: rawPositions.length,
+                  unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
+                  total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
+                  positions: rawPositions,
+                  last_synced_at: d.last_synced_at
+                };
               });
             }
           } catch (e) {
@@ -170,7 +192,7 @@ export function useTradingWebSocket() {
 
         portWs.onclose = () => {
           setIsConnected(false);
-          setTimeout(connectSockets, 3000);
+          setTimeout(connectSockets, 10000); // 10초 재연결 백오프로 깜빡임 방지
         };
 
         portWs.onerror = () => {
