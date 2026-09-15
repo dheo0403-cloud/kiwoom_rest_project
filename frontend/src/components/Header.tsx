@@ -17,7 +17,7 @@ interface HeaderProps {
   onToggleColorMode: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = React.memo(({
+const HeaderComponent: React.FC<HeaderProps> = ({
   botStatus,
   portfolio,
   isConnected,
@@ -236,6 +236,17 @@ export const Header: React.FC<HeaderProps> = React.memo(({
         </button>
       </div>
     </header>
+  );
+};
+
+export const Header = React.memo(HeaderComponent, (prev, next) => {
+  return (
+    prev.portfolio.total_asset === next.portfolio.total_asset &&
+    prev.portfolio.current_capital === next.portfolio.current_capital &&
+    (prev.portfolio.positions?.length || 0) === (next.portfolio.positions?.length || 0) &&
+    prev.isConnected === next.isConnected &&
+    prev.colorMode === next.colorMode &&
+    prev.botStatus.is_demo === next.botStatus.is_demo
   );
 });
 Header.displayName = 'Header';

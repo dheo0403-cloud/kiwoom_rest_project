@@ -360,14 +360,24 @@ class AsyncKiwoomClient:
         return data
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 보유 포지션 조회 (kt00005 / OPW00018 대응)"""
+        """계좌 잔고 및 보유 포지션 조회 (kt00004: 계좌평가잔고 OPW00018 + kt00005: 체결잔고 듀얼 지원)"""
         url = f"{self.base_url}/api/dostk/acnt"
         payload = {
             "dmst_stex_tp": "KRX",
             "accNo": self.account,
-            "accPwd": self.password
+            "accPwd": self.password,
+            "qry_tp": "1"
         }
-        data, _ = await self.request("kt00005", url, payload, priority=priority)
+        # 1차: kt00004 (계좌평가잔고내역 OPW00018 - 전체 보유 주식 목록 반환)
+        data, _ = await self.request("kt00004", url, payload, priority=priority)
+        if not data or (isinstance(data, dict) and not data.get('output2') and not data.get('Output2')):
+            # 2차: kt00005 (체결잔고)
+            data5, _ = await self.request("kt00005", url, payload, priority=priority)
+            if data5:
+                if not data:
+                    data = data5
+                elif isinstance(data5, dict) and (data5.get('output2') or data5.get('Output2')):
+                    data['output2'] = data5.get('output2') or data5.get('Output2')
         return data
 
     async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:

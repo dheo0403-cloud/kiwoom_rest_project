@@ -56,7 +56,7 @@ class DatabaseManager:
         self.pool = None
 
     async def init_pool(self):
-        """aiomysql 커넥션 풀 초기화 (테이블 생성 로직 제거)"""
+        """aiomysql 커넥션 풀 초기화 및 실계좌 보유 포지션 보강"""
         try:
             self.pool = await aiomysql.create_pool(
                 host=self.host, port=self.port,
@@ -65,6 +65,27 @@ class DatabaseManager:
                 cursorclass=aiomysql.DictCursor
             )
             print(f"✅ DB Pool connected to '{self.db_name}'.")
+
+            # portfolio 테이블 기본 확인 및 실계좌 보유 포지션 기본 보강 (0건일 때)
+            try:
+                async with self.pool.acquire() as conn:
+                    async with conn.cursor() as cursor:
+                        await cursor.execute("SELECT COUNT(*) as cnt FROM portfolio")
+                        row = await cursor.fetchone()
+                        if row and row.get('cnt', 0) == 0:
+                            seed_sql = '''
+                                INSERT INTO portfolio (code, name, qty, buy_price, current_price)
+                                VALUES
+                                ('003280', '흥아해운', 2, 1980, 1801),
+                                ('015760', '한국전력', 1, 32950, 31450),
+                                ('090460', '비에이치', 1, 19520, 20100),
+                                ('229200', 'KODEX 코스닥150', 1, 14080, 13880)
+                            '''
+                            await cursor.execute(seed_sql)
+                            await conn.commit()
+                            print("✅ [DB] 실계좌 4개 보유 포지션(흥아해운, 한국전력, 비에이치, KODEX 코스닥150) 기본 적재 완료.")
+            except Exception as e:
+                print(f"⚠️ [DB] 초기 포지션 시딩 예외: {e}")
         except Exception as e:
             print(f"❌ Pool 생성 오류: {e}")
             return
@@ -312,16 +333,16 @@ class DatabaseManager:
 
 
     async def save_portfolio(self, positions_dict, current_prices=None):
-        """현재 봇이 관리 중인 포트폴리오를 DB에 저장 (대시보드 표출용)"""
+        """현재 봇이 관리 중인 포트폴리오를 DB에 저장 (대시보드 표출용, 빈 dict 시 이전 데이터 임의 삭제 방어)"""
         if not self.pool: return
         try:
             current_prices = current_prices or {}
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute('DELETE FROM portfolio')
                     if positions_dict:
+                        await cursor.execute('DELETE FROM portfolio')
                         sql = '''
-                            INSERT INTO portfolio (code, name, qty, buy_price, current_price) 
+                            INSERT INTO portfolio (code, name, qty, buy_price, current_price)
                             VALUES (%s, %s, %s, %s, %s)
                         '''
                         data = []
@@ -330,7 +351,7 @@ class DatabaseManager:
                             data.append((code, info['name'], info['qty'], info['buy_price'], c_price))
                         if data:
                             await cursor.executemany(sql, data)
-                await conn.commit()
+                        await conn.commit()
         except Exception as e:
             print(f"Portfolio 저장 에러: {e}")
 

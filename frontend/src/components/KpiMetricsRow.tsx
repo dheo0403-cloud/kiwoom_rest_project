@@ -7,7 +7,7 @@ interface KpiMetricsRowProps {
   colorMode: 'KRX' | 'GLOBAL';
 }
 
-export const KpiMetricsRow: React.FC<KpiMetricsRowProps> = React.memo(({ portfolio, colorMode }) => {
+const KpiMetricsRowComponent: React.FC<KpiMetricsRowProps> = ({ portfolio, colorMode }) => {
   const totalAsset = portfolio.total_asset || 0;
   const currentCapital = portfolio.current_capital || 0;
   const investedCapital = portfolio.invested_capital || (totalAsset - currentCapital);
@@ -140,6 +140,17 @@ export const KpiMetricsRow: React.FC<KpiMetricsRowProps> = React.memo(({ portfol
         </div>
       </div>
     </div>
+  );
+};
+
+export const KpiMetricsRow = React.memo(KpiMetricsRowComponent, (prev, next) => {
+  return (
+    prev.portfolio.total_asset === next.portfolio.total_asset &&
+    prev.portfolio.current_capital === next.portfolio.current_capital &&
+    prev.portfolio.unrealized_pnl === next.portfolio.unrealized_pnl &&
+    prev.portfolio.total_yield_rate === next.portfolio.total_yield_rate &&
+    (prev.portfolio.positions?.length || 0) === (next.portfolio.positions?.length || 0) &&
+    prev.colorMode === next.colorMode
   );
 });
 KpiMetricsRow.displayName = 'KpiMetricsRow';
