@@ -387,63 +387,74 @@ class AsyncKiwoomClient:
         return best_data
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 보유 포지션 조회 (4대 TR 다중 스캐너: kt00005 체결잔고 -> kt00018 계좌평가 -> kt00004 잔고내역)"""
+        """계좌 잔고 및 보유 포지션 조회 (전체 보유종목 qry_tp="0" 최우선 4대 TR 다중 스캐너)"""
         url = f"{self.base_url}/api/dostk/acnt"
         merged_data: Dict[str, Any] = {}
         has_pos = False
 
-        # 1차 시도: kt00005 (체결잔고 - qry_tp 없는 순수 계좌 페이로드)
-        payload_kt00005 = {
-            "dmst_stex_tp": "KRX",
-            "accNo": self.account,
-            "accPwd": self.password
-        }
-        data5, _ = await self.request("kt00005", url, payload_kt00005, priority=priority)
-        if data5 and isinstance(data5, dict):
-            merged_data.update(data5)
-            for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
-                if k in data5 and isinstance(data5[k], list) and data5[k]:
-                    has_pos = True
-                    break
+        def check_has_positions(d: Dict[str, Any]) -> bool:
+            if not isinstance(d, dict) or d.get('http_status'):
+                return False
+            for k in ['output2', 'Output2', 'output_2', 'acnt_dtl_list', 'holdings', 'stk_list', 'list', 'output']:
+                lst = d.get(k)
+                if isinstance(lst, list) and len(lst) > 0:
+                    for item in lst:
+                        if isinstance(item, dict):
+                            # 종목 식별 키 및 수량 확인
+                            for ck in ['stk_cd', 'pdno', 'code', 'expcode', 'mksc_shrn_iscd', 'item_cd', '종목코드']:
+                                if item.get(ck) and str(item[ck]).strip():
+                                    return True
+            return False
 
-        # 2차 시도: kt00018 (계좌평가잔고개별합산 / OPW00018 - 실전 영웅문 표준 잔고 TR)
-        if not has_pos:
-            payload_kt00018 = {
+        # 1차 시도: kt00004 (계좌평가잔고내역 - qry_tp="0" 전체 보유종목 최우선)
+        for q_tp in ["0", "1", "2"]:
+            payload_kt00004 = {
                 "dmst_stex_tp": "KRX",
                 "accNo": self.account,
                 "accPwd": self.password,
-                "qry_tp": "0"
+                "qry_tp": q_tp
             }
-            data18, _ = await self.request("kt00018", url, payload_kt00018, priority=priority)
-            if data18 and isinstance(data18, dict):
-                for k, v in data18.items():
+            data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
+            if data4 and isinstance(data4, dict) and not data4.get('http_status'):
+                for k, v in data4.items():
                     if k not in merged_data or (isinstance(v, list) and v):
                         merged_data[k] = v
-                for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
-                    if k in data18 and isinstance(data18[k], list) and data18[k]:
-                        has_pos = True
-                        break
+                if check_has_positions(data4):
+                    has_pos = True
+                    break
 
-        # 3차 시도: kt00004 (계좌평가잔고내역 with qry_tp="1" 및 qry_tp="0")
+        # 2차 시도: kt00018 (계좌평가잔고개별합산 / OPW00018 - qry_tp="0" 전체 보유종목)
         if not has_pos:
-            for q_tp in ["1", "0"]:
-                payload_kt00004 = {
+            for q_tp in ["0", "1"]:
+                payload_kt00018 = {
                     "dmst_stex_tp": "KRX",
                     "accNo": self.account,
                     "accPwd": self.password,
                     "qry_tp": q_tp
                 }
-                data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
-                if data4 and isinstance(data4, dict):
-                    for k, v in data4.items():
+                data18, _ = await self.request("kt00018", url, payload_kt00018, priority=priority)
+                if data18 and isinstance(data18, dict) and not data18.get('http_status'):
+                    for k, v in data18.items():
                         if k not in merged_data or (isinstance(v, list) and v):
                             merged_data[k] = v
-                    for k in ['output2', 'Output2', 'list', 'acnt_dtl_list', 'holdings', 'output']:
-                        if k in data4 and isinstance(data4[k], list) and data4[k]:
-                            has_pos = True
-                            break
-                if has_pos:
-                    break
+                    if check_has_positions(data18):
+                        has_pos = True
+                        break
+
+        # 3차 시도: kt00005 (체결잔고 - 순수 페이로드 및 qry_tp="0")
+        if not has_pos:
+            for p_load in [
+                {"dmst_stex_tp": "KRX", "accNo": self.account, "accPwd": self.password},
+                {"dmst_stex_tp": "KRX", "accNo": self.account, "accPwd": self.password, "qry_tp": "0"}
+            ]:
+                data5, _ = await self.request("kt00005", url, p_load, priority=priority)
+                if data5 and isinstance(data5, dict) and not data5.get('http_status'):
+                    for k, v in data5.items():
+                        if k not in merged_data or (isinstance(v, list) and v):
+                            merged_data[k] = v
+                    if check_has_positions(data5):
+                        has_pos = True
+                        break
 
         return merged_data if merged_data else None
 

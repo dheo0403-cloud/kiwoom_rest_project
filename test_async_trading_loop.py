@@ -846,6 +846,92 @@ async def test_actual_account_balance_with_images_data():
 
     print("  ✅ 사용자 실계좌 데이터(D+2 예수금 82,819원 / 보유 3종목 비에이치·펄어비스·파인엠텍 / 총자산 147,349원) 정밀 검증 100% 통과")
 
+async def test_single_multi_record_split_and_zero_ccls_qty_handling():
+    """13. 싱글/멀티 레코드 분리 및 ccls_qty_sum='0' (당일 미체결/기존 보유) 엣지 케이스 정밀 검증"""
+    print("▶ [Test 13] 싱글/멀티 레코드 분리 및 ccls_qty_sum='0' 환경에서 3개 보유종목 100% 파싱 검증...")
+
+    # ccls_qty_sum이 0이거나 output1에 요약 정보만 들어있는 상황 재현
+    class SingleMultiRecordMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "147069",            # 총평가금액 (147,069원)
+                    "tot_hldg_qty": "3",                 # 총보유수량 요약 (종목 리스트로 오인 금지)
+                    "dnca_tot_amt": "82819",              # D+2 예수금 (82,819원)
+                    "d2_deposit": "82819",
+                    "ccls_qty_sum": "0",                 # 당일 체결수량합 0
+                    "tot_evlu_pfls_amt": "2993"
+                }],
+                "output2": [
+                    {
+                        "stk_cd": "090460", "stk_nm": "비에이치", "ccls_qty_sum": "0", "hldg_qty": "1",
+                        "pchs_avg_pric": "19520", "prpr": "19630", "evlu_amt": "19630"
+                    },
+                    {
+                        "stk_cd": "263750", "stk_nm": "펄어비스", "ccls_qty_sum": "0", "ord_psbl_qty": "1",
+                        "pchs_avg_pric": "33600", "prpr": "35600", "evlu_amt": "35600"
+                    },
+                    {
+                        "stk_cd": "441270", "stk_nm": "파인엠텍", "ccls_qty_sum": "0", "hold_qty": "1",
+                        "pchs_avg_pric": "8160", "prpr": "9170", "evlu_amt": "9170"
+                    }
+                ]
+            }
+
+    mock_client = SingleMultiRecordMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    assert snap['stock_count'] == 3, f"3개 보유 종목이 정상 인식되어야 합니다. (실제: {snap['stock_count']}개)"
+    assert snap['current_capital'] == 82819.0, f"D+2 예수금은 82,819원이어야 합니다. (실제: {snap['current_capital']})"
+    assert snap['total_asset'] >= 147069.0, f"총 평가자산은 147,069원이어야 합니다. (실제: {snap['total_asset']})"
+    print("  ✅ 싱글/멀티 레코드 분리 및 ccls_qty_sum='0' 환경 3개 보유종목 파싱 100% 통과")
+
+async def test_korean_keys_parsing():
+    """14. 한글 필드명 키움 TR 스키마(종목코드, 보유수량, 매입단가, 현재가) 파싱 검증"""
+    print("▶ [Test 14] 한글 필드명 키움 TR 스키마 100% 파싱 검증...")
+
+    class KoreanSchemaMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "총평가금액": "147069",
+                    "D+2예수금": "82819",
+                    "주문가능금액": "82819"
+                }],
+                "output2": [
+                    {
+                        "종목코드": "090460", "종목명": "비에이치", "보유수량": "1",
+                        "매입단가": "19520", "현재가": "19630"
+                    },
+                    {
+                        "종목코드": "263750", "종목명": "펄어비스", "보유수량": "1",
+                        "매입단가": "33600", "현재가": "35600"
+                    },
+                    {
+                        "종목코드": "441270", "종목명": "파인엠텍", "보유수량": "1",
+                        "매입단가": "8160", "현재가": "9170"
+                    }
+                ]
+            }
+
+    mock_client = KoreanSchemaMockClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    assert snap['stock_count'] == 3, f"한글 필드명 스키마에서 3개 종목이 파싱되어야 합니다. (실제: {snap['stock_count']})"
+    assert snap['current_capital'] == 82819.0
+    assert snap['total_asset'] >= 147069.0
+    print("  ✅ 한글 필드명 키움 TR 스키마 파싱 100% 통과")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -862,8 +948,10 @@ async def main():
     await test_actual_account_balance_and_4_holdings_sync()
     await test_dynamic_watchlist_and_full_quant_workflow()
     await test_actual_account_balance_with_images_data()
+    await test_single_multi_record_split_and_zero_ccls_qty_handling()
+    await test_korean_keys_parsing()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 14개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

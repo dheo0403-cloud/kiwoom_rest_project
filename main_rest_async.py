@@ -358,6 +358,24 @@ class AsyncTradingBot:
         if balance_data:
             await self.portfolio.sync_positions(balance_data)
 
+        # 포지션이 0개이고 DB에 저장된 포지션이 있는 경우 자가 복구 검사
+        if len(self.portfolio.positions) == 0 and self.db and hasattr(self.db, 'get_portfolio_positions'):
+            try:
+                db_pos = await self.db.get_portfolio_positions()
+                if db_pos:
+                    for p in db_pos:
+                        code = p.get('code')
+                        name = p.get('name') or code
+                        qty = int(p.get('qty', 0))
+                        buy_p = float(p.get('buy_price', 0))
+                        cur_p = float(p.get('current_price') or buy_p)
+                        if code and qty > 0:
+                            await self.portfolio.add_position(code, name, qty, buy_p)
+                            await self.portfolio.update_current_price(code, cur_p)
+                    print(f"🛡️ [포지션 자가 복구] DB로부터 {len(db_pos)}개 보유 종목 복원 완료: {[p.get('name', p.get('code')) for p in db_pos]}")
+            except Exception as e:
+                print(f"⚠️ [포지션 DB 복구 예외] {e}")
+
         # 보유 주식 평가액 계산
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
@@ -393,37 +411,6 @@ class AsyncTradingBot:
         print(f"  ├─ 대용금(보유주식담보): {int(parsed_sub_amt):,}원" if parsed_sub_amt else "  ├─ 대용금: None")
         print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
         print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
-
-        # 포트폴리오 관리자에 독립 필드로 동기화
-        await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
-
-        # 4. DB 저장 및 스냅샷 확인
-        snap = await self.portfolio.get_snapshot()
-        if self.highest_total_asset == 0.0 or snap['total_asset'] > self.highest_total_asset:
-            self.highest_total_asset = snap['total_asset']
-
-        # MDD 셧다운 검사 (-5% 초과 하락 시 신규 매수 차단)
-        if self.highest_total_asset > 0:
-            mdd = ((snap['total_asset'] - self.highest_total_asset) / self.highest_total_asset) * 100.0
-            if mdd <= -5.0 and not self.mdd_shutdown:
-                self.mdd_shutdown = True
-                await self.db.log_message("WARNING", f"🚨 [서킷 브레이커] 계좌 MDD {mdd:.2f}% 도달. 당일 신규 매수를 중단합니다.")
-                print(f"🚨 [서킷 브레이커] 당일 최고 자산 대비 -5% 초과 하락! (MDD: {mdd:.2f}%) 신규 매수 중단.")
-
-        await self.db.save_portfolio(self.portfolio.positions)
-        await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
-
-        # 상세 계좌 싱크 및 예수금 정산 로깅
-        sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
-        if unclosed_cnt > 0:
-            sync_log += f" (미체결: {unclosed_cnt}건)"
-        print(sync_log)
-
-        if snap['total_asset'] != snap['current_capital'] and snap['stock_count'] == 0:
-            diff = snap['total_asset'] - snap['current_capital']
-            diff_msg = f"💰 [예수금 정산] 총 평가자산: {int(snap['total_asset']):,}원 / D+2 주문가능: {int(snap['current_capital']):,}원 확정 (증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
-            print(diff_msg)
-            await self.db.log_message("INFO", diff_msg)
 
         # 포트폴리오 관리자에 독립 필드로 동기화
         await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
