@@ -114,13 +114,35 @@ class AsyncPortfolioManager:
             buy_p_keys = [
                 'pchs_avg_pric', 'buy_price', 'pchs_price', 'avg_buy_price',
                 'buy_uv', 'pchs_unit_amt', 'pchs_avg_amt', 'avg_pchs_price',
-                'pchs_prc', 'buy_prc', 'pchs_amt_smtl_amt',
-                '매입단가', '매입평균가', '평균매입가', '매입가', '평균단가'
+                'pchs_prc', 'buy_prc', 'ccls_avg_pric', 'ccls_avg_prc', 'ccls_prc',
+                'ccls_uv', 'pchs_uv', 'ord_uv', 'pur_prc', 'pur_avg_prc',
+                'pur_price', 'pur_avg_price', 'thst_buy_uv', 'bf_buy_uv',
+                'avg_prc', 'avg_price', 'avg_cost', 'unit_price', 'unit_cost',
+                'cost_price', 'cost_basis',
+                '매입단가', '매입평균가', '평균매입가', '매입가', '평균단가',
+                '매수가', '매수단가', '체결평균가', '체결가', '체결단가', '취득단가', '취득가', '평단가', '평단'
+            ]
+            pchs_amt_keys = [
+                'pchs_amt', 'buy_amt', 'pchs_amt_smtl_amt', 'tot_pchs_amt', 'tot_buy_amt',
+                'thst_pchs_amt', 'bf_pchs_amt', 'ccls_amt', 'pur_amt', 'hldg_amt', 'jango_amt',
+                '매입금액', '총매입금액', '매수금액', '체결금액', '취득금액', '매입금'
             ]
             cur_p_keys = [
                 'prpr', 'current_price', 'stck_prpr', 'cur_prc', 'clpr',
                 'price', 'now_prc', 'stck_clpr',
-                '현재가', '종가', '현재가격', '현재시세'
+                '현재가', '종가', '현재가격', '현재시세', '현재가액'
+            ]
+            evlu_amt_keys = [
+                'evlu_amt', 'eval_amt', 'evlu_amt_smtl_amt', 'tot_evlu_amt', 'stck_evlu_amt',
+                '평가금액', '총평가금액', '평가금'
+            ]
+            pnl_keys = [
+                'evlu_pfls_amt', 'pnl', 'evlt_pfls_amt', 'tot_evlu_pfls_amt', 'pfls_amt',
+                '평가손익', '손익금액', '평가손익금액'
+            ]
+            rt_keys = [
+                'evlu_pfls_rt', 'yield_rate', 'evlt_pfls_rt', 'tot_pnl_rt', 'pnl_rt', 'pfls_rt',
+                '수익률', '평가손익률', '손익률'
             ]
 
             def extract_valid_code(d: Dict[str, Any]) -> str:
@@ -217,7 +239,7 @@ class AsyncPortfolioManager:
                 if not code:
                     continue
 
-                # 보유수량 파싱 (양수 수량을 찾을 때까지 순회)
+                # 1) 보유수량 파싱 (양수 수량을 찾을 때까지 순회)
                 qty = 0
                 for qk in qty_keys:
                     if item.get(qk) is not None:
@@ -230,20 +252,7 @@ class AsyncPortfolioManager:
                         except (ValueError, TypeError):
                             pass
 
-                # 매입평균단가 파싱 (0 초과 단가를 찾을 때까지 순회)
-                buy_price = 0.0
-                for bk in buy_p_keys:
-                    if item.get(bk) is not None:
-                        bp_str = str(item.get(bk)).strip().replace(',', '').replace('+', '').replace('-', '')
-                        try:
-                            bp_parsed = float(bp_str)
-                            if bp_parsed > 0:
-                                buy_price = bp_parsed
-                                break
-                        except (ValueError, TypeError):
-                            pass
-
-                # 현재가 파싱 (0 초과 현재가를 찾을 때까지 순회)
+                # 2) 현재가 파싱 (0 초과 현재가를 찾을 때까지 순회)
                 current_price = 0.0
                 for ck in cur_p_keys:
                     if item.get(ck) is not None:
@@ -256,51 +265,126 @@ class AsyncPortfolioManager:
                         except (ValueError, TypeError):
                             pass
 
-                # 평가금액 및 매입금액 기반 수량/단가 역산 안전 가드
-                evlu_amt_val = item.get('evlu_amt') or item.get('eval_amt') or item.get('evlu_amt_smtl_amt') or item.get('평가금액') or 0
-                evlu_amt_clean = str(evlu_amt_val).strip().replace(',', '').replace('+', '').replace('-', '')
-                try:
-                    evlu_amt = float(evlu_amt_clean)
-                except (ValueError, TypeError):
-                    evlu_amt = 0.0
+                # 3) 평가금액 및 매입금액 파싱
+                evlu_amt = 0.0
+                for ek in evlu_amt_keys:
+                    if item.get(ek) is not None:
+                        ek_clean = str(item.get(ek)).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            ek_parsed = float(ek_clean)
+                            if ek_parsed > 0:
+                                evlu_amt = ek_parsed
+                                break
+                        except (ValueError, TypeError):
+                            pass
 
-                pchs_amt_val = item.get('pchs_amt') or item.get('buy_amt') or item.get('pchs_amt_smtl_amt') or item.get('매입금액') or 0
-                pchs_amt_clean = str(pchs_amt_val).strip().replace(',', '').replace('+', '').replace('-', '')
-                try:
-                    pchs_amt = float(pchs_amt_clean)
-                except (ValueError, TypeError):
-                    pchs_amt = 0.0
+                pchs_amt = 0.0
+                for pk in pchs_amt_keys:
+                    if item.get(pk) is not None:
+                        pk_clean = str(item.get(pk)).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            pk_parsed = float(pk_clean)
+                            if pk_parsed > 0:
+                                pchs_amt = pk_parsed
+                                break
+                        except (ValueError, TypeError):
+                            pass
 
+                # 4) 평가손익 및 수익률 추출
+                item_pnl: Optional[float] = None
+                for pnl_k in pnl_keys:
+                    if item.get(pnl_k) is not None:
+                        pnl_clean = str(item.get(pnl_k)).strip().replace(',', '')
+                        try:
+                            item_pnl = float(pnl_clean)
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                item_yield_rate: Optional[float] = None
+                for rt_k in rt_keys:
+                    if item.get(rt_k) is not None:
+                        rt_clean = str(item.get(rt_k)).strip().replace(',', '').replace('%', '')
+                        try:
+                            item_yield_rate = float(rt_clean)
+                            break
+                        except (ValueError, TypeError):
+                            pass
+
+                # 5) 수량 역산 안전 가드 (수량이 0 이하일 때 평가금액/매입금액 기반 산출)
                 if qty <= 0 and evlu_amt > 0 and current_price > 0:
                     qty = int(round(evlu_amt / current_price))
-                elif qty <= 0 and pchs_amt > 0 and buy_price > 0:
-                    qty = int(round(pchs_amt / buy_price))
+                elif qty <= 0 and pchs_amt > 0 and current_price > 0:
+                    qty = int(round(pchs_amt / current_price))
 
                 if qty <= 0:
                     continue
 
-                if buy_price <= 0 and qty > 0 and pchs_amt > 0:
-                    buy_price = pchs_amt / qty
+                # 6) 매수가(매입평균단가) 6단계 다중 방어 해석 알고리즘
+                buy_price = 0.0
 
-                if current_price <= 0 and qty > 0 and evlu_amt > 0:
-                    current_price = evlu_amt / qty
+                # Layer 1: 직접 단가 키 파싱 (1원 이하 무효값 제외)
+                for bk in buy_p_keys:
+                    if item.get(bk) is not None:
+                        bp_str = str(item.get(bk)).strip().replace(',', '').replace('+', '').replace('-', '')
+                        try:
+                            bp_parsed = float(bp_str)
+                            if bp_parsed > 1.0:
+                                buy_price = bp_parsed
+                                break
+                        except (ValueError, TypeError):
+                            pass
 
-                if current_price <= 0:
+                # Layer 2: 총 매입금액 / 수량 역산 (pchs_amt / qty)
+                if buy_price <= 1.0 and pchs_amt > 0 and qty > 0:
+                    cand_bp = pchs_amt / qty
+                    if cand_bp > 1.0:
+                        buy_price = cand_bp
+
+                # Layer 3: 평가금액 - 평가손익 기반 역산 ((evlu_amt - pnl) / qty)
+                if buy_price <= 1.0 and item_pnl is not None and qty > 0:
+                    base_eval = evlu_amt if evlu_amt > 0 else (current_price * qty)
+                    if base_eval > 0:
+                        inferred_pchs_amt = base_eval - item_pnl
+                        if inferred_pchs_amt > 0:
+                            cand_bp = inferred_pchs_amt / qty
+                            if cand_bp > 1.0:
+                                buy_price = cand_bp
+
+                # Layer 4: 현재가 / (1 + 수익률) 역산 (current_price / (1 + yield/100))
+                if buy_price <= 1.0 and current_price > 1.0 and item_yield_rate is not None and item_yield_rate != 0:
+                    try:
+                        denom = 1.0 + (item_yield_rate / 100.0)
+                        if denom > 0:
+                            inferred_bp = current_price / denom
+                            if inferred_bp > 1.0:
+                                buy_price = round(inferred_bp, 2)
+                    except ZeroDivisionError:
+                        pass
+
+                # Layer 5: 직전 메모리 포지션(prev_positions)의 정상 매수가 상속
+                if buy_price <= 1.0 and code in prev_positions:
+                    prev_bp = prev_positions[code].get('buy_price', 0)
+                    if prev_bp > 1.0:
+                        buy_price = prev_bp
+
+                # Layer 6: 현재가로 안전 폴백 (절대 1원/0원으로 표출되지 않도록 방어)
+                if buy_price <= 1.0 and current_price > 1.0:
+                    buy_price = current_price
+
+                # 현재가 폴백
+                if current_price <= 0 and buy_price > 0:
                     current_price = buy_price
+                elif current_price <= 0:
+                    current_price = 1.0
 
-                # 평가손익 및 수익률 추출
-                pnl_val = item.get('evlu_pfls_amt') or item.get('pnl') or item.get('evlt_pfls_amt') or item.get('평가손익') or 0
-                pnl_clean = str(pnl_val).strip().replace(',', '')
-                try:
-                    item_pnl = float(pnl_clean)
-                except (ValueError, TypeError):
+                if buy_price <= 0:
+                    buy_price = current_price
+
+                # 손익 및 수익률 보정 산출
+                if item_pnl is None:
                     item_pnl = (current_price - buy_price) * qty
-
-                rt_val = item.get('evlu_pfls_rt') or item.get('yield_rate') or item.get('evlt_pfls_rt') or item.get('수익률') or 0
-                rt_clean = str(rt_val).strip().replace(',', '').replace('%', '')
-                try:
-                    item_yield_rate = float(rt_clean)
-                except (ValueError, TypeError):
+                if item_yield_rate is None:
                     item_yield_rate = ((current_price / buy_price) - 1.0) * 100.0 if buy_price > 0 else 0.0
 
                 name = ''
@@ -351,12 +435,17 @@ class AsyncPortfolioManager:
                 name = p.get('name') or code
                 qty = int(p.get('qty', 0))
                 buy_p = float(p.get('buy_price', 0))
-                cur_p = float(p.get('current_price') or buy_p)
+                cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
+                # DB 자가 치유: 과거 1원/0원으로 저장된 경우 현재가(또는 pnl/yield_rate 역산)로 안전 보정
+                if buy_p <= 1.0 and cur_p > 1.0:
+                    buy_p = cur_p
+                elif cur_p <= 0 and buy_p > 0:
+                    cur_p = buy_p
                 highest_p = float(p.get('highest_price') or max(buy_p, cur_p))
                 sell_stage = int(p.get('sell_stage', 0))
                 if code and qty > 0:
-                    pnl = (cur_p - buy_p) * qty
-                    yield_rate = ((cur_p / buy_p) - 1.0) * 100.0 if buy_p > 0 else 0.0
+                    pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
+                    yield_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1.0) * 100.0 if buy_p > 0 else 0.0)
                     restored[code] = {
                         'name': name,
                         'qty': qty,

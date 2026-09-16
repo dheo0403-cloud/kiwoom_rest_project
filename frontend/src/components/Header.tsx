@@ -158,9 +158,15 @@ const HeaderComponent: React.FC<HeaderProps> = ({
                 </div>
               ) : (
                 positions.map((pos) => {
-                  const pnl = pos.pnl || (pos.current_price - pos.buy_price) * pos.qty;
+                  const rawBuyPrice = typeof pos.buy_price === 'number' ? pos.buy_price : parseFloat(String(pos.buy_price || 0));
+                  const rawCurPrice = typeof pos.current_price === 'number' ? pos.current_price : parseFloat(String(pos.current_price || 0));
+                  const buyPrice = rawBuyPrice > 1 ? rawBuyPrice : (rawCurPrice > 1 ? rawCurPrice : (rawBuyPrice > 0 ? rawBuyPrice : 0));
+                  const curPrice = rawCurPrice > 0 ? rawCurPrice : buyPrice;
+                  const pnl = pos.pnl !== undefined && !isNaN(pos.pnl) ? pos.pnl : ((curPrice - buyPrice) * pos.qty);
                   const isProfit = pnl >= 0;
-                  const yieldRate = pos.yield_rate || ((pos.current_price / pos.buy_price) - 1) * 100;
+                  const yieldRate = pos.yield_rate !== undefined && !isNaN(pos.yield_rate)
+                    ? pos.yield_rate
+                    : (buyPrice > 0 ? ((curPrice / buyPrice) - 1) * 100 : 0);
                   const pnlColor = isProfit
                     ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
                     : (colorMode === 'KRX' ? 'text-blue-400' : 'text-rose-400');
@@ -176,13 +182,13 @@ const HeaderComponent: React.FC<HeaderProps> = ({
                           <span className="text-[10px] text-slate-400">({pos.code})</span>
                         </div>
                         <div className="text-[11px] text-slate-400 mt-0.5">
-                          {pos.qty}주 @ {Math.round(pos.buy_price).toLocaleString()}원
+                          {pos.qty}주 @ {Math.round(buyPrice).toLocaleString()}원
                         </div>
                       </div>
 
                       <div className="text-right">
                         <div className="font-bold text-slate-200">
-                          {Math.round(pos.current_price).toLocaleString()}원
+                          {Math.round(curPrice).toLocaleString()}원
                         </div>
                         <div className={`text-[11px] font-semibold ${pnlColor}`}>
                           {isProfit ? '+' : ''}{Math.round(pnl).toLocaleString()}원 ({isProfit ? '+' : ''}{yieldRate.toFixed(2)}%)

@@ -75,12 +75,17 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = ({
           </div>
         ) : (
           positions.map((pos) => {
-            const buyPrice = pos.buy_price || 1;
-            const curPrice = pos.current_price || buyPrice;
+            const rawBuyPrice = typeof pos.buy_price === 'number' ? pos.buy_price : parseFloat(String(pos.buy_price || 0));
+            const rawCurPrice = typeof pos.current_price === 'number' ? pos.current_price : parseFloat(String(pos.current_price || 0));
+            // 1원 표기 버그 방지 및 정밀 단가 복원: rawBuyPrice가 1 이하이고 현재가가 유효하면 현재가를 매수가 기본값으로 활용
+            const buyPrice = rawBuyPrice > 1 ? rawBuyPrice : (rawCurPrice > 1 ? rawCurPrice : (rawBuyPrice > 0 ? rawBuyPrice : 0));
+            const curPrice = rawCurPrice > 0 ? rawCurPrice : buyPrice;
             const qty = pos.qty || 0;
             const evalAmt = curPrice * qty;
-            const pnl = (curPrice - buyPrice) * qty;
-            const yieldRate = ((curPrice / buyPrice) - 1) * 100;
+            const pnl = pos.pnl !== undefined && !isNaN(pos.pnl) ? pos.pnl : ((curPrice - buyPrice) * qty);
+            const yieldRate = pos.yield_rate !== undefined && !isNaN(pos.yield_rate)
+              ? pos.yield_rate
+              : (buyPrice > 0 ? ((curPrice / buyPrice) - 1) * 100 : 0);
             const isProfit = pnl >= 0;
             const stage = pos.sell_stage || 0;
 

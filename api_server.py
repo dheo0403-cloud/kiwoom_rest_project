@@ -173,9 +173,14 @@ async def portfolio_broadcast_loop():
                                 for p in db_pos:
                                     qty = int(p.get('qty', 0))
                                     buy_p = float(p.get('buy_price', 0))
-                                    cur_p = float(p.get('current_price') or buy_p)
-                                    pnl = (cur_p - buy_p) * qty
-                                    y_rate = ((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0
+                                    cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
+                                    # 1원 표기 버그 방지: DB에 1원/0원으로 저장된 과거 이상값이 있다면 현재가로 자가 치유
+                                    if buy_p <= 1.0 and cur_p > 1.0:
+                                        buy_p = cur_p
+                                    elif cur_p <= 0 and buy_p > 0:
+                                        cur_p = buy_p
+                                    pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
+                                    y_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0)
                                     invested += buy_p * qty
                                     formatted_pos.append({
                                         "code": p.get('code', ''),
@@ -183,8 +188,8 @@ async def portfolio_broadcast_loop():
                                         "qty": qty,
                                         "buy_price": buy_p,
                                         "current_price": cur_p,
-                                        "highest_price": cur_p,
-                                        "sell_stage": 1,
+                                        "highest_price": float(p.get('highest_price') or cur_p),
+                                        "sell_stage": int(p.get('sell_stage', 1)),
                                         "pnl": pnl,
                                         "yield_rate": round(y_rate, 2),
                                         "eval_amt": cur_p * qty
@@ -385,9 +390,14 @@ async def get_portfolio():
                     for p in db_pos:
                         qty = int(p.get('qty', 0))
                         buy_p = float(p.get('buy_price', 0))
-                        cur_p = float(p.get('current_price') or buy_p)
-                        pnl = (cur_p - buy_p) * qty
-                        y_rate = ((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0
+                        cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
+                        # 1원 표기 버그 방지: DB에 1원/0원으로 저장된 과거 이상값이 있다면 현재가로 자가 치유
+                        if buy_p <= 1.0 and cur_p > 1.0:
+                            buy_p = cur_p
+                        elif cur_p <= 0 and buy_p > 0:
+                            cur_p = buy_p
+                        pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
+                        y_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0)
                         invested += buy_p * qty
                         formatted_pos.append({
                             "code": p.get('code', ''),
@@ -395,8 +405,8 @@ async def get_portfolio():
                             "qty": qty,
                             "buy_price": buy_p,
                             "current_price": cur_p,
-                            "highest_price": cur_p,
-                            "sell_stage": 1,
+                            "highest_price": float(p.get('highest_price') or cur_p),
+                            "sell_stage": int(p.get('sell_stage', 1)),
                             "pnl": pnl,
                             "yield_rate": round(y_rate, 2),
                             "eval_amt": cur_p * qty

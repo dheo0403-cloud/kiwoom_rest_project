@@ -181,7 +181,7 @@ class MockDatabaseManager:
         return None
 
     async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
-        return []
+        return getattr(self, 'portfolio', [])
 
     async def save_watchlist(self, codes: Any, name_map: Optional[Dict[str, str]] = None):
         name_map = name_map or {}
@@ -1014,6 +1014,89 @@ async def test_db_restore_positions_safety_without_cash_deduction():
     assert snap['total_asset'] >= 147069.0
     print("  ✅ DB 포지션 자가 복원 시 D+2 주문가능금액(82,819원) 보존 및 총자산(147,069원) 정합성 100% 검증")
 
+async def test_buy_price_multi_layer_inference_and_anti_1won_defense():
+    """17. 매수가(매입단가) 6단계 다중 방어 해석 및 '1원' 표기 버그 원천 방어 검증"""
+    print("▶ [Test 17] 매수가 6단계 다중 방어 해석(단가누락/매입금액역산/손익역산/수익률역산/자가치유) 검증...")
+
+    # Case A: pchs_avg_pric 누락되고 pchs_amt(매입금액)만 제공된 경우
+    class PchsAmtOnlyMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{"tot_evlu_amt": "147069", "dnca_tot_amt": "82819"}],
+                "output2": [
+                    {
+                        "stk_cd": "090460", "stk_nm": "비에이치", "hldg_qty": "2",
+                        "pchs_amt": "39040", "prpr": "20000", "evlu_amt": "40000"
+                        # pchs_avg_pric 필드 없음 -> pchs_amt / qty = 19,520원 산출
+                    }
+                ]
+            }
+
+    portfolio_a = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot_a = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=PchsAmtOnlyMockClient(), portfolio=portfolio_a, db=MockDatabaseManager())
+    await bot_a._sync_account_balance()
+    snap_a = await portfolio_a.get_snapshot()
+    pos_a = snap_a['positions'][0]
+    assert pos_a['buy_price'] == 19520.0, f"Case A 매수가격은 19,520원이어야 합니다. (실제: {pos_a['buy_price']}원)"
+    assert pos_a['buy_price'] != 1.0, "매수가가 1원으로 잘못 표출되면 안 됩니다."
+    print("  ✅ Case A: pchs_amt(39,040원)/qty(2주) 역산 매수가(19,520원) 검증 완료")
+
+    # Case B: 단가/매입금액 모두 누락되고 evlu_amt(40,000원) 및 evlu_pfls_amt(+960원)만 제공된 경우
+    class PnlOnlyMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{"tot_evlu_amt": "147069", "dnca_tot_amt": "82819"}],
+                "output2": [
+                    {
+                        "stk_cd": "263750", "stk_nm": "펄어비스", "hldg_qty": "1",
+                        "prpr": "35600", "evlu_amt": "35600", "evlu_pfls_amt": "2000"
+                        # (35600 - 2000) / 1 = 33,600원 역산
+                    }
+                ]
+            }
+
+    portfolio_b = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot_b = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=PnlOnlyMockClient(), portfolio=portfolio_b, db=MockDatabaseManager())
+    await bot_b._sync_account_balance()
+    snap_b = await portfolio_b.get_snapshot()
+    pos_b = snap_b['positions'][0]
+    assert pos_b['buy_price'] == 33600.0, f"Case B 매수가격은 33,600원이어야 합니다. (실제: {pos_b['buy_price']}원)"
+    print("  ✅ Case B: (evlu_amt 35,600원 - pnl 2,000원) 손익 역산 매수가(33,600원) 검증 완료")
+
+    # Case C: 단가/매입금액/손익 모두 누락되고 현재가(9,170원) 및 수익률(+12.38%)만 제공된 경우
+    class YieldRateOnlyMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{"tot_evlu_amt": "147069", "dnca_tot_amt": "82819"}],
+                "output2": [
+                    {
+                        "stk_cd": "441270", "stk_nm": "파인엠텍", "hldg_qty": "1",
+                        "prpr": "9170", "evlu_pfls_rt": "+12.38"
+                        # 9170 / (1 + 0.1238) = 8,159.81 -> 8,160원 근사 역산
+                    }
+                ]
+            }
+
+    portfolio_c = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    bot_c = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=YieldRateOnlyMockClient(), portfolio=portfolio_c, db=MockDatabaseManager())
+    await bot_c._sync_account_balance()
+    snap_c = await portfolio_c.get_snapshot()
+    pos_c = snap_c['positions'][0]
+    assert 8150.0 <= pos_c['buy_price'] <= 8170.0, f"Case C 매수가격은 8,160원 내외여야 합니다. (실제: {pos_c['buy_price']}원)"
+    print(f"  ✅ Case C: 현재가(9,170원) / (1 + 12.38%) 수익률 역산 매수가({pos_c['buy_price']}원) 검증 완료")
+
+    # Case D: 과거 DB에 1원/0원으로 오염된 데이터가 들어있을 때 restore_positions_from_db 자가 치유
+    portfolio_d = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    dirty_db_positions = [
+        {"code": "090460", "name": "비에이치", "qty": 1, "buy_price": 1.0, "current_price": 19630.0},
+        {"code": "263750", "name": "펄어비스", "qty": 1, "buy_price": 0.0, "current_price": 35600.0}
+    ]
+    await portfolio_d.restore_positions_from_db(dirty_db_positions)
+    snap_d = await portfolio_d.get_snapshot()
+    for p in snap_d['positions']:
+        assert p['buy_price'] > 1.0, f"DB 자가 치유 후 매수가는 1원 초과여야 합니다. (종목: {p['name']}, 매수가: {p['buy_price']})"
+    print("  ✅ Case D: DB 1원/0원 오염 데이터 현재가 기반 자가 치유 검증 완료")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1034,8 +1117,9 @@ async def main():
     await test_korean_keys_parsing()
     await test_kt00018_priority_and_isin_and_zero_padded_codes_parsing()
     await test_db_restore_positions_safety_without_cash_deduction()
+    await test_buy_price_multi_layer_inference_and_anti_1won_defense()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 16개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 17개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":
