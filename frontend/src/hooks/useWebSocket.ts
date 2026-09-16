@@ -26,17 +26,8 @@ export function useTradingWebSocket() {
   });
 
   const [lastDisplaySyncTime, setLastDisplaySyncTime] = useState<string>('');
-  const latestPortfolioRef = useRef<PortfolioSnapshot>(portfolio);
-  latestPortfolioRef.current = portfolio;
-
-  // 실시간 포트폴리오 변경 시 displayPortfolio 즉시 실시간 동기화
-  const updateBothStates = useCallback((newSnap: PortfolioSnapshot) => {
-    setPortfolio(newSnap);
-    setDisplayPortfolio(newSnap);
-    const now = new Date();
-    setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-  }, []);
-
+  const [isConnected, setIsConnected] = useState<boolean>(false);
+  const [latencyMs, setLatencyMs] = useState<number>(0);
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [botStatus, setBotStatus] = useState<BotStatus>({
     running: true,
@@ -47,23 +38,75 @@ export function useTradingWebSocket() {
     active_positions_count: 0,
     circuit_breaker_open: false
   });
-  const [isConnected, setIsConnected] = useState<boolean>(false);
-  const [latencyMs, setLatencyMs] = useState<number>(0);
+
+  const isConnectedRef = useRef<boolean>(false);
+  isConnectedRef.current = isConnected;
+
+  // 두 포트폴리오 스냅샷의 동일성 비교 (플리커링 및 불필요한 DOM 리렌더링 방지)
+  const isSnapshotEqual = (a: PortfolioSnapshot, b: PortfolioSnapshot): boolean => {
+    if (a.total_asset !== b.total_asset) return false;
+    if (a.current_capital !== b.current_capital) return false;
+    if (a.invested_capital !== b.invested_capital) return false;
+    if (a.stock_count !== b.stock_count) return false;
+    if (a.unrealized_pnl !== b.unrealized_pnl) return false;
+    if (a.total_yield_rate !== b.total_yield_rate) return false;
+    const aPos = a.positions || [];
+    const bPos = b.positions || [];
+    if (aPos.length !== bPos.length) return false;
+    for (let i = 0; i < aPos.length; i++) {
+      if (aPos[i].code !== bPos[i].code) return false;
+      if (aPos[i].qty !== bPos[i].qty) return false;
+      if (aPos[i].current_price !== bPos[i].current_price) return false;
+      if (aPos[i].buy_price !== bPos[i].buy_price) return false;
+    }
+    return true;
+  };
+
+  // 실시간 포트폴리오 변경 시 실제 수치 변경이 있을 때만 안전 동기화
+  const updateBothStates = useCallback((newSnap: PortfolioSnapshot) => {
+    setPortfolio(prev => {
+      if (isSnapshotEqual(prev, newSnap)) return prev;
+      return newSnap;
+    });
+    setDisplayPortfolio(prev => {
+      if (isSnapshotEqual(prev, newSnap)) return prev;
+      return newSnap;
+    });
+    const now = new Date();
+    setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+  }, []);
 
   const portWsRef = useRef<WebSocket | null>(null);
   const logWsRef = useRef<WebSocket | null>(null);
 
-  // REST API 초기 데이터 및 폴백 동기화
+  // REST API 초기 데이터 및 폴백 동기화 (WebSocket 활성화 중에는 상태 경합 방지를 위해 REST 포트폴리오 덮어쓰기 스킵)
   const fetchRestData = useCallback(async () => {
     try {
-      const [portRes, statusRes, watchRes, logsRes] = await Promise.allSettled([
-        fetch(getApiUrl('/portfolio')),
+      const isWsActive = isConnectedRef.current;
+      const fetchList: Promise<any>[] = [
         fetch(getApiUrl('/status')),
         fetch(getApiUrl('/watchlist')),
         fetch(getApiUrl('/logs?limit=100'))
-      ]);
+      ];
 
-      if (portRes.status === 'fulfilled' && portRes.value.ok) {
+      // WebSocket이 끊겼거나 초기 로드일 때만 REST /portfolio를 폴백으로 요청
+      if (!isWsActive) {
+        fetchList.unshift(fetch(getApiUrl('/portfolio')));
+      }
+
+      const results = await Promise.allSettled(fetchList);
+      let portRes: PromiseSettledResult<any> | null = null;
+      let statusRes: PromiseSettledResult<any>;
+      let watchRes: PromiseSettledResult<any>;
+      let logsRes: PromiseSettledResult<any>;
+
+      if (!isWsActive) {
+        [portRes, statusRes, watchRes, logsRes] = results;
+      } else {
+        [statusRes, watchRes, logsRes] = results;
+      }
+
+      if (portRes && portRes.status === 'fulfilled' && portRes.value.ok) {
         const portData = await portRes.value.json();
         const rawPositions = Array.isArray(portData.positions) ? portData.positions : [];
         const newSnap: PortfolioSnapshot = {

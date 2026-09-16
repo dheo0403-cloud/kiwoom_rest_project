@@ -279,13 +279,13 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, portfolio, onClearLo
                 key={log.id || `log-${index}`}
                 className="flex items-start gap-2 px-1.5 py-0.5 rounded hover:bg-slate-900/60 transition group border-l-2 border-transparent hover:border-blue-500"
               >
-                {/* Index / Line Number */}
-                <span className="text-slate-600 select-none text-[9px] w-6 text-right shrink-0 pt-0.5">
+                {/* Index / Line Number - 다크 테마 접근성 개선 (선명한 text-slate-400 적용) */}
+                <span className="text-slate-400 select-none text-[10px] w-7 text-right shrink-0 pt-0.5 font-semibold font-mono tracking-tighter">
                   {index + 1}
                 </span>
 
-                {/* Timestamp */}
-                <span className="text-slate-500 shrink-0 text-[10px] pt-0.5">
+                {/* Timestamp - 다크 테마 가독성 개선 (선명한 text-slate-300 적용) */}
+                <span className="text-slate-300 shrink-0 text-[10px] pt-0.5 font-medium font-mono">
                   {log.timestamp}
                 </span>
 

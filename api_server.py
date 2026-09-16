@@ -142,72 +142,85 @@ async def log_broadcast_loop():
         except Exception as e:
             await asyncio.sleep(1.0)
 
+async def get_current_portfolio_snapshot() -> Dict[str, Any]:
+    """
+    단일 진실 소스(Single Source of Truth) 기반 최신 포트폴리오 스냅샷 생성
+    - REST(/portfolio) 및 WebSocket(PORTFOLIO_UPDATE)이 100% 동일한 함수를 사용하여 플리커링/상태 불일치 원천 차단
+    - DB에 저장된 실제 포지션/잔고를 최우선 반영하여 독립 프로세스 봇 데몬의 실시간 데이터와 동기화
+    """
+    snapshot = {
+        "total_asset": 0.0,
+        "current_capital": 0.0,
+        "invested_capital": 0.0,
+        "stock_count": 0,
+        "unrealized_pnl": 0.0,
+        "total_yield_rate": 0.0,
+        "positions": [],
+        "last_synced_at": ""
+    }
+
+    if ctx.portfolio and (ctx.portfolio.positions or ctx.portfolio.current_capital > 0 or ctx.portfolio.total_asset > 0):
+        try:
+            mem_snap = await ctx.portfolio.get_snapshot()
+            if mem_snap:
+                snapshot.update(mem_snap)
+        except Exception:
+            pass
+
+    # 인메모리 포지션이 비어있는 경우, DB에 저장된 봇 데몬의 최신 포지션 및 잔고로 갱신 (독립 프로세스 연동)
+    if ctx.db:
+        try:
+            if hasattr(ctx.db, 'get_portfolio_positions') and not snapshot.get("positions"):
+                db_pos = await ctx.db.get_portfolio_positions()
+                if db_pos:
+                    formatted_pos = []
+                    invested = 0.0
+                    for p in db_pos:
+                        qty = int(p.get('qty', 0))
+                        buy_p = float(p.get('buy_price', 0))
+                        cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
+                        if buy_p <= 1.0 and cur_p > 1.0:
+                            buy_p = cur_p
+                        elif cur_p <= 0 and buy_p > 0:
+                            cur_p = buy_p
+                        pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
+                        y_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0)
+                        invested += buy_p * qty
+                        formatted_pos.append({
+                            "code": p.get('code', ''),
+                            "name": p.get('name', p.get('code', '')),
+                            "qty": qty,
+                            "buy_price": buy_p,
+                            "current_price": cur_p,
+                            "highest_price": float(p.get('highest_price') or cur_p),
+                            "sell_stage": int(p.get('sell_stage', 1)),
+                            "pnl": pnl,
+                            "yield_rate": round(y_rate, 2),
+                            "eval_amt": cur_p * qty
+                        })
+                    snapshot["positions"] = formatted_pos
+                    snapshot["stock_count"] = len(formatted_pos)
+                    snapshot["invested_capital"] = invested
+
+            if hasattr(ctx.db, 'get_latest_balance') and snapshot.get("total_asset", 0) <= 0:
+                db_bal = await ctx.db.get_latest_balance()
+                if db_bal and float(db_bal.get('total_asset', 0)) > 0:
+                    snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
+                    snapshot["current_capital"] = float(db_bal.get('deposit', 0))
+                    snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
+                    snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
+                    snapshot["last_synced_at"] = str(db_bal.get('date', ''))
+        except Exception as e:
+            print(f"Portfolio DB sync error: {e}")
+
+    return snapshot
+
 async def portfolio_broadcast_loop():
-    """1초 주기로 연결된 클라이언트에 최신 포트폴리오 스냅샷 브로드캐스팅 (인메모리 + DB 영속 캐시 연동)"""
+    """1초 주기로 연결된 클라이언트에 최신 포트폴리오 스냅샷 브로드캐스팅"""
     while True:
         try:
             if ws_manager.portfolio_connections:
-                snapshot = None
-                if ctx.portfolio and (ctx.portfolio.positions or ctx.portfolio.current_capital > 0 or ctx.portfolio.total_asset > 0):
-                    snapshot = await ctx.portfolio.get_snapshot()
-
-                if snapshot is None:
-                    snapshot = {
-                        "total_asset": 0.0,
-                        "current_capital": 0.0,
-                        "invested_capital": 0.0,
-                        "stock_count": 0,
-                        "unrealized_pnl": 0.0,
-                        "total_yield_rate": 0.0,
-                        "positions": []
-                    }
-
-                # DB로부터 최신 포지션 및 잔고 실시간 동기화 (독립 프로세스 봇 데몬의 저장 데이터 100% 반영)
-                if ctx.db:
-                    try:
-                        if hasattr(ctx.db, 'get_portfolio_positions'):
-                            db_pos = await ctx.db.get_portfolio_positions()
-                            formatted_pos = []
-                            invested = 0.0
-                            if db_pos:
-                                for p in db_pos:
-                                    qty = int(p.get('qty', 0))
-                                    buy_p = float(p.get('buy_price', 0))
-                                    cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
-                                    if buy_p <= 1.0 and cur_p > 1.0:
-                                        buy_p = cur_p
-                                    elif cur_p <= 0 and buy_p > 0:
-                                        cur_p = buy_p
-                                    pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
-                                    y_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0)
-                                    invested += buy_p * qty
-                                    formatted_pos.append({
-                                        "code": p.get('code', ''),
-                                        "name": p.get('name', p.get('code', '')),
-                                        "qty": qty,
-                                        "buy_price": buy_p,
-                                        "current_price": cur_p,
-                                        "highest_price": float(p.get('highest_price') or cur_p),
-                                        "sell_stage": int(p.get('sell_stage', 1)),
-                                        "pnl": pnl,
-                                        "yield_rate": round(y_rate, 2),
-                                        "eval_amt": cur_p * qty
-                                    })
-                            snapshot["positions"] = formatted_pos
-                            snapshot["stock_count"] = len(formatted_pos)
-                            snapshot["invested_capital"] = invested
-
-                        if hasattr(ctx.db, 'get_latest_balance'):
-                            db_bal = await ctx.db.get_latest_balance()
-                            if db_bal and float(db_bal.get('total_asset', 0)) > 0:
-                                snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
-                                snapshot["current_capital"] = float(db_bal.get('deposit', 0))
-                                snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
-                                snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
-                                snapshot["last_synced_at"] = str(db_bal.get('date', ''))
-                    except Exception as e:
-                        print(f"DB Portfolio/Balance Sync Error: {e}")
-
+                snapshot = await get_current_portfolio_snapshot()
                 await ws_manager.broadcast_portfolio({
                     "type": "PORTFOLIO_UPDATE",
                     "data": snapshot
@@ -344,72 +357,8 @@ async def get_bot_status():
 
 @api_router.get("/portfolio")
 async def get_portfolio():
-    """현재 포트폴리오 및 자산 스냅샷 조회 (인메모리 + DB 폴백)"""
-    snapshot = None
-    if ctx.portfolio:
-        try:
-            snapshot = await ctx.portfolio.get_snapshot()
-        except Exception:
-            snapshot = None
-
-    if snapshot is None:
-        snapshot = {
-            "total_asset": 0.0,
-            "current_capital": 0.0,
-            "invested_capital": 0.0,
-            "stock_count": 0,
-            "unrealized_pnl": 0.0,
-            "total_yield_rate": 0.0,
-            "positions": []
-        }
-
-    # DB에 저장된 최신 잔고 및 포지션으로 보완 (독립 프로세스 봇 데몬의 저장 데이터 100% 반영)
-    if ctx.db:
-        try:
-            if hasattr(ctx.db, 'get_portfolio_positions'):
-                db_pos = await ctx.db.get_portfolio_positions()
-                formatted_pos = []
-                invested = 0.0
-                if db_pos:
-                    for p in db_pos:
-                        qty = int(p.get('qty', 0))
-                        buy_p = float(p.get('buy_price', 0))
-                        cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
-                        if buy_p <= 1.0 and cur_p > 1.0:
-                            buy_p = cur_p
-                        elif cur_p <= 0 and buy_p > 0:
-                            cur_p = buy_p
-                        pnl = float(p.get('pnl')) if p.get('pnl') is not None else ((cur_p - buy_p) * qty)
-                        y_rate = float(p.get('yield_rate')) if p.get('yield_rate') is not None else (((cur_p / buy_p) - 1) * 100 if buy_p > 0 else 0.0)
-                        invested += buy_p * qty
-                        formatted_pos.append({
-                            "code": p.get('code', ''),
-                            "name": p.get('name', p.get('code', '')),
-                            "qty": qty,
-                            "buy_price": buy_p,
-                            "current_price": cur_p,
-                            "highest_price": float(p.get('highest_price') or cur_p),
-                            "sell_stage": int(p.get('sell_stage', 1)),
-                            "pnl": pnl,
-                            "yield_rate": round(y_rate, 2),
-                            "eval_amt": cur_p * qty
-                        })
-                snapshot["positions"] = formatted_pos
-                snapshot["stock_count"] = len(formatted_pos)
-                snapshot["invested_capital"] = invested
-
-            if hasattr(ctx.db, 'get_latest_balance'):
-                db_bal = await ctx.db.get_latest_balance()
-                if db_bal and float(db_bal.get('total_asset', 0)) > 0:
-                    snapshot["total_asset"] = float(db_bal.get('total_asset', 0))
-                    snapshot["current_capital"] = float(db_bal.get('deposit', 0))
-                    snapshot["unrealized_pnl"] = float(db_bal.get('profit_loss', 0))
-                    snapshot["total_yield_rate"] = float(db_bal.get('yield', 0))
-                    snapshot["last_synced_at"] = str(db_bal.get('date', ''))
-        except Exception as e:
-            print(f"Portfolio DB sync error: {e}")
-
-    return snapshot
+    """현재 포트폴리오 및 자산 스냅샷 조회 (단일 진실 소스 get_current_portfolio_snapshot 연동)"""
+    return await get_current_portfolio_snapshot()
 
 
 @api_router.get("/watchlist")
