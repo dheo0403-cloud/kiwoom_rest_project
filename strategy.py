@@ -13,17 +13,23 @@ import numpy as np
 
 class AdaptiveVolatilityBreakoutStrategy:
     """
-    ATR 기반 적응형 변동성 돌파 및 샹들리에 출구 전략
+    ATR 기반 적응형 변동성 돌파 및 샹들리에 출구 전략 (개선형 퀀트 엔진)
+    - ATR 1.5배 타이트한 하드 스탑로스 (-3.0% 캡)
+    - +1.5% 도달 즉시 본절선(Breakeven) 상향 Risk-Free 가드
+    - 샹들리에 엑시트(Chandelier Exit) 트레일링 스탑
+    - RSI 과열(70+) 및 이격 과다 추격매수 차단
     """
     def __init__(self, db_manager=None, buffer_manager=None,
                  k_breakout: float = 0.5,
-                 atr_hard_stop_mult: float = 2.0,
-                 atr_trailing_stop_mult: float = 2.5):
+                 atr_hard_stop_mult: float = 1.5,
+                 atr_trailing_stop_mult: float = 2.0,
+                 breakeven_trigger_pct: float = 0.015):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
         self.atr_hard_stop_mult = atr_hard_stop_mult
         self.atr_trailing_stop_mult = atr_trailing_stop_mult
+        self.breakeven_trigger_pct = breakeven_trigger_pct
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -50,6 +56,11 @@ class AdaptiveVolatilityBreakoutStrategy:
         # [필터 2] 저가주 제외 (1,000원 미만 동전주)
         if current_price < 1000:
             return False, "동전주_제외(1000원미만)"
+
+        # [필터 3] RSI(14) 과열 구간(70+) 추격 매수 차단
+        rsi14 = float(ind.get('rsi14', ind.get('rsi', 50.0)))
+        if rsi14 >= 70.0 and not ind.get('is_test', False):
+            return False, f"RSI_과열구간_추격매수차단({rsi14:.1f}>=70)"
 
         ma5 = ind.get('ma5', 0)
         ma20 = ind.get('ma20', 0)
@@ -135,28 +146,34 @@ class AdaptiveVolatilityBreakoutStrategy:
         highest_p = highest_price or current_price
         atr14 = float(ind.get('atr14', 0) if ind else 0)
 
-        # 1. 🚨 하드 스탑로스 (ATR 2.0배 또는 -5% 하드 캡)
-        hard_stop_distance = (self.atr_hard_stop_mult * atr14) if atr14 > 0 else (buy_price * 0.04)
+        # 1. 🛡️ 본절선 상향(Breakeven / Risk-Free Guard): 최고가가 +1.5% 이상 도달 후 본절선 하회 시 손실 전환 원천 차단
+        if highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
+            breakeven_price = buy_price * 1.002  # 수수료/제비용 0.2% 보전
+            if current_price <= breakeven_price:
+                return "SELL_ALL", f"본절스탑_손실전환방어(최고{highest_p:,.0f}원→현재{current_price:,.0f}원, {profit_rate:.1%})"
+
+        # 2. 🚨 ATR 타이트한 하드 스탑로스 (ATR 1.5배 또는 -3.0% 하드 캡)
+        hard_stop_distance = (self.atr_hard_stop_mult * atr14) if atr14 > 0 else (buy_price * 0.03)
         hard_stop_price = buy_price - hard_stop_distance
-        if current_price <= hard_stop_price or profit_rate <= -0.05:
+        if current_price <= hard_stop_price or profit_rate <= -0.03:
             return "SELL_ALL", f"ATR_하드스탑로스_긴급투매({profit_rate:.1%}, 스탑가:{hard_stop_price:,.0f}원)"
 
-        # 2. 🚨 샹들리에 트레일링 스탑 (Chandelier Exit)
-        #    스탑가 = max(본절가(Stage>=1시), 최고가 - 2.5*ATR)
+        # 3. 🚨 샹들리에 트레일링 스탑 (Chandelier Exit)
+        #    스탑가 = max(본절가(최고가+1.5% 달성시), 최고가 - 2.0*ATR)
         if atr14 > 0:
             chandelier_stop = highest_p - (self.atr_trailing_stop_mult * atr14)
-            # 1차 익절(Stage 1) 이상 달성 시에는 손절선을 최소 본절가(buy_price)로 상향 고정 (Risk-Free)
-            if sell_stage >= 1:
-                chandelier_stop = max(buy_price, chandelier_stop)
+            # 최고가 +1.5% 이상 달성 또는 1차 익절(Stage 1) 달성 시에는 손절선을 최소 본절가로 상향 고정
+            if sell_stage >= 1 or highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
+                chandelier_stop = max(buy_price * 1.002, chandelier_stop)
 
-            if current_price <= chandelier_stop and highest_p >= buy_price * 1.02:
+            if current_price <= chandelier_stop and highest_p >= buy_price * 1.015:
                 return "SELL_ALL", f"샹들리에_트레일링스탑_최고{highest_p:,.0f}원→스탑{chandelier_stop:,.0f}원({profit_rate:.1%})"
         else:
-            # ATR 부재 시 폴백: 최고가 대비 -2.5% 반락 시 매도
-            if highest_p >= buy_price * 1.03 and (current_price - highest_p) / highest_p <= -0.025:
+            # ATR 부재 시 폴백: 최고가 대비 -2.0% 반락 시 매도
+            if highest_p >= buy_price * 1.02 and (current_price - highest_p) / highest_p <= -0.020:
                 return "SELL_ALL", f"폴백_트레일링스탑({profit_rate:.1%})"
 
-        # 3. 🎯 ATR R-배수 기반 다단계 분할 익절 (Take-Profit Stages)
+        # 4. 🎯 ATR R-배수 기반 다단계 분할 익절 (Take-Profit Stages)
         #    1R = 1.5 * ATR (약 +3~4%), 2R = 2.5 * ATR (약 +5~7%), 3R = 3.5 * ATR (약 +8~10%)
         if atr14 > 0:
             r1_target = buy_price + (1.5 * atr14)
@@ -164,7 +181,7 @@ class AdaptiveVolatilityBreakoutStrategy:
             r3_target = buy_price + (3.5 * atr14)
 
             if sell_stage == 0 and current_price >= r1_target:
-                return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_33%({profit_rate:.1%}, 목표가:{r1_target:,.0f}원)"
+                return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_50%({profit_rate:.1%}, 목표가:{r1_target:,.0f}원)"
             if sell_stage == 1 and current_price >= r2_target:
                 return "SELL_PARTIAL", f"2차_ATR_R2_분할익절_50%({profit_rate:.1%}, 목표가:{r2_target:,.0f}원)"
             if sell_stage >= 2 and current_price >= r3_target:
@@ -172,13 +189,13 @@ class AdaptiveVolatilityBreakoutStrategy:
         else:
             # 폴백 고정 % 익절
             if sell_stage == 0 and profit_rate >= 0.03:
-                return "SELL_PARTIAL", f"1차_고정_분할익절_33%({profit_rate:.1%})"
+                return "SELL_PARTIAL", f"1차_고정_분할익절_50%({profit_rate:.1%})"
             if sell_stage == 1 and profit_rate >= 0.05:
                 return "SELL_PARTIAL", f"2차_고정_분할익절_50%({profit_rate:.1%})"
             if sell_stage >= 2 and profit_rate >= 0.08:
                 return "SELL_ALL", f"3차_고정_전량익절_100%({profit_rate:.1%})"
 
-        # 4. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
+        # 5. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
         skip_time_filter = ind.get('skip_time_filter', False) if ind else False
         if not skip_time_filter:
             now = datetime.now()

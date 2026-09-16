@@ -527,8 +527,8 @@ class AsyncPortfolioManager:
             # 2. ATR 위험액 캡 (단일 거래 최대 손실액을 총 자산의 1.5%로 제한)
             if atr and atr > 0:
                 max_risk_amt = total_asset * 0.015
-                # 2.0 ATR 손절 시 위험액 기준 수량 캡
-                atr_qty_cap = int(max_risk_amt // (2.0 * atr))
+                # 1.5 ATR 손절 시 위험액 기준 수량 캡 (손익비 개선 및 리스크 관리 강화)
+                atr_qty_cap = int(max_risk_amt // (1.5 * atr))
                 if atr_qty_cap > 0:
                     allocate_amt = min(allocate_amt, atr_qty_cap * current_price)
 

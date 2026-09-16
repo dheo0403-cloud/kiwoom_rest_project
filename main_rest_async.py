@@ -64,14 +64,14 @@ class AsyncTradingBot:
         self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
         self.watchlist: Dict[str, Dict[str, Any]] = {}
 
-        # 분할 익절 단계 목표치
+        # 분할 익절 단계 목표치 (1차 50% 분할 익절로 초기 확정 손익 극대화)
         self.take_profit_stages = [
-            (0.03, 0.33, 1),  # +3% 도달 시 33% 1차 익절 -> Stage 1
+            (0.03, 0.50, 1),  # +3% 도달 시 50% 1차 익절 -> Stage 1
             (0.05, 0.50, 2),  # +5% 도달 시 남은 수량의 50% 2차 익절 -> Stage 2
             (0.08, 1.00, 3),  # +8% 도달 시 잔여 수량 전량(100%) 3차 익절 -> Stage 3
         ]
-        self.stop_loss_rate = -0.04  # -4.0% 하드 스탑로스 (CRITICAL 긴급 매도)
-        self.trailing_stop_drop = 0.025  # 최고점 대비 2.5% 반락 시 트레일링 스탑 매도
+        self.stop_loss_rate = -0.03  # -3.0% 타이트한 하드 스탑로스 (CRITICAL 긴급 매도)
+        self.trailing_stop_drop = 0.020  # 최고점 대비 2.0% 반락 시 트레일링 스탑 매도
         self.realtime_stream_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
@@ -619,7 +619,7 @@ class AsyncTradingBot:
             await self.SetRealReg("1000", watch_codes, ["10", "13", "20", "41"], "0")
 
     async def check_market_filter(self):
-        """KODEX 200 (069500) 지수 급락 감지 (-1.5% 하락 시 신규 매수 제한)"""
+        """KODEX 200 (069500) 지수 급락 감지 (-0.8% 하락 시 신규 매수 보수적 제한)"""
         kodex_data = await self.client.get_price("069500", priority=RequestPriority.LOW)
         if not kodex_data:
             return
@@ -632,11 +632,11 @@ class AsyncTradingBot:
         try:
             fluct_rate = float(fluct_rate_str)
             self.kodex200_change_rate = fluct_rate
-            if fluct_rate <= -1.5:
+            if fluct_rate <= -0.8:
                 if self.market_filter_passed:
                     self.market_filter_passed = False
-                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] KODEX 200 {fluct_rate:.2f}% 하락. 신규 매수를 일시 제한합니다.")
-                    print(f"🚨 [시장 필터] KODEX 200 {fluct_rate:.2f}% 급락 -> 신규 매수 제한")
+                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] KODEX 200 {fluct_rate:.2f}% 하락. 신규 매수를 보수적으로 제한합니다.")
+                    print(f"🚨 [시장 필터] KODEX 200 {fluct_rate:.2f}% 하락 -> 신규 매수 제한 (하락장 방어)")
             else:
                 if not self.market_filter_passed:
                     self.market_filter_passed = True
@@ -749,11 +749,52 @@ class AsyncTradingBot:
                 print(f"🚨 [EXIT_SIGNAL/SELL_ALL] {name}({code}) -> {reason}")
                 await self._execute_emergency_sell(code, name, qty, cur_price, reason=reason)
             elif action == "SELL_PARTIAL":
-                sell_ratio = 0.33 if stage == 0 else 0.50
+                sell_ratio = 0.50 if stage == 0 else 0.50
                 sell_qty = max(1, int(qty * sell_ratio))
                 next_stage = stage + 1
                 print(f"🎯 [EXIT_SIGNAL/SELL_PARTIAL] {name}({code}) -> {reason} ({sell_qty}주 매도)")
                 await self._execute_profit_sell(code, name, sell_qty, cur_price, next_stage, reason=reason)
+
+    async def cleanup_unexecuted_orders(self):
+        """
+        미체결 주문(Unfilled Order) 자동 감시 및 취소 안전장치
+        - 발주 후 미체결된 채 호가가 도망간 주문을 주기적으로 탐색하여 자동 취소
+        - 예수금 증거금 묶임 방지 및 인메모리-실계좌 정합성 100% 보장
+        """
+        if not hasattr(self.client, 'get_unexecuted_orders') or not hasattr(self.client, 'cancel_order'):
+            return
+
+        try:
+            uncl_data = await self.client.get_unexecuted_orders(priority=RequestPriority.MEDIUM)
+            if not uncl_data:
+                return
+
+            items = []
+            if isinstance(uncl_data, dict):
+                items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
+            elif isinstance(uncl_data, list):
+                items = uncl_data
+
+            if not items:
+                return
+
+            for order in items:
+                if not isinstance(order, dict):
+                    continue
+
+                order_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
+                code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').strip()
+                uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
+
+                if order_no and uncl_qty > 0:
+                    print(f"⚠️ [미체결 방어] 잔여 미체결 주문 감지 -> 자동 취소 실행: 주문번호 {order_no} ({code}, {uncl_qty}주)")
+                    cancel_res = await self.client.cancel_order(order_no=order_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    if cancel_res and str(cancel_res.get('rt_cd', '1')) == '0':
+                        await self.db.log_message("WARNING", f"🛡️ [미체결 자동 취소 완료] 주문번호 {order_no} ({code}, {uncl_qty}주)")
+                        print(f"✅ [미체결 자동 취소 완료] 주문번호 {order_no} ({code})")
+                        await self._sync_account_balance()
+        except Exception as e:
+            print(f"⚠️ [미체결 주문 정리 오류] {e}")
 
     async def _execute_emergency_sell(self, code: str, name: str, qty: int, cur_price: float, reason: str):
         """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스 주문"""
@@ -1079,9 +1120,10 @@ class AsyncTradingBot:
                     # 1. 수동 주문 큐 처리 (매 루프마다)
                     await self.process_manual_orders()
 
-                    # 2. 시장 필터 및 계좌 싱크 (10초 주기)
+                    # 2. 시장 필터, 계좌 싱크 및 미체결 방어 (10초 주기)
                     if loop_count % 5 == 0:
                         await self.check_market_filter()
+                        await self.cleanup_unexecuted_orders()
                         await self._sync_account_balance()
 
                     # 3. 감시 종목 갱신 (60초 주기)

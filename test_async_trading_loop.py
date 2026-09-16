@@ -264,20 +264,20 @@ async def test_three_stage_profit_taking():
     ]
     bot.buffer.load_initial_candles("000660", initial_candles)
 
-    # 1단계 익절 테스트 (+3.5% 상승: 103,500원 -> 33% 매도)
+    # 1단계 익절 테스트 (+3.5% 상승: 103,500원 -> 50% 매도)
     mock_client.prices["000660"] = 103500.0
     await bot.monitor_positions_and_exit()
     pos = portfolio.positions["000660"]
     assert pos["sell_stage"] == 1, "1단계 익절 완료 상태여야 합니다."
-    assert pos["qty"] == 67, f"33주 매도 후 67주가 남아야 합니다. (실제: {pos['qty']}주)"
+    assert pos["qty"] == 50, f"50주 매도 후 50주가 남아야 합니다. (실제: {pos['qty']}주)"
     print(f"  ✅ 1단계 익절(+3%) 완료: 잔여 {pos['qty']}주, 다음 단계: Stage {pos['sell_stage']}")
 
-    # 2단계 익절 테스트 (+5.5% 상승: 105,500원 -> 남은 수량의 50%인 33주 매도)
+    # 2단계 익절 테스트 (+5.5% 상승: 105,500원 -> 남은 수량의 50%인 25주 매도)
     mock_client.prices["000660"] = 105500.0
     await bot.monitor_positions_and_exit()
     pos = portfolio.positions["000660"]
     assert pos["sell_stage"] == 2, "2단계 익절 완료 상태여야 합니다."
-    assert pos["qty"] == 34, f"33주 추가 매도 후 34주가 남아야 합니다. (실제: {pos['qty']}주)"
+    assert pos["qty"] == 25, f"25주 추가 매도 후 25주가 남아야 합니다. (실제: {pos['qty']}주)"
     print(f"  ✅ 2단계 익절(+5%) 완료: 잔여 {pos['qty']}주, 다음 단계: Stage {pos['sell_stage']}")
 
     # 3단계 익절 테스트 (3차 ATR R3 107,000원 돌파: 108,500원 -> 잔여 전량 매도 및 청산)
