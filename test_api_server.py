@@ -113,13 +113,21 @@ def test_api_server_endpoints():
     assert res.status_code == 200
     assert res.json()["status"] == "started"
     assert ctx.bot.running is True
+    assert ctx.bot.is_paused is False
 
-    # STOP 제어
+    # STOP 제어 (일시정지 및 익일 자동 재개 예약)
     res = client.post("/api/bot/control", json={"action": "STOP"})
     assert res.status_code == 200
     assert res.json()["status"] == "stopped"
     assert ctx.bot.running is False
-    print("  ✅ 봇 제어 명령(START, STOP) 정상 동작")
+    assert ctx.bot.is_paused is True
+
+    # /api/status 조회 시 is_paused 및 running 정합성 검증
+    res_status = client.get("/api/status")
+    assert res_status.status_code == 200
+    assert res_status.json()["running"] is False
+    assert res_status.json()["is_paused"] is True
+    print("  ✅ 봇 제어 명령(START, STOP) 및 is_paused 상태 연동 정상 동작")
 
     # 8. 긴급 비상 킬스위치 (/api/bot/emergency-stop)
     print("▶ [Test 7] /api/bot/emergency-stop 비상 킬스위치 검증...")

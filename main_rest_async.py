@@ -59,6 +59,8 @@ class AsyncTradingBot:
         self.mdd_shutdown = False
         self.highest_total_asset = 0.0  # 최초 계좌 동기화 시 실제 자산으로 캘리브레이션
         self.is_running = False
+        self.is_paused = False
+        self.is_shutdown = False
 
         # 감시 종목 리스트 (코드, 이름, 피보나치 레벨 정보)
         self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
@@ -81,13 +83,52 @@ class AsyncTradingBot:
 
     @property
     def running(self) -> bool:
-        """봇 구동 상태 getter"""
-        return self.is_running
+        """봇 구동 상태 getter (실행 중이면서 일시정지 상태가 아닐 때 True)"""
+        return self.is_running and not self.is_paused
 
     @running.setter
     def running(self, value: bool):
         """봇 구동 상태 setter"""
         self.is_running = bool(value)
+        if value:
+            self.is_paused = False
+        else:
+            self.is_paused = True
+
+    def pause(self):
+        """수동 일시정지 (당일 매매 중단, 익일 08:50 AM 자동 웨이크업 예약)"""
+        self.is_paused = True
+        self.is_running = False
+        print("⏸️ [AsyncTradingBot] 봇 수동 일시정지 (익일 영업일 아침 08:50 AM 자동 웨이크업 예약)")
+
+    def resume(self):
+        """수동/자동 매매 재개"""
+        self.is_paused = False
+        self.is_running = True
+        print("▶️ [AsyncTradingBot] 봇 매매 재개 (RUNNING)")
+
+    @staticmethod
+    def is_korean_market_holiday(dt: datetime) -> bool:
+        """한국 거래소 기본 공휴일 판별 (주말 및 법정공휴일/휴장일)"""
+        # 주말 (토=5, 일=6)
+        if dt.weekday() >= 5:
+            return True
+        # 양력 고정 공휴일 및 증시 폐장일 (월, 일)
+        fixed_holidays = {
+            (1, 1),   # 신정
+            (3, 1),   # 삼일절
+            (5, 1),   # 근로자의 날 (주식시장 휴장)
+            (5, 5),   # 어린이날
+            (6, 6),   # 현충일
+            (8, 15),  # 광복절
+            (10, 3),  # 개천절
+            (10, 9),  # 한글날
+            (12, 25), # 성탄절
+            (12, 31), # 연말 주식시장 휴장일
+        }
+        if (dt.month, dt.day) in fixed_holidays:
+            return True
+        return False
 
     async def SetRealReg(self, screen_no: str, code_list: List[str], fid_list: List[str], opt_type: str = "0") -> bool:
         """
@@ -955,7 +996,7 @@ class AsyncTradingBot:
         - 등록된 감시 종목들을 지속 순회하며 실시간 시세를 수신하여 OnReceiveRealData 이벤트로 디스패치
         """
         print(f"📡 [RealtimeStream] 실시간 틱 데이터 스트림 워커 가동 시작")
-        while self.is_running:
+        while self.is_running and not self.is_paused and not self.is_shutdown:
             try:
                 watch_codes = list(self.watchlist.keys())
                 if not watch_codes:
@@ -963,7 +1004,7 @@ class AsyncTradingBot:
                     continue
 
                 for code in watch_codes:
-                    if not self.is_running:
+                    if not self.is_running or self.is_paused or self.is_shutdown:
                         break
 
                     # API Rate Limiter 준수 미세 분산 딜레이 (초당 약 3.3건)
@@ -1074,16 +1115,18 @@ class AsyncTradingBot:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
             await self.db.log_message("ERROR", f"매수 주문 실패: {name}({code}) - {msg}")
 
-    async def wait_until_next_market_open(self):
-        """장 마감 후 다음 거래일 08:55까지 비동기 휴면 대기 (24시간 데몬 가용성 유지)"""
+    async def wait_until_next_market_open(self, wake_up_hour: int = 8, wake_up_minute: int = 50):
+        """
+        장 마감 또는 수동 일시정지 후 다음 영업일 아침(기본 08:50 KST)까지 비동기 휴면 대기
+        - 08:50 도달 시 수동 일시정지(is_paused) 상태를 자동으로 해제하고 봇을 '실행(RUNNING)' 상태로 복구
+        """
         now = datetime.now()
-        # 다음날 08:55 설정
-        next_open = now.replace(hour=8, minute=55, second=0, microsecond=0)
+        next_open = now.replace(hour=wake_up_hour, minute=wake_up_minute, second=0, microsecond=0)
         if now >= next_open:
             next_open += timedelta(days=1)
 
-        # 주말(토요일=5, 일요일=6) 건너뛰기
-        while next_open.weekday() >= 5:
+        # 주말(토/일) 및 한국 공휴일/휴장일 건너뛰기
+        while self.is_korean_market_holiday(next_open):
             next_open += timedelta(days=1)
 
         total_sleep_sec = (next_open - now).total_seconds()
@@ -1091,8 +1134,28 @@ class AsyncTradingBot:
         minutes, _ = divmod(remainder, 60)
         print(f"💤 [휴면 모드] 다음 거래일({next_open.strftime('%Y-%m-%d %H:%M')})까지 약 {hours}시간 {minutes}분 대기합니다...")
 
-        while self.is_running and datetime.now() < next_open:
-            await asyncio.sleep(min(60.0, max(1.0, (next_open - datetime.now()).total_seconds())))
+        while not self.is_shutdown and datetime.now() < next_open:
+            # 대기 도중 사용자가 수동으로 봇 시작(Resume)을 누른 경우 (정규장 시간 내)
+            if self.is_running and not self.is_paused:
+                now_curr = datetime.now()
+                if (9 <= now_curr.hour < 15) or (now_curr.hour == 15 and now_curr.minute < 30):
+                    print("⚡ [수동 재개] 사용자에 의한 봇 시작 감지 -> 휴면 루프 즉시 탈출")
+                    break
+            await asyncio.sleep(min(30.0, max(1.0, (next_open - datetime.now()).total_seconds())))
+
+        # 익일 아침 08:50 도달 시: 수동 일시정지 자동 해제 및 봇 RUNNING 상태 자동 전환
+        if not self.is_shutdown and datetime.now() >= next_open:
+            if self.is_paused or not self.is_running:
+                self.is_paused = False
+                self.is_running = True
+                self.mdd_shutdown = False
+                self.market_filter_passed = True
+                wake_msg = f"🌅 [자동 재시작 스케줄러] 익일 영업일 아침({next_open.strftime('%H:%M')}) 도달: 수동 일시정지 상태를 해제하고 봇을 '실행(RUNNING)' 상태로 자동 전환합니다."
+                print(wake_msg)
+                if self.notifier:
+                    self.notifier.send_message(f"🌅 [Kiwoom Quant Bot] 익일 장전 자동 웨이크업: 봇 '실행(RUNNING)' 상태로 자동 재개되었습니다.")
+                if self.db:
+                    await self.db.log_message("SYSTEM", "익일 장전 자동 웨이크업: 수동 일시정지 해제 및 봇 '실행(RUNNING)' 상태 자동 복구")
 
     async def trading_loop(self):
         """정규 거래 시간(09:00 ~ 15:30) 내의 실시간 트레이딩 비동기 주기 루프"""
@@ -1104,7 +1167,7 @@ class AsyncTradingBot:
             self.realtime_stream_task = asyncio.create_task(self._realtime_data_stream_worker())
 
         try:
-            while self.is_running:
+            while self.is_running and not self.is_paused and not self.is_shutdown:
                 # 실시간 스트림 워커 생존 감시 및 자동 재가동 (Watchdog)
                 if self.realtime_stream_task and self.realtime_stream_task.done():
                     exc = self.realtime_stream_task.exception() if not self.realtime_stream_task.cancelled() else None
@@ -1164,47 +1227,54 @@ class AsyncTradingBot:
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
         await self.initialize()
 
-        while self.is_running:
+        while not self.is_shutdown:
             try:
                 now = datetime.now()
-                weekday = now.weekday()  # 0=월 ~ 4=금, 5=토, 6=일
                 now_time = now.time()
 
-                # 1. 주말(토/일)인 경우 다음 거래일까지 휴면
-                if weekday >= 5:
-                    print(f"🏖️ [주말 휴일] 오늘은 주말입니다. 다음 월요일 아침까지 대기합니다.")
-                    await self.wait_until_next_market_open()
+                # 1. 주말 또는 공휴일/휴장일인 경우 다음 영업일 08:50까지 휴면
+                if self.is_korean_market_holiday(now):
+                    print(f"🏖️ [휴일/휴장일] 오늘은 주말 또는 공휴일입니다. 다음 영업일 아침 08:50까지 대기합니다.")
+                    await self.wait_until_next_market_open(8, 50)
                     continue
 
-                # 2. 장 시작 전(08:55 이전): 08:55까지 대기
-                if now_time.hour < 8 or (now_time.hour == 8 and now_time.minute < 55):
-                    target_0855 = now.replace(hour=8, minute=55, second=0, microsecond=0)
-                    wait_sec = (target_0855 - now).total_seconds()
-                    print(f"⏳ [개장 전 대기] 아침 08:55까지 대기합니다 ({int(wait_sec//60)}분 남음)...")
-                    while self.is_running and datetime.now() < target_0855:
-                        await asyncio.sleep(min(30.0, max(1.0, (target_0855 - datetime.now()).total_seconds())))
+                # 2. 사용자에 의해 당일 수동 일시정지된 경우 -> 익일 영업일 08:50까지 대기 (익일 아침 자동 재개)
+                if self.is_paused or not self.is_running:
+                    print(f"⏸️ [수동 일시정지 상태] 봇이 일시정지되어 있습니다. 익일 영업일 아침 08:50에 자동으로 '실행(RUNNING)' 상태로 복구됩니다.")
+                    await self.wait_until_next_market_open(8, 50)
                     continue
 
-                # 3. 장 시작 준비(08:55 ~ 09:00): 계좌 잔고 동기화 및 당일 감시 유니버스 스캔
-                if now_time.hour == 8 and now_time.minute >= 55:
-                    print("🌅 [08:55 장전 준비] 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석...")
+                # 3. 장 시작 전(08:50 이전): 08:50까지 대기
+                if now_time.hour < 8 or (now_time.hour == 8 and now_time.minute < 50):
+                    target_0850 = now.replace(hour=8, minute=50, second=0, microsecond=0)
+                    wait_sec = (target_0850 - now).total_seconds()
+                    print(f"⏳ [개장 전 대기] 아침 08:50까지 대기합니다 ({int(wait_sec//60)}분 남음)...")
+                    while not self.is_shutdown and datetime.now() < target_0850:
+                        if self.is_paused:
+                            break
+                        await asyncio.sleep(min(30.0, max(1.0, (target_0850 - datetime.now()).total_seconds())))
+                    continue
+
+                # 4. 장 시작 준비(08:50 ~ 09:00): 계좌 잔고 동기화 및 당일 감시 유니버스 스캔
+                if now_time.hour == 8 and now_time.minute >= 50:
+                    print("🌅 [08:50 장전 준비] 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석...")
                     self.mdd_shutdown = False
                     self.market_filter_passed = True
                     await self._sync_account_balance()
                     await self.update_watchlist()
                     target_0900 = now.replace(hour=9, minute=0, second=0, microsecond=0)
-                    while self.is_running and datetime.now() < target_0900:
+                    while not self.is_shutdown and not self.is_paused and datetime.now() < target_0900:
                         await asyncio.sleep(1.0)
                     continue
 
-                # 4. 정규 거래 시간(09:00 ~ 15:30): 실시간 트레이딩 루프 실행
+                # 5. 정규 거래 시간(09:00 ~ 15:30): 실시간 트레이딩 루프 실행
                 if (now_time.hour == 9 and now_time.minute >= 0) or (9 < now_time.hour < 15) or (now_time.hour == 15 and now_time.minute < 30):
                     await self.trading_loop()
                     continue
 
-                # 5. 장 마감 후(15:30 이후): 다음 거래일 08:55까지 안전 휴면 대기
+                # 6. 장 마감 후(15:30 이후): 다음 영업일 08:50까지 안전 휴면 대기
                 if now_time.hour > 15 or (now_time.hour == 15 and now_time.minute >= 30):
-                    await self.wait_until_next_market_open()
+                    await self.wait_until_next_market_open(8, 50)
                     continue
 
             except asyncio.CancelledError:
@@ -1215,7 +1285,9 @@ class AsyncTradingBot:
 
     async def shutdown(self):
         """시스템 종료 및 자원 정리 (Graceful Shutdown)"""
+        self.is_shutdown = True
         self.is_running = False
+        self.is_paused = False
         print("🛑 [AsyncTradingBot] 데몬 종료 및 자원 반환 중...")
         if self.realtime_stream_task and not self.realtime_stream_task.done():
             self.realtime_stream_task.cancel()
@@ -1227,6 +1299,9 @@ class AsyncTradingBot:
             await self.notifier.stop()
         except Exception as e:
             print(f"⚠️ [Shutdown] 알림 워커 정지 오류: {e}")
+        await self.client.stop()
+        await self.db.close_pool()
+        print("✅ [AsyncTradingBot] 정상 종료 완료")
         await self.client.stop()
         await self.db.close_pool()
         print("✅ [AsyncTradingBot] 정상 종료 완료")

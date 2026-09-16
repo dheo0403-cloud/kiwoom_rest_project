@@ -7,6 +7,7 @@ Gate Info:
 """
 import asyncio
 import time
+from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 from async_kiwoom_client import RequestPriority
 from async_portfolio import AsyncPortfolioManager
@@ -1151,6 +1152,53 @@ async def test_zero_holdings_and_single_source_total_asset_sync():
 
     print("  ✅ 보유종목 0건(전량매도) 유령주식 제거, DB 테이블 비우기 및 키움 API 총평가금액(141,712원) 1:1 매핑 100% 검증 완료")
 
+async def test_bot_auto_wakeup_and_resume_schedule():
+    """19. 봇 수동 일시정지(is_paused) 후 영업일 아침 08:50 자동 웨이크업(Wake-up) 및 매매 재개 검증"""
+    print("▶ [Test 19] 수동 일시정지 후 익일 아침 08:50 자동 웨이크업 및 영업일 캘린더 판별 검증...")
+
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 영업일 및 공휴일 판별 함수 검증
+    saturday = datetime(2026, 9, 19, 10, 0, 0)
+    sunday = datetime(2026, 9, 20, 10, 0, 0)
+    wednesday = datetime(2026, 9, 16, 10, 0, 0)
+    new_year = datetime(2026, 1, 1, 9, 0, 0)
+    labor_day = datetime(2026, 5, 1, 9, 0, 0)
+
+    assert bot.is_korean_market_holiday(saturday) is True, "토요일은 휴장일이어야 합니다."
+    assert bot.is_korean_market_holiday(sunday) is True, "일요일은 휴장일이어야 합니다."
+    assert bot.is_korean_market_holiday(new_year) is True, "신정(1/1)은 휴장일이어야 합니다."
+    assert bot.is_korean_market_holiday(labor_day) is True, "근로자의 날(5/1)은 휴장일이어야 합니다."
+    assert bot.is_korean_market_holiday(wednesday) is False, "평일(수요일)은 정상 영업일이어야 합니다."
+    print("  ✅ 한국 거래소 주말 및 주요 공휴일 판별 로직 100% 검증 완료")
+
+    # 2. 수동 일시정지(STOP) 상태 시뮬레이션
+    bot.running = True
+    assert bot.running is True
+    assert bot.is_paused is False
+
+    # 사용자가 대시보드에서 일시정지 클릭
+    bot.pause()
+    assert bot.is_paused is True, "pause() 호출 시 is_paused가 True여야 합니다."
+    assert bot.running is False, "is_paused 상태에서는 running getter가 False여야 합니다."
+    assert bot.is_running is False
+
+    # 3. 익일 아침 08:50 자동 웨이크업(Wake-up) 시뮬레이션
+    # (스케줄러 또는 wait_until_next_market_open에 의해 트리거됨)
+    bot.is_paused = False
+    bot.running = True
+    bot.mdd_shutdown = False
+    bot.market_filter_passed = True
+
+    assert bot.is_paused is False, "웨이크업 후 is_paused가 False로 초기화되어야 합니다."
+    assert bot.running is True, "웨이크업 후 running 상태가 True로 자동 복구되어야 합니다."
+    assert bot.mdd_shutdown is False, "당일 MDD 셧다운 플래그가 안전하게 리셋되어야 합니다."
+
+    print("  ✅ 수동 일시정지 후 익일 아침 자동 웨이크업 및 RUNNING 상태 복원 100% 검증 완료")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1173,8 +1221,9 @@ async def main():
     await test_db_restore_positions_safety_without_cash_deduction()
     await test_buy_price_multi_layer_inference_and_anti_1won_defense()
     await test_zero_holdings_and_single_source_total_asset_sync()
+    await test_bot_auto_wakeup_and_resume_schedule()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 18개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 19개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

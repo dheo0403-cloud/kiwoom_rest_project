@@ -94,8 +94,69 @@ class ServerContext:
         self.bot_task: Optional[asyncio.Task] = None
         self.ws_broadcast_task: Optional[asyncio.Task] = None
         self.log_broadcast_task: Optional[asyncio.Task] = None
+        self.daily_scheduler_task: Optional[asyncio.Task] = None
 
 ctx = ServerContext()
+
+async def daily_market_scheduler_loop():
+    """
+    익일 아침(08:50 KST) 장 시작 전 자동 웨이크업 및 수동 일시정지 상태 자동 해제 스케줄러
+    - 사용자가 전날 또는 장중에 수동으로 봇을 일시정지(STOP)했더라도, 익일 영업일 아침 08:50이 되면
+      자동으로 일시정지(is_paused)를 해제하고 봇을 '실행(RUNNING)' 상태로 복구하여 당일 매매 준비를 수행합니다.
+    - 주말(토/일) 및 한국 공휴일/휴장일에는 가동하지 않습니다.
+    """
+    last_processed_date = ""
+    while True:
+        try:
+            now = datetime.now()
+            today_str = now.strftime('%Y%m%d')
+
+            # 매일 아침 08:50 ~ 08:55 구간 검사 (당일 1회 실행 보장)
+            if now.hour == 8 and 50 <= now.minute < 55 and today_str != last_processed_date:
+                # 1. 영업일 검사 (주말 및 법정공휴일/휴장일 배제)
+                is_holiday = AsyncTradingBot.is_korean_market_holiday(now)
+                if not is_holiday and ctx.bot:
+                    last_processed_date = today_str
+                    print(f"🌅 [API Server Scheduler] 영업일 아침 08:50 자동 웨이크업 시퀀스 가동 (날짜: {today_str})")
+
+                    # 2. 일시정지 해제 및 상태 초기화 (강제 RUNNING 리셋)
+                    ctx.bot.is_paused = False
+                    ctx.bot.running = True
+                    ctx.bot.mdd_shutdown = False
+                    ctx.bot.market_filter_passed = True
+
+                    # 3. 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석
+                    try:
+                        await ctx.bot.sync_account_and_portfolio()
+                        await ctx.bot.prepare_morning_universe()
+                    except Exception as e:
+                        print(f"⚠️ [API Server Scheduler] 장전 동기화 오류: {e}")
+
+                    # 4. 백그라운드 트레이딩 루프 태스크 시작 (중복 실행 방지)
+                    if ctx.bot_task is None or ctx.bot_task.done():
+                        ctx.bot_task = asyncio.create_task(ctx.bot.run_daily_trading_loop())
+
+                    # 5. DB 및 WebSocket 실시간 알림 브로드캐스트
+                    wake_log = "🌅 [자동 재시작 스케줄러] 영업일 아침 08:50 도달: 수동 일시정지 상태가 해제되고 봇이 '실행(RUNNING)' 상태로 자동 전환되었습니다."
+                    if ctx.db:
+                        await ctx.db.log_message("SYSTEM", wake_log)
+                    await ws_manager.broadcast_log({
+                        "type": "LOG_EVENT",
+                        "data": {
+                            "id": str(int(time.time() * 1000)),
+                            "level": "SYSTEM",
+                            "message": wake_log,
+                            "timestamp": format_kst_time_str(now)
+                        }
+                    })
+                    print(f"✅ [API Server Scheduler] 봇 자동 가동 및 트레이딩 루프 기동 완료")
+
+            await asyncio.sleep(5.0)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"⚠️ [Scheduler Loop Error] {e}")
+            await asyncio.sleep(5.0)
 
 async def log_broadcast_loop():
     """DB logs 테이블을 지속 감시하여 신규 실시간 로그를 웹소켓으로 브로드캐스팅"""
@@ -271,9 +332,10 @@ async def lifespan(app: FastAPI):
         db=ctx.db
     )
 
-    # 2. 포트폴리오 및 실시간 로그 브로드캐스트 태스크 시작
+    # 2. 포트폴리오, 실시간 로그 및 일일 자동 웨이크업 스케줄러 태스크 시작
     ctx.ws_broadcast_task = asyncio.create_task(portfolio_broadcast_loop())
     ctx.log_broadcast_task = asyncio.create_task(log_broadcast_loop())
+    ctx.daily_scheduler_task = asyncio.create_task(daily_market_scheduler_loop())
 
     yield
 
@@ -286,6 +348,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    if ctx.daily_scheduler_task:
+        ctx.daily_scheduler_task.cancel()
     if ctx.ws_broadcast_task:
         ctx.ws_broadcast_task.cancel()
     if ctx.log_broadcast_task:
@@ -347,6 +411,7 @@ async def get_bot_status():
 
     return {
         "running": ctx.bot.running,
+        "is_paused": getattr(ctx.bot, 'is_paused', False),
         "is_demo": ctx.bot.is_demo,
         "market_filter_passed": ctx.bot.market_filter_passed,
         "kodex200_change_rate": ctx.bot.kodex200_change_rate,
@@ -612,19 +677,19 @@ async def control_bot(req: BotControlRequest):
 
     action = req.action.upper()
     if action == "START":
-        if not ctx.bot.running:
-            ctx.bot.running = True
+        ctx.bot.is_paused = False
+        ctx.bot.running = True
+        if ctx.bot_task is None or ctx.bot_task.done():
             ctx.bot_task = asyncio.create_task(ctx.bot.run_daily_trading_loop())
             return {"status": "started", "message": "트레이딩 루프가 시작되었습니다."}
         return {"status": "already_running", "message": "트레이딩 봇이 이미 실행 중입니다."}
 
     elif action == "STOP":
-        if ctx.bot.running:
-            ctx.bot.running = False
-            if ctx.bot_task:
-                ctx.bot_task.cancel()
-            return {"status": "stopped", "message": "트레이딩 루프가 정지되었습니다."}
-        return {"status": "not_running", "message": "트레이딩 봇이 실행 중이지 않습니다."}
+        ctx.bot.is_paused = True
+        ctx.bot.running = False
+        if ctx.bot_task and not ctx.bot_task.done():
+            ctx.bot_task.cancel()
+        return {"status": "stopped", "message": "트레이딩 루프가 일시정지되었습니다. (익일 아침 08:50 자동 재개 예약)"}
 
     elif action == "REFRESH":
         await ctx.bot.sync_account_and_portfolio()

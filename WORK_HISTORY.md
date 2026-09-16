@@ -2,6 +2,42 @@
 
 ---
 
+## 📅 [2026-09-16 17:55] 수동 일시정지 후 익일 영업일 아침(08:50 AM) 자동 재시작(Wake-up) 스케줄러 구축 및 State 오버라이드 배포 완료
+
+### 1. 작업 개요 및 목적
+- **수동 일시정지 영구 지속 문제 해결:**
+  - 기존에는 사용자가 대시보드 콕핏에서 [봇 일시정지]를 클릭하여 봇을 중지하면, 다음 날 아침 장이 시작되어도 봇이 계속 정지 상태를 유지하여 사용자가 직접 매매 재개 버튼을 눌러야만 하던 불편함을 해결.
+- **3단계 상태 모델(`is_running`, `is_paused`, `is_shutdown`) 정립:**
+  - 단일 불리언으로 관리되던 프로세스 생명주기를 세분화하여, 수동 정지 시 데몬 자체의 백그라운드 대기 루프는 정상 유지되면서 당일 매매 루프만 안전하게 정지되도록 분리.
+- **영업일(Business Day) 및 한국 거래소 공휴일 판별 가드 구축 (`is_korean_market_holiday`):**
+  - 주말(토/일) 및 신정, 삼일절, 근로자의 날(5/1), 어린이날, 현충일, 광복절, 개천절, 한글날, 성탄절, 증시 폐장일(12/31) 등 휴장일에는 자동 기상하지 않고 다음 정상 개장일까지 비동기 휴면하도록 안전 결합.
+- **익일 아침 08:50 KST 자동 웨이크업(Wake-up) 시퀀스 탑재:**
+  - `main_rest_async.py`의 `wait_until_next_market_open` 및 `api_server.py`의 `daily_market_scheduler_loop`를 통해, 익일 영업일 아침 08:50 도달 시 `is_paused = False`, `running = True`, `mdd_shutdown = False`로 자동 오버라이드 리셋.
+  - 계좌 잔고 동기화 및 당일 감시 유니버스(거래대금 상위 30종목 피보나치 분석) 사전 분석 완료 후 09:00 정규 매매 루프 자동 기동.
+- **프론트엔드 실시간 동기화:**
+  - 프론트엔드(`useWebSocket.ts`)의 3초 주기 `/status` 폴링 및 WebSocket 실시간 브로드캐스트로 콕핏 UI의 상태 뱃지가 '엔진 가동 중'으로 자동 동기화됨.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `main_rest_async.py`:
+  - `is_paused`, `is_shutdown` 상태 변수 추가 및 `running` 프로퍼티(`is_running and not is_paused`), `pause()`, `resume()` 메서드 신설.
+  - `is_korean_market_holiday()` 정적 메서드 구현.
+  - `wait_until_next_market_open()`, `_realtime_data_stream_worker()`, `trading_loop()`, `run_daemon()`에 일시정지 자동 해제 및 08:50 자동 웨이크업 로직 통합.
+- `api_server.py`:
+  - `ServerContext`에 `daily_scheduler_task` 추가.
+  - `daily_market_scheduler_loop()` 백그라운드 태스크 신설 및 `lifespan` 관리.
+  - `/bot/control`의 `START`/`STOP` 및 `/status`에 `is_paused` 상태 연동.
+- `test_async_trading_loop.py` & `test_api_server.py`:
+  - Test 19 (`test_bot_auto_wakeup_and_resume_schedule`) 신설 및 REST API `is_paused` 상태 연동 테스트 검증.
+- `pytest.ini`:
+  - `asyncio_mode = auto` 설정 추가.
+
+### 3. 검증 결과
+- **단위/통합 테스트:** `pytest` 전체 53개 테스트 스위트 100% 통과 (`53 passed`).
+- **프론트엔드 빌드:** TypeScript 및 Vite 번들링 성공 (0 errors).
+- **형상 관리:** `feat: 봇 수동 일시정지 후 다음 영업일 아침 자동 재시작(Wake-up) 스케줄링 추가` 커밋 및 원격 푸시 완료.
+
+---
+
 ## 📅 [2026-09-16 10:55] 키움 TR 보유종목 매입단가(매수가) '1원' 표출 버그 완벽 해결 및 6단계 다중 방어 해석 알고리즘(6-Layer Resolution) & 프론트엔드 안전 렌더링 배포 완료
 
 ### 1. 작업 개요 및 목적
