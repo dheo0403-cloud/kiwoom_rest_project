@@ -352,39 +352,21 @@ class AsyncTradingBot:
         if deposit_data and len(self.portfolio.positions) == 0:
             await self.portfolio.sync_positions(deposit_data)
 
-        # 포지션이 0개이고 DB에 저장된 포지션이 있는 경우 자가 복구 검사
-        if len(self.portfolio.positions) == 0 and self.db and hasattr(self.db, 'get_portfolio_positions'):
-            try:
-                db_pos = await self.db.get_portfolio_positions()
-                if db_pos:
-                    await self.portfolio.restore_positions_from_db(db_pos)
-            except Exception as e:
-                print(f"⚠️ [포지션 DB 복구 예외] {e}")
-
         # 보유 주식 평가액 계산
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
         # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
-        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: 82,819원)
+        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: MTS 화면의 'D+2 예수금'과 1:1 매칭)
         available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
 
-        # (2) 총 평가자산 (키움 HTS 공식 총평가금액 147,219원~148,442원 매핑 및 예수금+주식평가액 100% 방어)
-        calc_with_d2 = available_cash + invested_eval
-        calc_with_raw = (parsed_raw_entr + invested_eval) if (parsed_raw_entr and parsed_raw_entr > 0) else 0.0
-
-        candidates_total = [calc_with_d2]
+        # (2) 총 평가자산 (키움 API가 제공하는 '총평가금액(tot_evlu_amt)' 필드 단일 소스 원칙 반영)
+        # 키움 API의 tot_evlu_amt는 이미 (D+2 예수금 + 보유주식 평가금액)이 합산된 계좌 총자산이므로 임의 중복 가산 금지
         if parsed_tot_evlu_amt and parsed_tot_evlu_amt > 0:
-            candidates_total.append(parsed_tot_evlu_amt)
-        if calc_with_raw > 0:
-            candidates_total.append(calc_with_raw)
-
-        final_total_asset = max(candidates_total)
-
-        # 안전 가드: 총자산은 항상 (D+2 예수금 + 보유주식 평가액) 이상이어야 함
-        min_required_total = available_cash + invested_eval
-        if final_total_asset < min_required_total:
-            print(f"🚨 [sync_balance 가드] 총자산({int(final_total_asset):,}원) < 최소필요총자산({int(min_required_total):,}원) → 총자산 보정: {int(min_required_total):,}원")
-            final_total_asset = min_required_total
+            final_total_asset = float(parsed_tot_evlu_amt)
+        else:
+            # 키움 API 총평가금액 누락 시: (예수금 원금/D+2 중 큰 금액 + 보유주식 평가금) 폴백 산출
+            base_cash = max(available_cash, parsed_raw_entr or 0.0)
+            final_total_asset = float(base_cash + invested_eval)
 
         # 키움 계좌 TR Raw Data 분석 로그 출력
         preview_keys = ['tot_evlu_amt', 'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']

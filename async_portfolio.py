@@ -416,10 +416,10 @@ class AsyncPortfolioManager:
                 self.positions = new_positions
                 pos_summary = ", ".join([f"{p['name']}({code}) {p['qty']}주@{int(p['current_price']):,}원" for code, p in new_positions.items()])
                 print(f"📦 [Portfolio sync_positions] {len(new_positions)}개 보유 종목 동기화 완료: {pos_summary}")
-            elif prev_positions and (self.total_asset > self.current_capital):
-                # 임시 API 통신 에러 시 기존 포지션 보존
-                self.positions = prev_positions
-                print(f"🛡️ [Portfolio sync_positions] API 응답 포지션 0건이나 총자산 차액 존재 ➔ 직전 {len(prev_positions)}개 포지션 안전 보존")
+            else:
+                # 키움 API에서 정상 잔고 수신 시 보유종목이 0건이면 명시적으로 빈 딕셔너리로 초기화 (유령 주식 제거)
+                self.positions = {}
+                print("📦 [Portfolio sync_positions] 보유 종목 0건 (전량 매도/미보유 상태) 동기화 완료.")
 
     async def restore_positions_from_db(self, db_positions: List[Dict[str, Any]]):
         """DB로부터 포지션을 안전 복원 (D+2 주문가능현금 current_capital을 차감하지 않고 독립 복원)"""

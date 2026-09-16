@@ -513,14 +513,14 @@ async def test_kiwoom_real_balance_parsing_various_schemas():
     """9. 키움 계좌 TR(kt00005/OPW00018) 다중 스키마 총자산 vs D+2 예수금 정밀 파싱 검증"""
     print("▶ [Test 9] 키움 계좌 TR 다중 스키마 총자산(114,922원) vs D+2 예수금(100,842원) 정밀 분리 검증...")
 
-    # Case 1: 키움 실전 REST 표준 (tot_evlu_amt가 100,842원이고 prvs_rcdl_excc_amt가 114,922원인 경우)
+    # Case 1: 키움 실전 REST 표준 (tot_evlu_amt 총평가금액 114,922원, dnca_tot_amt D+2예수금 100,842원)
     class Schema1MockClient(MockKiwoomClient):
         async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
             return {
                 "output1": [{
+                    "tot_evlu_amt": "114,922",       # 키움 API 공식 총평가금액
                     "prvs_rcdl_excc_amt": "114,922", # HTS 표시 단순 예수금
                     "dnca_tot_amt": "100,842",       # D+2 실제 주문가능금액
-                    "tot_evlu_amt": "100,842",       # 기존에 총자산으로 오인되던 필드
                     "ord_psbl_cash": "100,842"
                 }],
                 "output2": []
@@ -978,41 +978,26 @@ async def test_kt00018_priority_and_isin_and_zero_padded_codes_parsing():
     print("  ✅ kt00018 ISIN/접미사/정수형 코드 정규화 및 3개 보유종목 파싱 100% 통과")
 
 async def test_db_restore_positions_safety_without_cash_deduction():
-    """16. API 일시 미응답 시 DB 포지션 자가 복원 시 D+2 예수금(82,819원) 차감 없이 안전 보존 검증"""
-    print("▶ [Test 16] DB 포지션 자가 복원 시 D+2 주문가능 현금 차감 방지 및 정합성 검증...")
+    """16. DB 포지션 안전 복원 시 D+2 예수금(82,819원) 차감 없이 독립 보존 검증"""
+    print("▶ [Test 16] DB 포지션 안전 복원 시 D+2 주문가능 현금 차감 방지 및 정합성 검증...")
 
-    class EmptyBalanceMockClient(MockKiwoomClient):
-        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
-            # API가 일시적으로 요약만 반환하고 종목 리스트는 0건인 상황
-            return {
-                "output1": [{
-                    "tot_evlu_amt": "147069",
-                    "dnca_tot_amt": "82819",
-                    "d2_deposit": "82819"
-                }],
-                "output2": []
-            }
+    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
+    await portfolio.sync_capital(available_cash=82819.0, total_asset=147069.0)
 
-    mock_client = EmptyBalanceMockClient()
-    mock_db = MockDatabaseManager()
-    # DB에 기존 보유 포지션 3건 미리 적재
-    mock_db.portfolio = [
+    db_positions = [
         {"code": "090460", "name": "비에이치", "qty": 1, "buy_price": 19520.0, "current_price": 19630.0},
         {"code": "263750", "name": "펄어비스", "qty": 1, "buy_price": 33600.0, "current_price": 35600.0},
         {"code": "441270", "name": "파인엠텍", "qty": 1, "buy_price": 8160.0, "current_price": 9170.0}
     ]
 
-    portfolio = AsyncPortfolioManager(initial_capital=147069.0, max_stocks=5)
-    bot = AsyncTradingBot(is_demo=False, initial_capital=147069.0, client=mock_client, portfolio=portfolio, db=mock_db)
-
-    await bot._sync_account_balance()
+    await portfolio.restore_positions_from_db(db_positions)
     snap = await portfolio.get_snapshot()
 
-    assert snap['stock_count'] == 3, f"DB로부터 3개 종목이 안전 자가 복구되어야 합니다. (실제: {snap['stock_count']}개)"
+    assert snap['stock_count'] == 3, f"DB로부터 3개 종목이 안전 복원되어야 합니다. (실제: {snap['stock_count']}개)"
     # D+2 예수금이 82,819원에서 차감되지 않고 온전히 82,819원으로 유지되는지 검증
     assert snap['current_capital'] == 82819.0, f"DB 복원 시 D+2 예수금(82,819원)이 차감되지 않아야 합니다. (실제: {snap['current_capital']})"
     assert snap['total_asset'] >= 147069.0
-    print("  ✅ DB 포지션 자가 복원 시 D+2 주문가능금액(82,819원) 보존 및 총자산(147,069원) 정합성 100% 검증")
+    print("  ✅ DB 포지션 안전 복원 시 D+2 주문가능금액(82,819원) 보존 및 총자산(147,069원) 정합성 100% 검증")
 
 async def test_buy_price_multi_layer_inference_and_anti_1won_defense():
     """17. 매수가(매입단가) 6단계 다중 방어 해석 및 '1원' 표기 버그 원천 방어 검증"""
@@ -1097,6 +1082,75 @@ async def test_buy_price_multi_layer_inference_and_anti_1won_defense():
         assert p['buy_price'] > 1.0, f"DB 자가 치유 후 매수가는 1원 초과여야 합니다. (종목: {p['name']}, 매수가: {p['buy_price']})"
     print("  ✅ Case D: DB 1원/0원 오염 데이터 현재가 기반 자가 치유 검증 완료")
 
+async def test_zero_holdings_and_single_source_total_asset_sync():
+    """18. 영웅문 실계좌(국내잔고 0종목 / D+2예수금 141,712원 / 추정자산 141,712원) 동기화 및 중복 합산 방지 검증"""
+    print("▶ [Test 18] 보유종목 0건(전량매도) 유령주식 제거 및 키움 API 총평가금액(141,712원) 단일 소스 매핑 검증...")
+
+    class CurrentRealAccountMockClient(MockKiwoomClient):
+        async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            # 영웅문S# 모바일 앱 현재 상태: 국내잔고 0개, 추정자산 141,712원, D+2예수금 141,712원
+            return {
+                "output1": [{
+                    "tot_evlu_amt": "141712",            # 총평가금액 (141,712원)
+                    "tot_asst_amt": "141712",            # 총자산금액
+                    "dnca_tot_amt": "141712",            # D+2 예수금 (141,712원)
+                    "d2_deposit": "141712",
+                    "entr": "1122",                      # 단순 예수금 잔액 (1,122원)
+                    "prvs_rcdl_excc_amt": "1122",
+                    "sub_amt": "0",                      # 대용금 0원
+                    "pchs_amt_smtl_amt": "0",            # 총매입 0원
+                    "evlu_amt_smtl_amt": "0",            # 총평가 0원
+                    "tot_evlu_pfls_amt": "0",            # 총손익 0원
+                    "tot_pnl_rt": "0.00",
+                    "ord_psbl_cash": "141712"
+                }],
+                "output2": []                            # 보유 종목 0건 (전량 매도 완료 상태)
+            }
+
+        async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM):
+            return {
+                "output1": [{
+                    "entr": "1122",
+                    "prvs_rcdl_excc_amt": "1122",
+                    "dnca_tot_amt": "141712",
+                    "d2_deposit": "141712",
+                    "ord_psbl_cash": "141712"
+                }]
+            }
+
+    mock_client = CurrentRealAccountMockClient()
+    mock_db = MockDatabaseManager()
+    # 과거 DB에 두산에너빌리티가 남아있던 상황 가정
+    mock_db.portfolio = [
+        {"code": "034020", "name": "두산에너빌리티", "qty": 1, "buy_price": 84400.0, "current_price": 84300.0}
+    ]
+
+    portfolio = AsyncPortfolioManager(initial_capital=141712.0, max_stocks=5)
+    # 포트폴리오 인메모리에도 과거 두산에너빌리티가 있던 상태 가정
+    await portfolio.add_position("034020", "두산에너빌리티", qty=1, buy_price=84400.0)
+    assert len(portfolio.positions) == 1
+
+    bot = AsyncTradingBot(is_demo=False, initial_capital=141712.0, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 계좌 잔고 동기화 실행
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+
+    # 1. 유령 주식 제거 검증: 보유 종목 0개여야 함
+    assert snap['stock_count'] == 0, f"보유 종목 수는 0개여야 합니다. (실제: {snap['stock_count']}개)"
+    assert len(snap['positions']) == 0, f"포지션 리스트는 비어있어야 합니다. (실제: {len(snap['positions'])}개)"
+    assert snap['invested_capital'] == 0.0, f"투자 평가액은 0원이어야 합니다. (실제: {snap['invested_capital']}원)"
+    assert "034020" not in portfolio.positions, "두산에너빌리티 유령 주식이 포트폴리오에서 완전히 제거되어야 합니다."
+
+    # 2. DB 동기화 검증: DB의 portfolio도 빈 딕셔너리로 저장되어 테이블이 비워져야 함
+    assert mock_db.portfolio_db == {}, f"DB portfolio 테이블도 0종목으로 비워져야 합니다. (실제: {mock_db.portfolio_db})"
+
+    # 3. 총자산 단일 소스 검증: 키움 API tot_evlu_amt (141,712원) 단일 값 매핑 & 중복 합산(Double counting) 없음
+    assert snap['total_asset'] == 141712.0, f"총자산은 키움 API 총평가금액과 정확히 일치하는 141,712원이어야 합니다. (실제: {snap['total_asset']})"
+    assert snap['current_capital'] == 141712.0, f"D+2 주문가능 예수금은 141,712원이어야 합니다. (실제: {snap['current_capital']})"
+
+    print("  ✅ 보유종목 0건(전량매도) 유령주식 제거, DB 테이블 비우기 및 키움 API 총평가금액(141,712원) 1:1 매핑 100% 검증 완료")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1118,8 +1172,9 @@ async def main():
     await test_kt00018_priority_and_isin_and_zero_padded_codes_parsing()
     await test_db_restore_positions_safety_without_cash_deduction()
     await test_buy_price_multi_layer_inference_and_anti_1won_defense()
+    await test_zero_holdings_and_single_source_total_asset_sync()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 17개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 18개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

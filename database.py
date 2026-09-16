@@ -313,14 +313,15 @@ class DatabaseManager:
 
 
     async def save_portfolio(self, positions_dict, current_prices=None):
-        """현재 봇이 관리 중인 포트폴리오를 DB에 저장 (대시보드 표출용, 빈 dict 시 이전 데이터 임의 삭제 방어)"""
+        """현재 봇이 관리 중인 포트폴리오를 DB에 저장 (전량 매도/0종목 시 DB 테이블 완전 초기화)"""
         if not self.pool: return
         try:
             current_prices = current_prices or {}
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
+                    # 항상 기존 포트폴리오를 삭제하여 전량 매도 시 유령 주식이 남지 않도록 보장
+                    await cursor.execute('DELETE FROM portfolio')
                     if positions_dict:
-                        await cursor.execute('DELETE FROM portfolio')
                         sql = '''
                             INSERT INTO portfolio (code, name, qty, buy_price, current_price)
                             VALUES (%s, %s, %s, %s, %s)
@@ -331,7 +332,7 @@ class DatabaseManager:
                             data.append((code, info['name'], info['qty'], info['buy_price'], c_price))
                         if data:
                             await cursor.executemany(sql, data)
-                        await conn.commit()
+                    await conn.commit()
         except Exception as e:
             print(f"Portfolio 저장 에러: {e}")
 

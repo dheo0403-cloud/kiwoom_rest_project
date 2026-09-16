@@ -167,14 +167,13 @@ async def portfolio_broadcast_loop():
                     try:
                         if hasattr(ctx.db, 'get_portfolio_positions'):
                             db_pos = await ctx.db.get_portfolio_positions()
+                            formatted_pos = []
+                            invested = 0.0
                             if db_pos:
-                                formatted_pos = []
-                                invested = 0.0
                                 for p in db_pos:
                                     qty = int(p.get('qty', 0))
                                     buy_p = float(p.get('buy_price', 0))
                                     cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
-                                    # 1원 표기 버그 방지: DB에 1원/0원으로 저장된 과거 이상값이 있다면 현재가로 자가 치유
                                     if buy_p <= 1.0 and cur_p > 1.0:
                                         buy_p = cur_p
                                     elif cur_p <= 0 and buy_p > 0:
@@ -194,9 +193,9 @@ async def portfolio_broadcast_loop():
                                         "yield_rate": round(y_rate, 2),
                                         "eval_amt": cur_p * qty
                                     })
-                                snapshot["positions"] = formatted_pos
-                                snapshot["stock_count"] = len(formatted_pos)
-                                snapshot["invested_capital"] = invested
+                            snapshot["positions"] = formatted_pos
+                            snapshot["stock_count"] = len(formatted_pos)
+                            snapshot["invested_capital"] = invested
 
                         if hasattr(ctx.db, 'get_latest_balance'):
                             db_bal = await ctx.db.get_latest_balance()
@@ -208,21 +207,6 @@ async def portfolio_broadcast_loop():
                                 snapshot["last_synced_at"] = str(db_bal.get('date', ''))
                     except Exception as e:
                         print(f"DB Portfolio/Balance Sync Error: {e}")
-
-                # 만약 DB에도 포지션이 없다면 키움 클라이언트로부터 직접 1회 폴링 시도 (자가 치유)
-                if (not snapshot.get("positions")) and ctx.client and hasattr(ctx.client, 'get_account_balance'):
-                    try:
-                        raw_bal = await ctx.client.get_account_balance(priority=RequestPriority.LOW)
-                        if raw_bal and ctx.portfolio:
-                            await ctx.portfolio.sync_positions(raw_bal)
-                            if ctx.portfolio.positions:
-                                snap_direct = await ctx.portfolio.get_snapshot()
-                                snapshot["positions"] = snap_direct.get("positions", [])
-                                snapshot["stock_count"] = len(snapshot["positions"])
-                                if ctx.db and hasattr(ctx.db, 'save_portfolio'):
-                                    await ctx.db.save_portfolio(ctx.portfolio.positions)
-                    except Exception as e:
-                        pass
 
                 await ws_manager.broadcast_portfolio({
                     "type": "PORTFOLIO_UPDATE",
@@ -384,14 +368,13 @@ async def get_portfolio():
         try:
             if hasattr(ctx.db, 'get_portfolio_positions'):
                 db_pos = await ctx.db.get_portfolio_positions()
+                formatted_pos = []
+                invested = 0.0
                 if db_pos:
-                    formatted_pos = []
-                    invested = 0.0
                     for p in db_pos:
                         qty = int(p.get('qty', 0))
                         buy_p = float(p.get('buy_price', 0))
                         cur_p = float(p.get('current_price') or (buy_p if buy_p > 1.0 else 0))
-                        # 1원 표기 버그 방지: DB에 1원/0원으로 저장된 과거 이상값이 있다면 현재가로 자가 치유
                         if buy_p <= 1.0 and cur_p > 1.0:
                             buy_p = cur_p
                         elif cur_p <= 0 and buy_p > 0:
@@ -411,9 +394,9 @@ async def get_portfolio():
                             "yield_rate": round(y_rate, 2),
                             "eval_amt": cur_p * qty
                         })
-                    snapshot["positions"] = formatted_pos
-                    snapshot["stock_count"] = len(formatted_pos)
-                    snapshot["invested_capital"] = invested
+                snapshot["positions"] = formatted_pos
+                snapshot["stock_count"] = len(formatted_pos)
+                snapshot["invested_capital"] = invested
 
             if hasattr(ctx.db, 'get_latest_balance'):
                 db_bal = await ctx.db.get_latest_balance()
@@ -425,21 +408,6 @@ async def get_portfolio():
                     snapshot["last_synced_at"] = str(db_bal.get('date', ''))
         except Exception as e:
             print(f"Portfolio DB sync error: {e}")
-
-    # 만약 DB에도 포지션이 없다면 키움 클라이언트로부터 직접 1회 폴링 시도
-    if (not snapshot.get("positions")) and ctx.client and hasattr(ctx.client, 'get_account_balance'):
-        try:
-            raw_bal = await ctx.client.get_account_balance(priority=RequestPriority.LOW)
-            if raw_bal and ctx.portfolio:
-                await ctx.portfolio.sync_positions(raw_bal)
-                if ctx.portfolio.positions:
-                    snap_direct = await ctx.portfolio.get_snapshot()
-                    snapshot["positions"] = snap_direct.get("positions", [])
-                    snapshot["stock_count"] = len(snapshot["positions"])
-                    if ctx.db and hasattr(ctx.db, 'save_portfolio'):
-                        await ctx.db.save_portfolio(ctx.portfolio.positions)
-        except Exception as e:
-            pass
 
     return snapshot
 
