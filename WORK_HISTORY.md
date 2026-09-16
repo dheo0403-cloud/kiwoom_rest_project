@@ -2,6 +2,46 @@
 
 ---
 
+## 📅 [2026-09-16 10:55] 키움 TR 보유종목 매입단가(매수가) '1원' 표출 버그 완벽 해결 및 6단계 다중 방어 해석 알고리즘(6-Layer Resolution) & 프론트엔드 안전 렌더링 배포 완료
+
+### 1. 작업 개요 및 목적
+- **1) 보유종목 '매수가 1원' 표출 버그 원인 규명 및 전면 해결:**
+  - **원인 ① (프론트엔드 Default Coercion의 함정):** `ActivePositionsBento.tsx` 및 `Header.tsx`에서 `const buyPrice = pos.buy_price || 1;` 구문으로 인해, 백엔드로부터 `buy_price`가 `0` 또는 누락으로 전달될 경우 `0 || 1` 연산에 의해 모든 종목의 매수가가 강제로 '1원'으로 표출되던 결함을 규명.
+  - **원인 ② (TR 스키마 단가 필드 파편화 및 단가 누락 시 역산 부재):** 키움 TR(`kt00018`, `kt00004`, `kt00005`, `opw00018`)에서 `pchs_avg_pric` 단가 필드가 누락되고 `pchs_amt`(매입금액), `evlu_amt`(평가금액), `evlu_pfls_amt`(평가손익), `evlu_pfls_rt`(수익률)만 전송될 때 단가를 복원하는 다중 역산 파이프라인이 부재했던 점을 해결.
+  - **원인 ③ (DB 복원 데이터의 1원 오염):** 과거 1원으로 저장되었던 DB 데이터가 복원될 때 자가 치유(Self-Healing) 로직이 부재했던 결함 해결.
+- **2) 6단계 매수가 다중 방어 해석 알고리즘 탑재 (`async_portfolio.py`):**
+  - **Layer 1 (직접 단가 키 탐색):** `pchs_avg_pric`, `pchs_price`, `pchs_prc`, `buy_uv`, `ccls_avg_pric`, `ccls_prc`, `pur_prc`, `thst_buy_uv`, `매입단가`, `매수가` 등 30여 개 키에서 1원 초과 유효값 추출.
+  - **Layer 2 (매입금액 / 수량 역산):** `pchs_amt` / `qty`를 통해 정확한 매입단가 산출.
+  - **Layer 3 (평가손익 역산):** `(evlu_amt - pnl) / qty`를 통해 매입원금 및 단가 산출.
+  - **Layer 4 (수익률 역산):** `current_price / (1 + yield_rate / 100)`를 통해 현재가와 수익률 기반 단가 복원.
+  - **Layer 5 (직전 포지션 상속):** 인메모리 `prev_positions`의 유효 매수가 보존 및 상속.
+  - **Layer 6 (현재가 안전 폴백):** 어떠한 단가 필드도 유효하지 않을 경우 `current_price`를 안전 기본값으로 채택하여 0원/1원 왜곡을 원천 차단.
+- **3) DB 및 API 서버 자가 치유(Self-Healing) 탑재 (`api_server.py`, `async_portfolio.py`):**
+  - DB 복원 및 실시간 브로드캐스트 루프에서 `buy_p <= 1.0 and cur_p > 1.0`인 경우 현재가(`cur_p`)로 자동 보정하여 오염 데이터 차단.
+- **4) 프론트엔드 안전 렌더링 및 단가 복원 (`ActivePositionsBento.tsx`, `Header.tsx`):**
+  - `|| 1` 구문 제거 및 `rawBuyPrice > 1 ? rawBuyPrice : (rawCurPrice > 1 ? rawCurPrice : 0)` 안전 fallback 적용.
+  - PnL 및 수익률 계산 시 0으로 나누기 방지 및 백엔드 원본 손익/수익률 우선 바인딩.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `async_portfolio.py`:
+  - `buy_p_keys`, `pchs_amt_keys`, `cur_p_keys`, `evlu_amt_keys`, `pnl_keys`, `rt_keys` 전수 확장.
+  - 6단계 매수가 다중 방어 해석 알고리즘 탑재.
+  - `restore_positions_from_db` 내 DB 오염 데이터 자가 치유 로직 추가.
+- `api_server.py`:
+  - `portfolio_broadcast_loop` 및 `get_portfolio()` 내 1원/0원 방지 자가 치유 및 정합성 보장.
+- `frontend/src/components/ActivePositionsBento.tsx` & `frontend/src/components/Header.tsx`:
+  - `const buyPrice = pos.buy_price || 1;` 결함 제거 및 현재가 기반 안전 fallback 로직 적용.
+- `test_async_trading_loop.py`:
+  - `MockDatabaseManager.get_portfolio_positions` 구현 및 Test 17 (매수가 6단계 다중 방어 해석 및 1원 버그 원천 방어) 신설.
+
+### 3. 검증 결과
+- **테스트 스위트:** `test_async_trading_loop.py` 총 17개 종합 테스트 100% 통과 (`ALL PASS`).
+- **단위 테스트:** `test_async_core.py`, `test_api_server.py`, `test_strategy_quant.py`, `test_valuation.py`, `test_indicators.py` 전 항목 100% 통과.
+- **프론트엔드 빌드:** `npm run build` 번들링 성공 (0 errors).
+- **형상 관리 및 배포:** `fix/rendering-optimization-and-safety-fixes` 브랜치 커밋 `a0534f7` 원격 push 완료.
+
+---
+
 ## 📅 [2026-09-15 13:00] UI 렌더링 최적화(Display State 10분 주기 분리), 보유 포지션 파이프라인 정합성 복원 및 감시 종목 고가 필터 1차 방어 로직 복원 완료
 
 ### 1. 작업 개요 및 목적
