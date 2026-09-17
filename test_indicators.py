@@ -152,3 +152,55 @@ def test_compute_all_and_latest_indicators(sample_ohlcv_df):
     assert 'chandelier_long' in latest
     assert 'squeeze_on' in latest
     assert latest['close'] > 0
+
+
+def test_orderbook_imbalance_and_volume_power():
+    """호가창 불균형(Imbalance Ratio) 및 체결강도(Volume Power) 검증"""
+    mock_orderbook = {
+        'output': [{
+            'buy_fpr_bid_qty1': '1000', 'buy_fpr_bid_qty2': '2000', 'buy_fpr_bid_qty3': '1500',
+            'buy_fpr_bid_qty4': '500', 'buy_fpr_bid_qty5': '1000',  # Total Bid = 6,000주
+            'sel_fpr_bid_qty1': '500', 'sel_fpr_bid_qty2': '500', 'sel_fpr_bid_qty3': '1000',
+            'sel_fpr_bid_qty4': '500', 'sel_fpr_bid_qty5': '500',   # Total Ask = 3,000주
+            'sel_fpr_bid': '70100', 'buy_fpr_bid': '70000'
+        }]
+    }
+
+    res = TechnicalIndicators.calculate_orderbook_imbalance(mock_orderbook)
+    assert res['total_bid_qty'] == 6000.0
+    assert res['total_ask_qty'] == 3000.0
+    # Imbalance = (6000 - 3000) / 9000 = +0.3333 (매수 우세)
+    assert 0.33 <= res['imbalance_ratio'] <= 0.34
+    assert res['bid_ask_spread'] == 100.0
+
+    # 체결강도 산출 검증
+    vp_strong = TechnicalIndicators.calculate_volume_power(accum_buy_vol=15000, accum_sell_vol=10000)
+    assert vp_strong == 150.0  # 150%
+
+    vp_weak = TechnicalIndicators.calculate_volume_power(accum_buy_vol=5000, accum_sell_vol=10000)
+    assert vp_weak == 50.0   # 50%
+
+
+def test_macro_regime_filter():
+    """거시 시장(Macro) 레짐 필터 및 지수 급락 감지 검증"""
+    from macro_regime_filter import MacroRegimeFilter, MarketRegime
+
+    macro = MacroRegimeFilter(kodex_crash_threshold=-1.5, vix_panic_threshold=28.0)
+
+    # 1. KODEX 200 -2.0% 급락 시 PANIC_CRASH 레짐 판정
+    regime, desc = macro.evaluate_regime(kodex200_change_pct=-2.0)
+    assert regime == MarketRegime.PANIC_CRASH
+    assert macro.is_buy_allowed() is False
+    assert macro.get_regime_kelly_multiplier() == 0.0
+
+    # 2. KODEX 200 -0.8% 조정 시 NEUTRAL_RANGE 레짐 판정 (켈리 비중 60% 축소)
+    regime, desc = macro.evaluate_regime(kodex200_change_pct=-0.8)
+    assert regime == MarketRegime.NEUTRAL_RANGE
+    assert macro.is_buy_allowed() is True
+    assert macro.get_regime_kelly_multiplier() == 0.6
+
+    # 3. KODEX 200 +1.2% 상승 시 BULL_TREND 레짐 판정 (켈리 비중 100% 정상 가동)
+    regime, desc = macro.evaluate_regime(kodex200_change_pct=+1.2)
+    assert regime == MarketRegime.BULL_TREND
+    assert macro.is_buy_allowed() is True
+    assert macro.get_regime_kelly_multiplier() == 1.0

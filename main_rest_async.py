@@ -20,6 +20,7 @@ from market_data_buffer import MarketDataBuffer
 from strategy import AdaptiveVolatilityBreakoutStrategy
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
+from macro_regime_filter import MacroRegimeFilter, MarketRegime
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -53,6 +54,7 @@ class AsyncTradingBot:
         self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
         self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer)
         self.notifier = notifier or AsyncNotifier()
+        self.macro_filter = MacroRegimeFilter(kodex_crash_threshold=-1.5, vix_panic_threshold=28.0)
 
         self.market_filter_passed = True
         self.kodex200_change_rate = 0.0
@@ -675,7 +677,7 @@ class AsyncTradingBot:
             await self.SetRealReg("1000", watch_codes, ["10", "13", "20", "41"], "0")
 
     async def check_market_filter(self):
-        """KODEX 200 (069500) 지수 급락 감지 (-1.5% 하락 시 신규 매수 제한)"""
+        """KODEX 200 (069500) 및 복합 매크로 레짐 필터링 (급락장 판정 시 신규 매수 제한)"""
         kodex_data = await self.client.get_price("069500", priority=RequestPriority.LOW)
         if not kodex_data:
             return
@@ -688,16 +690,19 @@ class AsyncTradingBot:
         try:
             fluct_rate = float(fluct_rate_str)
             self.kodex200_change_rate = fluct_rate
-            if fluct_rate <= -1.5:
+
+            # 거시 시장 레짐 평가
+            regime, desc = self.macro_filter.evaluate_regime(kodex200_change_pct=fluct_rate)
+            if regime == MarketRegime.PANIC_CRASH:
                 if self.market_filter_passed:
                     self.market_filter_passed = False
-                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] KODEX 200 {fluct_rate:.2f}% 하락. 신규 매수를 일시 제한합니다.")
-                    print(f"🚨 [시장 필터] KODEX 200 {fluct_rate:.2f}% 급락 -> 신규 매수 제한")
+                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] {desc}. 신규 매수를 일시 제한합니다.")
+                    print(f"🚨 [시장 필터/매크로] {desc} -> 신규 매수 제한 (급락장 방어)")
             else:
                 if not self.market_filter_passed:
                     self.market_filter_passed = True
-                    await self.db.log_message("INFO", f"✅ [시장 안정 회복] KODEX 200 {fluct_rate:.2f}%. 신규 매수를 재개합니다.")
-                    print(f"✅ [시장 필터] KODEX 200 안정 ({fluct_rate:.2f}%) -> 신규 매수 허용")
+                    await self.db.log_message("INFO", f"✅ [시장 안정 회복] {desc}. 정상 매수를 재개합니다.")
+                    print(f"✅ [시장 필터/매크로] {desc} -> 정상 매수 허용")
         except ValueError:
             pass
 

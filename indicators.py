@@ -385,3 +385,73 @@ class TechnicalIndicators:
             'plus_di': float(latest.get('plus_di', 0)),
             'minus_di': float(latest.get('minus_di', 0))
         }
+
+    @staticmethod
+    def calculate_orderbook_imbalance(orderbook: Dict[str, Any]) -> Dict[str, float]:
+        """
+        호가창 불균형(Orderbook Imbalance) 및 스프레드 지표 산출
+        - Imbalance Ratio = (Total Bid Qty - Total Ask Qty) / (Total Bid Qty + Total Ask Qty)
+        - 양수(+): 매수 잔량 우세 (상승 지지 압력)
+        - 음수(-): 매도 잔량 우세 (하락 매도 압력)
+        """
+        if not orderbook or not isinstance(orderbook, dict):
+            return {'imbalance_ratio': 0.0, 'total_bid_qty': 0.0, 'total_ask_qty': 0.0, 'bid_ask_spread': 0.0}
+
+        out = orderbook.get('output', orderbook)
+        if isinstance(out, list) and len(out) > 0:
+            out = out[0]
+        elif not isinstance(out, dict):
+            out = {}
+
+        total_bid_qty = 0.0
+        total_ask_qty = 0.0
+
+        # 5단계 호가 잔량 집계
+        for i in range(1, 6):
+            b_q = out.get(f'buy_fpr_bid_qty{i}') or out.get(f'bid_qty{i}') or out.get(f'bid_rsqn{i}') or 0
+            a_q = out.get(f'sel_fpr_bid_qty{i}') or out.get(f'ask_qty{i}') or out.get(f'ask_rsqn{i}') or 0
+            try:
+                total_bid_qty += abs(float(str(b_q).replace(',', '').strip() or 0))
+                total_ask_qty += abs(float(str(a_q).replace(',', '').strip() or 0))
+            except (ValueError, TypeError):
+                pass
+
+        # 총 매수/매도 잔량 필드가 직접 제공되는 경우 우선 반영
+        tot_b = out.get('tot_buy_qty') or out.get('total_bid_qty') or out.get('tot_bid_rsqn')
+        tot_a = out.get('tot_sel_qty') or out.get('total_ask_qty') or out.get('tot_ask_rsqn')
+        if tot_b and tot_a:
+            try:
+                total_bid_qty = max(total_bid_qty, abs(float(str(tot_b).replace(',', '').strip() or 0)))
+                total_ask_qty = max(total_ask_qty, abs(float(str(tot_a).replace(',', '').strip() or 0)))
+            except (ValueError, TypeError):
+                pass
+
+        total_depth = total_bid_qty + total_ask_qty
+        imbalance_ratio = ((total_bid_qty - total_ask_qty) / total_depth) if total_depth > 0 else 0.0
+
+        ask1 = out.get('sel_fpr_bid') or out.get('ask_price1') or 0
+        bid1 = out.get('buy_fpr_bid') or out.get('bid_price1') or 0
+        try:
+            spread = max(0.0, float(str(ask1).replace(',', '').strip() or 0) - float(str(bid1).replace(',', '').strip() or 0))
+        except (ValueError, TypeError):
+            spread = 0.0
+
+        return {
+            'imbalance_ratio': round(imbalance_ratio, 4),
+            'total_bid_qty': total_bid_qty,
+            'total_ask_qty': total_ask_qty,
+            'bid_ask_spread': spread
+        }
+
+    @staticmethod
+    def calculate_volume_power(accum_buy_vol: float, accum_sell_vol: float) -> float:
+        """
+        체결강도(Volume Power / Buying Strength) 산출 (%)
+        - 체결강도 = (체결 매수량 / 체결 매도량) * 100.0
+        - 100% 초과: 매수 체결 우세
+        - 120% 이상: 강력한 수급 모멘텀
+        """
+        if accum_sell_vol <= 0:
+            return 100.0 if accum_buy_vol <= 0 else 200.0
+        power = (accum_buy_vol / accum_sell_vol) * 100.0
+        return round(float(np.clip(power, 0.0, 500.0)), 2)
