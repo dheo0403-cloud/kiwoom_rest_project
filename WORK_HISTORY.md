@@ -2,6 +2,46 @@
 
 ---
 
+## 📅 [2026-09-17 14:00] 키움 자동매매 장중 매수 차단 결함 수정, 3단계 분할 익절 수량 개선, 본절선 1.0025 상향 및 09:15 타임 필터 배포
+
+### 1. 작업 개요 및 목적
+- **장중 주식 '매수(Buy)' 전면 차단 원인 규명 및 긴급 정상화:**
+  - **시가(Open Price) 덮어쓰기 결함 복구:** `_evaluate_buy_condition`에서 `ind['open'] = cur_price`로 현재가를 대입하여 `cur_price >= cur_price + 0.5*ATR`이 되어 변동성 돌파 매수가 100% 기각되던 치명적 결함을 당일 실제 시가(`info.get('open_price')`)로 매핑하여 정상화.
+  - **KODEX 200 시장 지수 필터 완화:** 과도하게 민감했던 지수 급락 기준(`-0.8%`)을 `-1.5%`로 정상 복구하여 장중 소폭 조정 시 매수 파이프라인이 조기 차단되는 현상 해결.
+  - **RSI(14) 필터 및 0 나누기 방어:** 모멘텀 돌파 전략 특성을 고려하여 RSI 70+ 차단을 85+ 극단 과열 차단으로 완화하고, 가격 무변동 시 RSI 100으로 왜곡되던 `indicators.py` 로직 수정.
+  - **거래대금/환산거래량 필터 완화:** 당일 30억 이상 및 환산거래량 1.5배로 유연화하여 유효 주도주 진입 허들 정상화.
+- **익절 수량 배분 구조 개선:**
+  - 1차: 전체 물량의 50% 매도 (Stage 0 -> Stage 1)
+  - 2차: 잔여 물량의 50% 매도 (Stage 1 -> Stage 2)
+  - 3차: 나머지 잔여 물량 전량(100%) 청산 (Stage 2 -> 청산)
+- **본절선(Break-even) 가드 기준 상향:**
+  - 거래세(0.18%) + 수수료(0.015%x2) + 슬리피지를 완벽 보전하기 위해 기존 `1.002`에서 **`1.0025`(+0.25%)**로 상향.
+- **장초반 노이즈 회피 09:15 타임 필터 신설:**
+  - 09:00~09:15 구간의 휩소/호가 불안정을 방어하기 위해 09:15 이전 신규 매수를 원천 차단하는 Time 조건 추가.
+
+### 2. 주요 수정 파일 및 변경 내역
+- `main_rest_async.py`:
+  - `update_watchlist()`, `OnReceiveRealData()`, `_realtime_data_stream_worker()`, `monitor_watchlist_and_enter()`에 당일 시가(`open_price`) 파싱 및 실시간 틱 전달 파이프라인 구축.
+  - `_evaluate_buy_condition()`: `ind['open'] = open_price` 주입 및 09:15 이전 매수 차단 타임 필터 가드 추가.
+  - `check_market_filter()`: KODEX 200 임계값 `-1.5%`로 복원.
+  - `take_profit_stages` 및 `monitor_positions_and_exit()`: 1차(전체의 50%), 2차(잔여의 50%), 3차(나머지 전량) 단계별 익절 수량 정밀화.
+- `strategy.py`:
+  - 09:15 타임 필터, RSI 85+ 과열 필터, 당일 30억 & 환산거래량 1.5배, 피보나치/돌파 안정화 적용.
+  - 본절선 가드 및 샹들리에 트레일링 스탑 본절선 `buy_price * 1.0025` 적용.
+- `indicators.py`:
+  - `calculate_rsi()`: 변동 없을 때(gain=0, loss=0) RSI 50.0 기본값 처리 및 극단 플랫 왜곡 방어.
+- `test_strategy_quant.py`:
+  - `test_breakeven_guard_1_0025`, `test_time_filter_0915_and_buy_breakout`, 3차 전량 익절 테스트 추가.
+- `test_async_trading_loop.py`:
+  - Test 20 (`test_buy_signal_open_price_and_0915_time_filter`) 추가 및 20개 시뮬레이션 테스트 100% 통과.
+
+### 3. 검증 결과
+- **단위/통합 테스트:** `pytest` 전체 56개 테스트 스위트 100% 통과 (`56 passed`).
+- **20개 트레이딩 루프 시뮬레이션:** `python test_async_trading_loop.py` 100% 통과.
+- **인사이트 영구 저장:** `Mem0`에 매매 로직 조건문 충돌 및 Git Diff 추적 해결 패턴 저장 완료.
+
+---
+
 ## 📅 [2026-09-16 17:55] 수동 일시정지 후 익일 영업일 아침(08:50 AM) 자동 재시작(Wake-up) 스케줄러 구축 및 State 오버라이드 배포 완료
 
 ### 1. 작업 개요 및 목적

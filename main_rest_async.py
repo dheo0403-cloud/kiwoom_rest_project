@@ -66,11 +66,11 @@ class AsyncTradingBot:
         self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
         self.watchlist: Dict[str, Dict[str, Any]] = {}
 
-        # 분할 익절 단계 목표치 (1차 50% 분할 익절로 초기 확정 손익 극대화)
+        # 분할 익절 단계 목표치 (1차 전체의 50%, 2차 잔여 물량의 50%, 3차 나머지 전량 100%)
         self.take_profit_stages = [
-            (0.03, 0.50, 1),  # +3% 도달 시 50% 1차 익절 -> Stage 1
-            (0.05, 0.50, 2),  # +5% 도달 시 남은 수량의 50% 2차 익절 -> Stage 2
-            (0.08, 1.00, 3),  # +8% 도달 시 잔여 수량 전량(100%) 3차 익절 -> Stage 3
+            (0.03, 0.50, 1),  # +3% 도달 시 1차 익절 (전체의 50% 매도) -> Stage 1
+            (0.05, 0.50, 2),  # +5% 도달 시 2차 익절 (잔여 물량의 50% 매도) -> Stage 2
+            (0.08, 1.00, 3),  # +8% 도달 시 3차 익절 (나머지 전량 100% 매도) -> Stage 3
         ]
         self.stop_loss_rate = -0.03  # -3.0% 타이트한 하드 스탑로스 (CRITICAL 긴급 매도)
         self.trailing_stop_drop = 0.020  # 최고점 대비 2.0% 반락 시 트레일링 스탑 매도
@@ -144,11 +144,12 @@ class AsyncTradingBot:
         """
         실시간 데이터 수신 이벤트 핸들러 (OpenAPI OnReceiveRealData 호환)
         - 실시간 틱 수신 시 최상단 핑(Ping) 디버그 로그 출력
-        - 인메모리 링버퍼 및 포트폴리오/워치리스트 현재가 즉각 갱신
+        - 인메모리 링버퍼 및 포트폴리오/워치리스트 현재가/시가 즉각 갱신
         - 피보나치 매수 조건 평가 함수(_evaluate_buy_condition) 즉시 호출
         """
         raw_p = real_data.get('current_price') or real_data.get('prpr') or real_data.get('stck_prpr') or real_data.get('cur_prc') or 0
         raw_v = real_data.get('volume') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
+        raw_open = real_data.get('open_price') or real_data.get('oprn') or real_data.get('stck_oprc') or real_data.get('open_pric') or 0
 
         try:
             cur_price = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
@@ -159,6 +160,11 @@ class AsyncTradingBot:
             cur_volume = abs(float(str(raw_v).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
         except (ValueError, TypeError):
             cur_volume = 0.0
+
+        try:
+            open_price = abs(float(str(raw_open).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+        except (ValueError, TypeError):
+            open_price = 0.0
 
         if cur_price <= 0:
             return
@@ -171,8 +177,10 @@ class AsyncTradingBot:
         await self.portfolio.update_current_price(code, cur_price)
         if code in self.watchlist:
             self.watchlist[code]['current_price'] = cur_price
+            if open_price > 0:
+                self.watchlist[code]['open_price'] = open_price
 
-        # 3. 피보나치 매수 조건 평가 함수 즉각 호출
+        # 3. 피보나치 및 ATR 변동성 돌파 매수 조건 평가 함수 즉각 호출
         await self._evaluate_buy_condition(code, cur_price, cur_volume)
 
     async def run_daily_trading_loop(self):
@@ -613,13 +621,19 @@ class AsyncTradingBot:
                 fib_618 = period_high - (diff * 0.618)
                 avg_vol = float(sum(vols) / len(vols)) if vols else 0.0
 
-                # 현재가 추출
+                # 현재가 및 당일 시가 추출
                 c_first = chart_items[0] if isinstance(chart_items[0], dict) else {}
                 cur_price_raw = (
                     item.get('prpr') or item.get('cur_prc') or item.get('stck_prpr') or item.get('price') or
                     c_first.get('cur_prc') or c_first.get('clpr') or c_first.get('stck_clpr') or c_first.get('close') or period_high
                 )
                 cur_price = abs(float(str(cur_price_raw).replace(',', '').strip()))
+
+                open_price_raw = (
+                    item.get('oprn') or item.get('stck_oprc') or item.get('open_price') or item.get('open_pric') or
+                    c_first.get('oprn') or c_first.get('stck_oprc') or c_first.get('open_pric') or c_first.get('open') or cur_price
+                )
+                open_price = abs(float(str(open_price_raw).replace(',', '').strip())) if open_price_raw else cur_price
 
                 # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist에서 즉시 제외
                 if available_cash > 0 and cur_price > available_cash:
@@ -631,6 +645,7 @@ class AsyncTradingBot:
                     'code': code,
                     'name': name,
                     'current_price': cur_price,
+                    'open_price': open_price,
                     'period_high': period_high,
                     'period_low': period_low,
                     'fib_382': fib_382,
@@ -660,7 +675,7 @@ class AsyncTradingBot:
             await self.SetRealReg("1000", watch_codes, ["10", "13", "20", "41"], "0")
 
     async def check_market_filter(self):
-        """KODEX 200 (069500) 지수 급락 감지 (-0.8% 하락 시 신규 매수 보수적 제한)"""
+        """KODEX 200 (069500) 지수 급락 감지 (-1.5% 하락 시 신규 매수 제한)"""
         kodex_data = await self.client.get_price("069500", priority=RequestPriority.LOW)
         if not kodex_data:
             return
@@ -673,11 +688,11 @@ class AsyncTradingBot:
         try:
             fluct_rate = float(fluct_rate_str)
             self.kodex200_change_rate = fluct_rate
-            if fluct_rate <= -0.8:
+            if fluct_rate <= -1.5:
                 if self.market_filter_passed:
                     self.market_filter_passed = False
-                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] KODEX 200 {fluct_rate:.2f}% 하락. 신규 매수를 보수적으로 제한합니다.")
-                    print(f"🚨 [시장 필터] KODEX 200 {fluct_rate:.2f}% 하락 -> 신규 매수 제한 (하락장 방어)")
+                    await self.db.log_message("WARNING", f"🚨 [시장 급락 감지] KODEX 200 {fluct_rate:.2f}% 하락. 신규 매수를 일시 제한합니다.")
+                    print(f"🚨 [시장 필터] KODEX 200 {fluct_rate:.2f}% 급락 -> 신규 매수 제한")
             else:
                 if not self.market_filter_passed:
                     self.market_filter_passed = True
@@ -787,13 +802,16 @@ class AsyncTradingBot:
             )
 
             if action == "SELL_ALL":
-                print(f"🚨 [EXIT_SIGNAL/SELL_ALL] {name}({code}) -> {reason}")
+                print(f"🚨 [EXIT_SIGNAL/SELL_ALL] {name}({code}) -> {reason} ({qty}주 전량 매도)")
                 await self._execute_emergency_sell(code, name, qty, cur_price, reason=reason)
             elif action == "SELL_PARTIAL":
-                sell_ratio = 0.50 if stage == 0 else 0.50
+                # 1차: 전체 물량의 50% 매도 (Stage 0 -> Stage 1)
+                # 2차: 잔여 물량의 50% 매도 (Stage 1 -> Stage 2)
+                # 3차: SELL_ALL로 처리되어 잔여 물량 전량 청산 (Stage 2 -> 청산)
+                sell_ratio = 0.50
                 sell_qty = max(1, int(qty * sell_ratio))
                 next_stage = stage + 1
-                print(f"🎯 [EXIT_SIGNAL/SELL_PARTIAL] {name}({code}) -> {reason} ({sell_qty}주 매도)")
+                print(f"🎯 [EXIT_SIGNAL/SELL_PARTIAL] {name}({code}) -> {reason} ({sell_qty}주 매도, 잔여 {qty - sell_qty}주 유지)")
                 await self._execute_profit_sell(code, name, sell_qty, cur_price, next_stage, reason=reason)
 
     async def cleanup_unexecuted_orders(self):
@@ -909,6 +927,16 @@ class AsyncTradingBot:
         if not self.market_filter_passed:
             return
 
+        now = datetime.now()
+        skip_time_filter = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
+
+        # [타임 필터 가드] 09:15 이전 장초반 노이즈 구간 및 14:30 이후 시간외 신규 매수 원천 차단
+        if not skip_time_filter:
+            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
+                return
+            if now.hour > 14 or (now.hour == 14 and now.minute >= 30):
+                return
+
         info = self.watchlist.get(code)
         if not info:
             return
@@ -919,6 +947,7 @@ class AsyncTradingBot:
         fib_618 = info.get('fib_618', 0)
         period_high = info.get('period_high', 0)
         period_low = info.get('period_low', 0)
+        open_price = float(info.get('open_price') or info.get('open') or cur_price)
         current_deposit = self.portfolio.current_capital
 
         # 1. 포지션 한도 및 중복 매수 체크
@@ -935,9 +964,10 @@ class AsyncTradingBot:
         ind['fib_382'] = fib_382
         ind['fib_500'] = fib_500
         ind['fib_618'] = fib_618
-        ind['open'] = cur_price
+        ind['open'] = open_price  # 당일 실제 시가 매핑 (변동성 돌파 정상 판정)
+        ind['is_watchlist'] = True
         ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
-        ind['skip_time_filter'] = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
+        ind['skip_time_filter'] = skip_time_filter
 
         # 3. 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀 & 피보나치)
         buy_signal, reason = await self.strategy.check_buy_signal(
@@ -1022,6 +1052,7 @@ class AsyncTradingBot:
 
                     raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
                     raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+                    raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
                     try:
                         cur_p = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
@@ -1033,10 +1064,16 @@ class AsyncTradingBot:
                     except (ValueError, TypeError):
                         cur_v = 0.0
 
+                    try:
+                        cur_o = abs(float(str(raw_o).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+                    except (ValueError, TypeError):
+                        cur_o = 0.0
+
                     if cur_p > 0:
                         await self.OnReceiveRealData(code, "주식체결", {
                             "current_price": cur_p,
                             "volume": cur_v,
+                            "open_price": cur_o,
                             "raw": out
                         })
 
@@ -1068,6 +1105,7 @@ class AsyncTradingBot:
 
             raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
             raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
             try:
                 cur_price = abs(float(str(raw_p).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
@@ -1082,10 +1120,16 @@ class AsyncTradingBot:
             except (ValueError, TypeError):
                 cur_volume = 0.0
 
+            try:
+                cur_open = abs(float(str(raw_o).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
+            except (ValueError, TypeError):
+                cur_open = 0.0
+
             # OnReceiveRealData 이벤트로 통일 전달
             await self.OnReceiveRealData(code, "주식체결", {
                 "current_price": cur_price,
                 "volume": cur_volume,
+                "open_price": cur_open,
                 "raw": out
             })
 

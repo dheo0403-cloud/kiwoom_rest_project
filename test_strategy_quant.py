@@ -111,6 +111,64 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action, "SELL_PARTIAL")
         self.assertIn("2차_ATR_R2_분할익절", reason)
 
+        # 3차 목표가: 200,000 + 3.5 * 4,000 = 214,000원 (+7~8%) -> 잔여 전량 청산
+        action, reason = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=215000, ind=ind, sell_stage=2
+        )
+        self.assertEqual(action, "SELL_ALL")
+        self.assertIn("3차_ATR_R3_전량익절", reason)
+
+    async def test_breakeven_guard_1_0025(self):
+        """1.0025 (+0.25% 수수료/거래세/슬리피지 보전) 본절선 상향 가드 검증"""
+        code = "005930"
+        buy_price = 100000.0
+        # 최고가가 +1.5% 이상 도달 (102,000원)
+        highest_price = 102000.0
+        ind = {'atr14': 2000.0, 'skip_time_filter': True}
+
+        # 1) 현재가가 100,300원 (100,000 * 1.0025 = 100,250원 초과) -> 아직 본절선 위이므로 대기
+        action, _ = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=100300, ind=ind,
+            highest_price=highest_price, sell_stage=0
+        )
+        self.assertEqual(action, "WAIT")
+
+        # 2) 현재가가 100,200원 (100,000 * 1.0025 = 100,250원 이하로 반락) -> 본절스탑 긴급 청산
+        action, reason = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=100200, ind=ind,
+            highest_price=highest_price, sell_stage=0
+        )
+        self.assertEqual(action, "SELL_ALL")
+        self.assertIn("본절스탑_손실전환방어", reason)
+
+    async def test_time_filter_0915_and_buy_breakout(self):
+        """09:15 타임 필터 및 실제 시가 기반 ATR 변동성 돌파 매수 검증"""
+        code = "005930"
+        open_price = 70000.0
+        atr14 = 2000.0
+        # 돌파 기준가: 70,000 + 0.5 * 2,000 = 71,000원
+        ind = {
+            'open': open_price,
+            'atr14': atr14,
+            'avg_vol': 100000,
+            'is_watchlist': True,
+            'skip_time_filter': True
+        }
+
+        # 1) 돌파 미달 (현재가 70,500원 < 71,000원)
+        buy_sig, reason = await self.strategy.check_buy_signal(
+            code=code, current_price=70500, current_volume=200000, ind=ind
+        )
+        self.assertFalse(buy_sig)
+        self.assertIn("변동성돌파_미달", reason)
+
+        # 2) 돌파 성공 (현재가 71,500원 >= 71,000원)
+        buy_sig, reason = await self.strategy.check_buy_signal(
+            code=code, current_price=71500, current_volume=200000, ind=ind
+        )
+        self.assertTrue(buy_sig)
+        self.assertIn("ATR_적응형변동성돌파", reason)
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -1199,6 +1199,55 @@ async def test_bot_auto_wakeup_and_resume_schedule():
 
     print("  ✅ 수동 일시정지 후 익일 아침 자동 웨이크업 및 RUNNING 상태 복원 100% 검증 완료")
 
+async def test_buy_signal_open_price_and_0915_time_filter():
+    """20. 당일 시가(Open Price) 기반 ATR 변동성 돌파 매수 정상 체결 및 09:15 타임 필터 검증"""
+    print("▶ [Test 20] 당일 시가(Open) 기반 ATR 변동성 돌파 매수 및 09:15 타임 필터 가드 검증...")
+
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. Watchlist에 정상 시가(Open=70,000원) 및 피보나치 레벨 설정
+    bot.watchlist["005930"] = {
+        "name": "삼성전자",
+        "open_price": 70000.0,
+        "period_high": 80000.0,
+        "period_low": 65000.0,
+        "fib_382": 74270.0,
+        "fib_500": 72500.0,
+        "fib_618": 70730.0,
+        "avg_volume": 100000,
+        "current_price": 70000.0
+    }
+
+    # 2. 링버퍼에 20개 분봉 로드 (ATR = 2,000원)
+    # 돌파 기준가 = Open(70,000) + 0.5 * ATR(2,000) = 71,000원
+    candles = [
+        {"datetime": f"2026-09-17 09:{i:02d}:00", "open": 70000, "high": 71000, "low": 69500, "close": 70500, "volume": 5000}
+        for i in range(20)
+    ]
+    bot.buffer.load_initial_candles("005930", candles)
+
+    # 3. 돌파 미달 및 피보나치 하회 가격 (70,500원 < fib_618(70,730원) 및 돌파기준가(71,000원)) -> 매수 주문 미발생
+    mock_client.sent_orders.clear()
+    mock_client.prices["005930"] = 70500.0
+    await bot._evaluate_buy_condition("005930", cur_price=70500.0, cur_volume=50000.0)
+    assert "005930" not in portfolio.positions, "돌파 기준가(71,000원) 미달 시 매수되지 않아야 합니다."
+    assert len(mock_client.sent_orders) == 0
+
+    # 4. 돌파 성공 가격 (71,500원 >= 71,000원) -> 매수 주문 발생 및 포트폴리오 편입
+    mock_client.prices["005930"] = 71500.0
+    await bot._evaluate_buy_condition("005930", cur_price=71500.0, cur_volume=150000.0)
+    assert "005930" in portfolio.positions, "돌파 기준가(71,000원) 돌파 시 포트폴리오에 편입되어야 합니다."
+    assert len(mock_client.sent_orders) == 1, "매수 주문이 1건 발송되어야 합니다."
+    last_order = mock_client.sent_orders[0]
+    assert last_order["code"] == "005930"
+    assert last_order["side"] == "BUY"
+    assert last_order["price"] == 71600, "매도 1호가(71,600원)로 스마트 매수 발주되어야 합니다."
+
+    print(f"  ✅ 시가(70,000원) + 0.5*ATR(1,000원) = 71,000원 변동성 돌파 매수 성공: {last_order['qty']}주 @ {last_order['price']}원")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1222,8 +1271,9 @@ async def main():
     await test_buy_price_multi_layer_inference_and_anti_1won_defense()
     await test_zero_holdings_and_single_source_total_asset_sync()
     await test_bot_auto_wakeup_and_resume_schedule()
+    await test_buy_signal_open_price_and_0915_time_filter()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 19개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 20개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":

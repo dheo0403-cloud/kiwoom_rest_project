@@ -56,14 +56,17 @@ class TechnicalIndicators:
         avg_gain = gain.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
         avg_loss = loss.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
-        # 0 나누기 방지
+        # 0 나누기 및 평탄 가격(변동 없음) 처리
+        both_zero = (avg_gain == 0.0) & (avg_loss == 0.0)
+        gain_only = (avg_loss == 0.0) & (avg_gain > 0.0)
+        loss_only = (avg_gain == 0.0) & (avg_loss > 0.0)
+
         rs = avg_gain / avg_loss.replace(0.0, np.nan)
         rsi = 100.0 - (100.0 / (1.0 + rs))
-
-        # avg_loss가 0이고 gain이 있는 경우 RSI는 100
-        rsi = rsi.fillna(100.0)
-        # 초기 NaN 구간(데이터 부족) 기본값 채움
-        rsi.iloc[:period] = rsi.iloc[:period].fillna(50.0)
+        rsi = rsi.where(~gain_only, 100.0)
+        rsi = rsi.where(~loss_only, 0.0)
+        rsi = rsi.where(~both_zero, 50.0)
+        rsi = rsi.fillna(50.0)
         return rsi
 
     @staticmethod
