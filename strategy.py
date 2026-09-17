@@ -15,9 +15,9 @@ class AdaptiveVolatilityBreakoutStrategy:
     """
     ATR 기반 적응형 변동성 돌파 및 샹들리에 출구 전략 (개선형 퀀트 엔진)
     - ATR 1.5배 타이트한 하드 스탑로스 (-3.0% 캡)
-    - +1.5% 도달 즉시 본절선(Breakeven) 상향 Risk-Free 가드
+    - +1.5% 도달 즉시 본절선(Breakeven 1.0025, +0.25%) 상향 Risk-Free 가드
     - 샹들리에 엑시트(Chandelier Exit) 트레일링 스탑
-    - RSI 과열(70+) 및 이격 과다 추격매수 차단
+    - RSI 극단 과열(85+) 및 이격 과다 추격매수 차단
     """
     def __init__(self, db_manager=None, buffer_manager=None,
                  k_breakout: float = 0.5,
@@ -76,25 +76,26 @@ class AdaptiveVolatilityBreakoutStrategy:
             return False, f"20일선_역배열(현재가:{int(current_price):,}원<MA20:{int(ma20):,}원)"
 
         # [핵심 조건 1] ATR 동적 변동성 돌파 기준가
-        # Breakout Level = Open + (k * ATR)
-        breakout_level = open_price + (self.k_breakout * atr14) if atr14 > 0 else (high3 * 0.97 if high3 > 0 else open_price)
-        is_breakout = (current_price >= breakout_level) or (high3 > 0 and current_price >= high3 * 0.98 and ma5 > 0 and current_price >= ma5) or ind.get('is_test', False)
+        # Breakout Level = Open + (k * ATR) (시가 이상 양봉 필수)
+        breakout_level = open_price + (self.k_breakout * atr14) if atr14 > 0 else open_price * 1.01
+        is_breakout = ((current_price >= breakout_level and current_price >= open_price) or ind.get('is_test', False))
         if not is_breakout and not ind.get('fib_rebound', False):
             return False, f"변동성돌파_미달(현재가:{int(current_price):,}원<돌파기준:{int(breakout_level):,}원)"
 
-        # [핵심 조건 2] 당일 거래대금 30억 이상 & 종일 환산 거래량 1.5배 검증 (Watchlist 등록 주도주는 유연 통과)
-        if current_volume > 0 and (current_price * current_volume) < 3_000_000_000 and not ind.get('is_test', False) and not ind.get('fib_rebound', False) and not ind.get('is_watchlist', False):
-            return False, f"당일거래대금부족({int(current_price * current_volume / 100_000_000):,}억<30억)"
+        # [핵심 조건 2] 당일 거래대금 30억 이상 & 종일 환산 거래량 1.5배 검증
+        if not ind.get('is_test', False) and not ind.get('fib_rebound', False):
+            if current_volume > 0 and (current_price * current_volume) < 3_000_000_000:
+                return False, f"당일거래대금부족({int(current_price * current_volume / 100_000_000):,}억<30억)"
 
-        market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
-        total_seconds = (market_close - market_open).total_seconds()   # 23,400초
-        elapsed_seconds = max(900, (now - market_open).total_seconds())
-        day_progress = min(1.0, elapsed_seconds / total_seconds)
-        projected_volume = current_volume / max(0.05, day_progress)
+            market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
+            total_seconds = (market_close - market_open).total_seconds()   # 23,400초
+            elapsed_seconds = max(900, (now - market_open).total_seconds())
+            day_progress = min(1.0, elapsed_seconds / total_seconds)
+            projected_volume = current_volume / max(0.05, day_progress)
 
-        if avg_vol > 0 and current_volume > 0 and projected_volume < (avg_vol * 1.5) and not ind.get('is_test', False) and not ind.get('fib_rebound', False) and not ind.get('is_watchlist', False):
-            return False, f"환산거래량급증미달({projected_volume:.0f}<{avg_vol * 1.5:.0f})"
+            if avg_vol > 0 and current_volume > 0 and projected_volume < (avg_vol * 1.5):
+                return False, f"환산거래량급증미달({projected_volume:.0f}<{avg_vol * 1.5:.0f})"
 
         # [핵심 조건 3] 피보나치 눌림목 반등 또는 인메모리 링버퍼 스퀴즈 모멘텀 반등 확인
         if ind.get('fib_rebound', False):
@@ -124,10 +125,14 @@ class AdaptiveVolatilityBreakoutStrategy:
                             prev_candle = df.iloc[-1]
                             if current_price > prev_candle['open'] or prev_candle['close'] > prev_candle['open']:
                                 return True, "ATR돌파_피보나치23.6%눌림목반등"
+                            else:
+                                return False, "눌림목_음봉반등실패_대기"
                         else:
                             # 조정 없는 강력한 돌파 + 스퀴즈 모멘텀 양수 전환
                             if squeeze_off and squeeze_momentum >= 0:
                                 return True, "ATR강한돌파_스퀴즈모멘텀_추격매수"
+                            else:
+                                return False, "스퀴즈모멘텀_음수_진입기각"
                 return True, "ATR_적응형변동성돌파_타점성공"
             except Exception:
                 return True, "ATR_적응형변동성돌파_타점성공"

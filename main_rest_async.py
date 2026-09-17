@@ -930,13 +930,6 @@ class AsyncTradingBot:
         now = datetime.now()
         skip_time_filter = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
 
-        # [타임 필터 가드] 09:15 이전 장초반 노이즈 구간 및 14:30 이후 시간외 신규 매수 원천 차단
-        if not skip_time_filter:
-            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
-                return
-            if now.hour > 14 or (now.hour == 14 and now.minute >= 30):
-                return
-
         info = self.watchlist.get(code)
         if not info:
             return
@@ -965,7 +958,6 @@ class AsyncTradingBot:
         ind['fib_500'] = fib_500
         ind['fib_618'] = fib_618
         ind['open'] = open_price  # 당일 실제 시가 매핑 (변동성 돌파 정상 판정)
-        ind['is_watchlist'] = True
         ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
         ind['skip_time_filter'] = skip_time_filter
 
@@ -994,15 +986,15 @@ class AsyncTradingBot:
                 return
 
             print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
-            await self._execute_smart_buy(code, name, order_qty, cur_price)
+            await self._execute_smart_buy(code, name, order_qty, cur_price, reason=reason)
         else:
-            # 매수 대기 상세 이유 상태 가시화 출력
-            if cur_price > fib_382 and fib_382 > 0:
+            # 매수 대기 상세 이유 상태 가시화 출력 (전략 사유 우선 표출)
+            if reason:
+                status_desc = f"전략 필터 ({reason})"
+            elif cur_price > fib_382 and fib_382 > 0:
                 status_desc = f"목표 타점(Fib 38.2% {int(fib_382):,}원) 미도달 ➔ 대기 중 (괴리율: {diff_pct:+.2f}%)"
             elif cur_price < fib_618 and fib_618 > 0:
                 status_desc = f"피보나치 61.8% 지지선({int(fib_618):,}원) 하회 ➔ 과대낙폭 관망"
-            elif reason:
-                status_desc = f"전략 필터 ({reason})"
             else:
                 status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
 
@@ -1133,7 +1125,7 @@ class AsyncTradingBot:
                 "raw": out
             })
 
-    async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float):
+    async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float, reason: str = "ATR돌파_스퀴즈모멘텀"):
         """HIGH 우선순위로 매도 1호가 지정가 매수 발주"""
         orderbook = await self.client.get_orderbook(code, priority=RequestPriority.HIGH)
         buy_price = int(cur_price)
@@ -1152,8 +1144,8 @@ class AsyncTradingBot:
         if res and str(rt_cd) == '0':
             await self.portfolio.add_position(code, name, qty, buy_price)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
-            await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원")
-            self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason="ATR돌파_스퀴즈모멘텀")
+            await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
+            self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason=reason)
             await self._sync_account_balance()
         else:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
