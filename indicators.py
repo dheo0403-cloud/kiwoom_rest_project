@@ -343,6 +343,94 @@ class TechnicalIndicators:
 
         return df_res
 
+    @staticmethod
+    def calculate_volume_profile(df: pd.DataFrame, num_bins: int = 10) -> Dict[str, Any]:
+        """
+        Volume Profile (매물대 분석) 및 Point of Control(POC) 산출
+        - 최근 캔들들의 가격 범위를 num_bins개 구간으로 분할하여 각 구간별 누적 거래량 집계
+        - POC (Point of Control): 가장 많은 거래량이 체결된 핵심 매물대 가격
+        - VAH (Value Area High) / VAL (Value Area Low): 전체 거래량의 70%가 집중된 가치 영역 상단/하단
+        """
+        if df.empty or len(df) < 2:
+            close_val = float(df['close'].iloc[-1]) if not df.empty and 'close' in df.columns else 0.0
+            return {
+                'poc_price': close_val,
+                'vah': close_val,
+                'val': close_val,
+                'is_above_poc': True,
+                'profile': []
+            }
+
+        df_std = TechnicalIndicators._standardize_columns(df)
+        highs = df_std['high']
+        lows = df_std['low']
+        closes = df_std['close']
+        volumes = df_std['volume']
+
+        min_p = float(lows.min())
+        max_p = float(highs.max())
+
+        if max_p <= min_p or max_p <= 0:
+            cur_p = float(closes.iloc[-1])
+            return {
+                'poc_price': cur_p,
+                'vah': cur_p,
+                'val': cur_p,
+                'is_above_poc': True,
+                'profile': []
+            }
+
+        bin_size = (max_p - min_p) / num_bins
+        bin_volumes = [0.0] * num_bins
+
+        typical_prices = (highs + lows + closes) / 3.0
+        for tp, vol in zip(typical_prices, volumes):
+            if vol <= 0:
+                continue
+            b_idx = int((tp - min_p) / bin_size)
+            b_idx = min(num_bins - 1, max(0, b_idx))
+            bin_volumes[b_idx] += vol
+
+        max_vol_idx = int(np.argmax(bin_volumes))
+        poc_price = min_p + (max_vol_idx + 0.5) * bin_size
+
+        total_vol = sum(bin_volumes)
+        target_vol = total_vol * 0.70
+        cum_vol = 0.0
+        val_idx = max_vol_idx
+        vah_idx = max_vol_idx
+        cum_vol += bin_volumes[max_vol_idx]
+
+        while cum_vol < target_vol and (val_idx > 0 or vah_idx < num_bins - 1):
+            next_below = bin_volumes[val_idx - 1] if val_idx > 0 else -1
+            next_above = bin_volumes[vah_idx + 1] if vah_idx < num_bins - 1 else -1
+
+            if next_above >= next_below and next_above >= 0:
+                vah_idx += 1
+                cum_vol += next_above
+            elif next_below >= 0:
+                val_idx -= 1
+                cum_vol += next_below
+            else:
+                break
+
+        vah = min_p + (vah_idx + 1) * bin_size
+        val = min_p + val_idx * bin_size
+        current_price = float(closes.iloc[-1])
+
+        profile_data = [
+            {'bin_low': round(min_p + i * bin_size, 1), 'bin_high': round(min_p + (i + 1) * bin_size, 1), 'volume': round(bin_volumes[i], 0)}
+            for i in range(num_bins)
+        ]
+
+        return {
+            'poc_price': round(poc_price, 1),
+            'vah': round(vah, 1),
+            'val': round(val, 1),
+            'is_above_poc': current_price >= poc_price,
+            'profile': profile_data
+        }
+
     @classmethod
     def get_latest_indicators(cls, df: pd.DataFrame) -> Dict[str, Any]:
         """최신 1건의 지표를 딕셔너리로 추출 (실시간 전략 평가용)"""
@@ -352,6 +440,7 @@ class TechnicalIndicators:
         computed_df = cls.compute_all_indicators(df)
         latest = computed_df.iloc[-1]
         prev = computed_df.iloc[-2] if len(computed_df) > 1 else latest
+        vp = cls.calculate_volume_profile(df, num_bins=10)
 
         return {
             'close': float(latest.get('close', 0)),
@@ -376,6 +465,10 @@ class TechnicalIndicators:
             'bb_percent_b': float(latest.get('bb_percent_b', 0.5)),
             'atr14': float(latest.get('atr14', 0)),
             'vwap': float(latest.get('vwap', 0)),
+            'poc_price': float(vp.get('poc_price', 0)),
+            'vah': float(vp.get('vah', 0)),
+            'val': float(vp.get('val', 0)),
+            'is_above_poc': bool(vp.get('is_above_poc', True)),
             'adx14': float(latest.get('adx14', 0)),
             'chandelier_long': float(latest.get('chandelier_long', 0)),
             'chandelier_short': float(latest.get('chandelier_short', 0)),

@@ -344,6 +344,55 @@ class AsyncKiwoomClient:
             print(f"⚠️ [ORDER_REJECTED] 주문 거절 ({side} {clean_code} @ {price}원, 계좌: {self.account}): {msg}")
         return data
 
+    async def cancel_order(self, order_no: str, code: str, qty: int,
+                           priority: RequestPriority = RequestPriority.HIGH) -> Optional[Dict[str, Any]]:
+        """
+        주문 취소 발송 (kt10003 - 취소주문)
+        - 원주문번호(orig_ord_no) 필수
+        - 취소 성공 시 미체결 잔량 소멸 및 D+2 예수금 증거금 즉시 반환
+        """
+        clean_code = str(code).replace('A', '').strip()
+        url = f"{self.base_url}/api/dostk/ordr"
+        payload = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password,
+            "stk_cd": clean_code,
+            "ord_qty": str(int(qty)),
+            "orig_ord_no": str(order_no).strip(),
+            "trde_tp": "00",
+            "cond_uv": "0"
+        }
+        data, _ = await self.request("kt10003", url, payload, priority=priority, retries=3)
+        if not data:
+            print(f"❌ [CANCEL_FAIL] 주문 취소 응답 없음 (주문번호 {order_no}, {clean_code} {qty}주)")
+            return None
+
+        rt_cd = data.get('rt_cd') if data.get('rt_cd') is not None else data.get('return_code')
+        if str(rt_cd) == '0':
+            print(f"✅ [CANCEL_SUCCESS] 주문 취소 성공 (원주문: {order_no}, {clean_code} {qty}주)")
+        else:
+            msg = data.get('msg1') or data.get('return_msg') or '취소 실패'
+            print(f"⚠️ [CANCEL_REJECTED] 주문 취소 거절 (원주문: {order_no}): {msg}")
+        return data
+
+    async def get_unexecuted_orders(self, code: str = "", priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        """
+        계좌 미체결 주문 목록 조회 (kt00007 / 계좌미체결내역조회)
+        - 특정 종목 또는 전체 미체결 목록 조회
+        """
+        clean_code = str(code).replace('A', '').strip() if code else ""
+        url = f"{self.base_url}/api/dostk/acnt"
+        payload = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password,
+            "stk_cd": clean_code,
+            "qry_tp": "0"
+        }
+        data, _ = await self.request("kt00007", url, payload, priority=priority)
+        return data
+
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """현재가 시세 조회"""
         clean_code = str(code).replace('A', '').strip()

@@ -8,6 +8,7 @@ Gate Info:
 import asyncio
 import os
 import sys
+import time
 import argparse
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
@@ -25,6 +26,110 @@ from macro_regime_filter import MacroRegimeFilter, MarketRegime
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path, override=False)
+
+class OrderTimeoutManager:
+    """
+    미체결 주문(Unfilled Orders) 실시간 추적 및 자동 취소/대체(Cancel & Replace) 안전장치
+    - 주문 접수 후 3분(180초) 경과 미체결 주문 식별
+    - 미체결 매수(BUY): kt10003 취소 발송 -> 예수금 증거금 즉시 반환
+    - 미체결 매도(SELL): kt10003 취소 후 RequestPriority.CRITICAL 시장가(03) 전량 청산 재발주
+    """
+    def __init__(self, bot=None, client=None, db=None, timeout_seconds: float = 180.0):
+        self.bot = bot
+        self.client = client
+        self.db = db
+        self.timeout_seconds = timeout_seconds
+        self.tracked_orders: Dict[str, Dict[str, Any]] = {}
+        self._lock = asyncio.Lock()
+
+    async def track_order(self, order_no: str, code: str, name: str, side: str, qty: int, price: float, order_type: str = "00"):
+        """신규 발주된 주문 추적 등록"""
+        if not order_no or str(order_no).strip() == "" or str(order_no) == "0":
+            return
+        clean_ord_no = str(order_no).strip()
+        async with self._lock:
+            self.tracked_orders[clean_ord_no] = {
+                "order_no": clean_ord_no,
+                "code": str(code).replace('A', '').strip(),
+                "name": name,
+                "side": side.upper(),
+                "qty": int(qty),
+                "unfilled_qty": int(qty),
+                "price": float(price),
+                "order_type": order_type,
+                "timestamp": time.time()
+            }
+        print(f"📋 [OrderTracker] 주문 추적 등록: 주문번호 {clean_ord_no} ({side} {name} {qty}주 @ {price:,.0f}원)")
+
+    async def on_chejan_data(self, data: Dict[str, Any]):
+        """키움 OnReceiveChejanData 체결/잔고 실시간 이벤트 수신 처리"""
+        if not data or not isinstance(data, dict):
+            return
+
+        order_no = str(data.get('ord_no') or data.get('odno') or data.get('order_no') or '').strip()
+        if not order_no:
+            return
+
+        async with self._lock:
+            if order_no in self.tracked_orders:
+                item = self.tracked_orders[order_no]
+                cntg_qty = int(float(str(data.get('cntg_qty') or data.get('chejan_qty') or 0)))
+                uncl_qty = int(float(str(data.get('uncl_qty') or data.get('otst_qty') or 0)))
+                status = str(data.get('ord_stts') or data.get('status') or '')
+
+                if uncl_qty > 0:
+                    item['unfilled_qty'] = uncl_qty
+                elif cntg_qty > 0:
+                    item['unfilled_qty'] = max(0, item['unfilled_qty'] - cntg_qty)
+
+                if item['unfilled_qty'] <= 0 or status in ('체결', '완료', '취소', 'FILLED', 'CANCELLED'):
+                    print(f"✅ [OrderTracker] 주문 체결/완료 확인 -> 추적 종료: 주문번호 {order_no} ({item['name']})")
+                    del self.tracked_orders[order_no]
+
+    async def check_and_resolve_timeouts(self):
+        """3분 경과 미체결 주문 검사 및 자동 취소/재발주 실행"""
+        now = time.time()
+        expired_orders = []
+
+        async with self._lock:
+            for ord_no, info in list(self.tracked_orders.items()):
+                elapsed = now - info['timestamp']
+                if elapsed >= self.timeout_seconds and info['unfilled_qty'] > 0:
+                    expired_orders.append(info.copy())
+                    del self.tracked_orders[ord_no]
+
+        for order in expired_orders:
+            ord_no = order['order_no']
+            code = order['code']
+            name = order['name']
+            side = order['side']
+            uncl_qty = order['unfilled_qty']
+
+            print(f"⚠️ [OrderTimeout] 미체결 타임아웃({int(self.timeout_seconds)}초 경과) 감지: 주문번호 {ord_no} ({side} {name} {uncl_qty}주)")
+
+            if side == "BUY":
+                # 미체결 매수 -> 취소하여 예수금 반환
+                if self.client and hasattr(self.client, 'cancel_order'):
+                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    if self.db:
+                        await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환")
+                    print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환)")
+            elif side == "SELL":
+                # 미체결 매도 -> 지정가 취소 후 즉시 긴급 시장가(03) 전량 재발주
+                if self.client and hasattr(self.client, 'cancel_order'):
+                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+
+                print(f"🚨 [미체결 매도 타임아웃] {name}({code}) 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주!")
+                if self.client:
+                    sell_res = await self.client.send_order(code=code, qty=uncl_qty, price=0, order_type="03", side="SELL", priority=RequestPriority.CRITICAL)
+                    new_ord_no = str((sell_res or {}).get('ord_no') or (sell_res or {}).get('odno') or '').strip()
+                    if new_ord_no and new_ord_no != '0':
+                        await self.track_order(new_ord_no, code, name, "SELL", uncl_qty, 0, order_type="03")
+                if self.db:
+                    await self.db.log_message("CRITICAL", f"🚨 [미체결 매도 대체] {name}({code}) {uncl_qty}주 긴급 시장가(03) 재청산 발주 완료!")
+
+            if self.bot and hasattr(self.bot, '_sync_account_balance'):
+                await self.bot._sync_account_balance()
 
 class AsyncTradingBot:
     """
@@ -82,6 +187,9 @@ class AsyncTradingBot:
         self._last_watch_log_time: Dict[str, float] = {}
         self._last_watch_diff_pct: Dict[str, float] = {}
         self.unclosed_orders_count = 0
+
+        # 미체결 주문 3분 타임아웃 자동 취소/대체 매니저
+        self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=180.0)
 
     @property
     def running(self) -> bool:
@@ -184,6 +292,15 @@ class AsyncTradingBot:
 
         # 3. 피보나치 및 ATR 변동성 돌파 매수 조건 평가 함수 즉각 호출
         await self._evaluate_buy_condition(code, cur_price, cur_volume)
+
+    async def OnReceiveChejanData(self, gubun: str, item_cnt: int, fid_list: str, data: Dict[str, Any]):
+        """
+        실시간 체결 및 잔고 통보 이벤트 핸들러 (OpenAPI OnReceiveChejanData 호환)
+        - gubun: '0'(주문체결통보), '1'(국내주식 잔고통보)
+        - OrderTimeoutManager에 실시간 전달하여 체결 수량 차감 및 미체결 해소
+        """
+        if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+            await self.order_timeout_mgr.on_chejan_data(data)
 
     async def run_daily_trading_loop(self):
         """api_server.py 호환 비동기 트레이딩 루프 실행 별칭"""
@@ -733,6 +850,9 @@ class AsyncTradingBot:
 
             rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
             if res and str(rt_cd) == '0':
+                ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
+                if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+                    await self.order_timeout_mgr.track_order(ord_no, code, name, side, qty, price, order_type=order_type)
                 if hasattr(self.db, 'complete_manual_order'):
                     await self.db.complete_manual_order(order_id, "COMPLETED")
                 elif hasattr(self.db, 'update_manual_order_status'):
@@ -821,10 +941,14 @@ class AsyncTradingBot:
 
     async def cleanup_unexecuted_orders(self):
         """
-        미체결 주문(Unfilled Order) 자동 감시 및 취소 안전장치
-        - 발주 후 미체결된 채 호가가 도망간 주문을 주기적으로 탐색하여 자동 취소
-        - 예수금 증거금 묶임 방지 및 인메모리-실계좌 정합성 100% 보장
+        미체결 주문(Unfilled Order) 자동 감시 및 3분 타임아웃 취소/재발주 안전장치
+        - OrderTimeoutManager를 통한 3분(180초) 경과 미체결 주문 식별
+        - 미체결 매수: 즉시 취소 -> 예수금 증거금 반환
+        - 미체결 매도: 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주
         """
+        if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+            await self.order_timeout_mgr.check_and_resolve_timeouts()
+
         if not hasattr(self.client, 'get_unexecuted_orders') or not hasattr(self.client, 'cancel_order'):
             return
 
@@ -849,14 +973,14 @@ class AsyncTradingBot:
                 order_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
                 code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').strip()
                 uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
+                side = str(order.get('side') or order.get('sll_buy_tp') or 'BUY').upper()
+                side_str = "SELL" if ("매도" in side or "SELL" in side or "01" in side) else "BUY"
 
                 if order_no and uncl_qty > 0:
-                    print(f"⚠️ [미체결 방어] 잔여 미체결 주문 감지 -> 자동 취소 실행: 주문번호 {order_no} ({code}, {uncl_qty}주)")
-                    cancel_res = await self.client.cancel_order(order_no=order_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
-                    if cancel_res and str(cancel_res.get('rt_cd', '1')) == '0':
-                        await self.db.log_message("WARNING", f"🛡️ [미체결 자동 취소 완료] 주문번호 {order_no} ({code}, {uncl_qty}주)")
-                        print(f"✅ [미체결 자동 취소 완료] 주문번호 {order_no} ({code})")
-                        await self._sync_account_balance()
+                    if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and order_no not in self.order_timeout_mgr.tracked_orders:
+                        # 외부/미추적 미체결 주문 발견 시 트래커에 즉시 편입
+                        name = self.watchlist.get(code, {}).get('name', code)
+                        await self.order_timeout_mgr.track_order(order_no, code, name, side_str, uncl_qty, 0)
         except Exception as e:
             print(f"⚠️ [미체결 주문 정리 오류] {e}")
 
@@ -875,12 +999,14 @@ class AsyncTradingBot:
             bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
             if bid2 and str(bid2).isdigit() and int(bid2) > 0:
                 sell_price = int(bid2)
-            # 시장가 폴백 시에도 지정가(00) 사용 — 증거금 관리 일관성 유지
-            # (긴급 매도이므로 매수1호가 또는 현재가 기반 지정가로 충분히 빠른 체결 가능)
 
         res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
         if res and str(rt_cd) == '0':
+            ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
+            if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+                await self.order_timeout_mgr.track_order(ord_no, code, name, "SELL", qty, sell_price, order_type=order_type)
+
             pos = await self.portfolio.remove_position(code, sell_price)
             await self.db.log_order(code, name, "SELL", qty, sell_price)
             await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
@@ -909,6 +1035,10 @@ class AsyncTradingBot:
         res = await self.client.send_order(code, qty, sell_price, order_type="00", side="SELL", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
         if res and str(rt_cd) == '0':
+            ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
+            if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+                await self.order_timeout_mgr.track_order(ord_no, code, name, "SELL", qty, sell_price, order_type="00")
+
             snap_pos = self.portfolio.positions.get(code, {})
             buy_p = snap_pos.get('buy_price', sell_price)
             await self.portfolio.update_partial_sell(code, qty, sell_price, next_stage)
@@ -1147,6 +1277,9 @@ class AsyncTradingBot:
         res = await self.client.send_order(code, qty, buy_price, order_type="00", side="BUY", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
         if res and str(rt_cd) == '0':
+            ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
+            if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+                await self.order_timeout_mgr.track_order(ord_no, code, name, "BUY", qty, buy_price, order_type="00")
             await self.portfolio.add_position(code, name, qty, buy_price)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
             await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")

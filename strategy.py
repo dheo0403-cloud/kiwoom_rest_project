@@ -75,6 +75,18 @@ class AdaptiveVolatilityBreakoutStrategy:
         if ma20 > 0 and current_price < ma20:
             return False, f"20일선_역배열(현재가:{int(current_price):,}원<MA20:{int(ma20):,}원)"
 
+        # [필터 4] 📈 VWAP 스마트 지지 필터 (거래량 가중 평균가 하회 휩소 차단)
+        vwap = float(ind.get('vwap', 0))
+        if vwap > 0 and not ind.get('is_test', False) and not ind.get('fib_rebound', False):
+            if current_price < vwap * 0.995:
+                return False, f"VWAP_하회_가짜돌파기각(현재가:{int(current_price):,}원<VWAP:{int(vwap):,}원)"
+
+        # [필터 5] 📊 Volume Profile 매물대 저항 돌파 필터 (핵심 매물대 POC 저항 기각)
+        poc_price = float(ind.get('poc_price', 0))
+        if poc_price > 0 and not ind.get('is_test', False) and not ind.get('fib_rebound', False):
+            if current_price < poc_price * 0.998:
+                return False, f"매물대_저항선_직전_돌파대기(현재가:{int(current_price):,}원<POC:{int(poc_price):,}원)"
+
         # [핵심 조건 1] ATR 동적 변동성 돌파 기준가
         # Breakout Level = Open + (k * ATR) (시가 이상 양봉 필수)
         breakout_level = open_price + (self.k_breakout * atr14) if atr14 > 0 else open_price * 1.01

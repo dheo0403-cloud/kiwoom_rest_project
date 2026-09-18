@@ -57,7 +57,18 @@ class MockKiwoomClient:
                 self.holdings[code]["qty"] -= qty
                 if self.holdings[code]["qty"] <= 0:
                     del self.holdings[code]
-        return {"rt_cd": "0", "msg1": "주문접수성공"}
+        return {"rt_cd": "0", "msg1": "주문접수성공", "ord_no": f"ORD{len(self.sent_orders)}"}
+
+    async def cancel_order(self, order_no: str, code: str, qty: int, priority: RequestPriority = RequestPriority.HIGH) -> Dict[str, Any]:
+        self.sent_orders.append({
+            "code": code,
+            "qty": qty,
+            "order_no": order_no,
+            "side": "CANCEL",
+            "priority": priority,
+            "timestamp": time.time()
+        })
+        return {"rt_cd": "0", "msg1": "주문취소성공"}
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         price = self.prices.get(code, 70000)
@@ -1264,6 +1275,107 @@ async def test_buy_signal_open_price_and_0915_time_filter():
 
     print(f"  ✅ 시가(70,000원) + 0.5*ATR(1,000원) = 71,000원 변동성 돌파 매수 성공: {last_order['qty']}주 @ {last_order['price']}원")
 
+async def test_order_timeout_manager_buy_cancel():
+    """21. 미체결 매수 주문 3분(180초) 타임아웃 감시 및 자동 취소(D+2 예수금 증거금 반환) 검증"""
+    print("▶ [Test 21] 미체결 매수 주문 3분 타임아웃 감시 및 자동 취소(kt10003) 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 매수 주문 등록 (3분 10초 전 발주 가정)
+    await bot.order_timeout_mgr.track_order("ORD_BUY_001", "005930", "삼성전자", "BUY", 10, 70000.0, "00")
+    # 시간 인위적 과거로 설정
+    bot.order_timeout_mgr.tracked_orders["ORD_BUY_001"]["timestamp"] = time.time() - 190.0
+
+    assert "ORD_BUY_001" in bot.order_timeout_mgr.tracked_orders
+
+    # 2. 미체결 타임아웃 해소 루프 실행
+    mock_client.sent_orders.clear()
+    await bot.order_timeout_mgr.check_and_resolve_timeouts()
+
+    # 3. 검증: cancel_order가 호출되고 트래커에서 제거되었는지 확인
+    assert "ORD_BUY_001" not in bot.order_timeout_mgr.tracked_orders
+    assert len(mock_client.sent_orders) == 1
+    cancel_order = mock_client.sent_orders[0]
+    assert cancel_order["side"] == "CANCEL"
+    assert cancel_order["order_no"] == "ORD_BUY_001"
+    assert cancel_order["qty"] == 10
+    print(f"  ✅ 미체결 매수 주문(ORD_BUY_001, 10주) 3분 타임아웃 자동 취소 완료 (예수금 증거금 반환)")
+
+async def test_order_timeout_manager_sell_replace():
+    """22. 미체결 매도 주문 3분(180초) 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 재발주 검증"""
+    print("▶ [Test 22] 미체결 매도 주문 3분 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) 전량 재청산 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 지정가 매도 주문 등록 (3분 20초 전 발주)
+    await bot.order_timeout_mgr.track_order("ORD_SELL_002", "000660", "SK하이닉스", "SELL", 5, 150000.0, "00")
+    bot.order_timeout_mgr.tracked_orders["ORD_SELL_002"]["timestamp"] = time.time() - 200.0
+
+    mock_client.sent_orders.clear()
+    # 2. 타임아웃 해소 실행
+    await bot.order_timeout_mgr.check_and_resolve_timeouts()
+
+    # 3. 검증: 기존 지정가 취소(CANCEL) 후 즉시 긴급 시장가(03) SELL 발주 확인
+    assert len(mock_client.sent_orders) >= 2
+    first_op = mock_client.sent_orders[0]
+    second_op = mock_client.sent_orders[1]
+
+    assert first_op["side"] == "CANCEL"
+    assert first_op["order_no"] == "ORD_SELL_002"
+
+    assert second_op["side"] == "SELL"
+    assert second_op["code"] == "000660"
+    assert second_op["qty"] == 5
+    assert second_op["order_type"] == "03"  # 시장가
+    assert second_op["priority"] == RequestPriority.CRITICAL
+    print(f"  ✅ 미체결 매도 지정가 취소 -> 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주 완료")
+
+async def test_vwap_and_volume_profile_filters():
+    """23. VWAP 스마트 지지 필터 및 Volume Profile(매물대 POC) 가짜 돌파(휩소) 기각 검증"""
+    print("▶ [Test 23] VWAP 스마트 지지 필터 및 매물대(POC) 가짜 돌파 기각 검증...")
+    from strategy import AdaptiveVolatilityBreakoutStrategy
+    strat = AdaptiveVolatilityBreakoutStrategy(k_breakout=0.5)
+
+    # 1) Case 1: 가격이 VWAP 아래에 위치한 가짜 돌파 캔들 시뮬레이션
+    fake_ind = {
+        'open': 70000, 'atr14': 2000, 'ma20': 68000, 'rsi14': 60.0,
+        'vwap': 74000.0,      # 당일 거래량 가중 평균가 74,000원
+        'poc_price': 72000.0,
+        'skip_time_filter': True
+    }
+    # 현재가 71,500원은 시가+k*ATR(71,000원) 돌파했으나 VWAP(74,000원)보다 낮아 가짜 돌파
+    sig1, reason1 = await strat.check_buy_signal("005930", current_price=71500.0, current_volume=100000.0, ind=fake_ind)
+    assert sig1 is False, "VWAP 하회 시 매수가 기각되어야 합니다."
+    assert "VWAP_하회_가짜돌파기각" in reason1
+    print(f"  ✅ VWAP 하회 가짜 돌파 완벽 기각: {reason1}")
+
+    # 2) Case 2: 가격이 매물대 저항선(POC 75,000원) 바로 아래에 갇힌 캔들
+    fake_ind2 = {
+        'open': 70000, 'atr14': 2000, 'ma20': 68000, 'rsi14': 60.0,
+        'vwap': 70000.0,      # VWAP 지지 통과
+        'poc_price': 75000.0, # 대량 매물대 75,000원 저항
+        'skip_time_filter': True
+    }
+    sig2, reason2 = await strat.check_buy_signal("005930", current_price=72000.0, current_volume=100000.0, ind=fake_ind2)
+    assert sig2 is False, "매물대 POC 저항 직전 매수가 기각되어야 합니다."
+    assert "매물대_저항선_직전_돌파대기" in reason2
+    print(f"  ✅ 매물대 POC 저항 가짜 돌파 완벽 기각: {reason2}")
+
+    # 3) Case 3: VWAP 지지 + POC 매물대 상향 돌파 안착 정규 타점
+    real_ind = {
+        'open': 70000, 'atr14': 2000, 'ma20': 68000, 'rsi14': 60.0,
+        'vwap': 71000.0,      # VWAP 지지 통과 (현재가 73,000 > VWAP 71,000)
+        'poc_price': 72000.0, # POC 돌파 안착 (현재가 73,000 > POC 72,000)
+        'skip_time_filter': True
+    }
+    sig3, reason3 = await strat.check_buy_signal("005930", current_price=73000.0, current_volume=100000.0, ind=real_ind)
+    assert sig3 is True, "모든 필터 통과 시 정상 매수 시그널이 발생해야 합니다."
+    print(f"  ✅ VWAP 지지 + POC 매물대 돌파 정규 타점 승인 완료: {reason3}")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1288,8 +1400,11 @@ async def main():
     await test_zero_holdings_and_single_source_total_asset_sync()
     await test_bot_auto_wakeup_and_resume_schedule()
     await test_buy_signal_open_price_and_0915_time_filter()
+    await test_order_timeout_manager_buy_cancel()
+    await test_order_timeout_manager_sell_replace()
+    await test_vwap_and_volume_profile_filters()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매 및 계좌 파싱 시뮬레이션 테스트 (총 20개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매, 미체결 방어 및 VWAP 필터 시뮬레이션 테스트 (총 23개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":
