@@ -6,10 +6,16 @@
   * {
     border-color: rgba(255, 255, 255, 0.08);
   }
+  html {
+    scroll-behavior: smooth;
+  }
   body {
     background-color: #080B10;
     color: #F1F5F9;
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+    min-height: 100vh;
+    overflow-x: hidden;
+    overflow-y: auto;
   }
   /* Tabular numbers for numbers to prevent jitter */
   .tabular-nums {
