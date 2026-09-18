@@ -200,9 +200,30 @@ def test_api_server_endpoints():
     assert "logs" in sub_logs_res.json()
     print("  ✅ /api/logs 및 /kiwoom/api/logs REST 응답 정상 확인")
 
+    # 16. 퀀트 성과(KPI) 및 실시간 매크로/호가 상태 엔드포인트 검증 (/api/quant/performance, /api/quant/status)
+    print("▶ [Test 15] /api/quant/performance 및 /api/quant/status 퀀트 대시보드 API 검증...")
+    perf_res = client.get("/api/quant/performance")
+    assert perf_res.status_code == 200
+    perf_data = perf_res.json()
+    assert perf_data["win_rate_pct"] == 65.5
+    assert perf_data["mdd_pct"] == -2.15
+    assert perf_data["profit_factor"] == 2.45
+    print(f"  ✅ /api/quant/performance 정상 응답 (승률: {perf_data['win_rate_pct']}%, MDD: {perf_data['mdd_pct']}%, PF: {perf_data['profit_factor']})")
+
+    status_res = client.get("/api/quant/status")
+    assert status_res.status_code == 200
+    status_data = status_res.json()
+    assert status_data["regime"] == "BULL_TREND"
+    assert status_data["is_buy_allowed"] is True
+    assert "orderbook_imbalance" in status_data
+    assert "volume_power" in status_data
+    print(f"  ✅ /api/quant/status 정상 응답 (레짐: {status_data['regime']}, 체결강도: {status_data['volume_power']}%)")
+
     with client.websocket_connect("/kiwoom/ws/portfolio") as websocket:
         init_data = websocket.receive_json()
         assert init_data["type"] == "PORTFOLIO_INIT"
+        assert "quant_performance" in init_data["data"]
+        assert "macro_status" in init_data["data"]
         websocket.send_text("ping")
         pong = websocket.receive_text()
         assert pong == "pong"

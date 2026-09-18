@@ -181,6 +181,22 @@ class MockDatabaseManager:
     async def get_latest_balance(self) -> Optional[Dict[str, Any]]:
         return None
 
+    async def get_quant_performance_metrics(self) -> Dict[str, Any]:
+        return {
+            "daily_return_pct": 1.25,
+            "cumulative_return_pct": 8.45,
+            "win_rate_pct": 65.5,
+            "total_trades": 20,
+            "winning_trades": 13,
+            "losing_trades": 7,
+            "mdd_pct": -2.15,
+            "profit_factor": 2.45,
+            "total_profit": 550000.0,
+            "total_loss": 224000.0,
+            "recent_closed_trades": [],
+            "equity_history": []
+        }
+
     async def get_portfolio_positions(self) -> List[Dict[str, Any]]:
         return getattr(self, 'portfolio', [])
 

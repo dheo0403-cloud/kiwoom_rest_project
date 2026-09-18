@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { Header } from './components/Header';
 import { KpiMetricsRow } from './components/KpiMetricsRow';
+import { QuantPerformanceBento } from './components/QuantPerformanceBento';
 import { ActivePositionsBento } from './components/ActivePositionsBento';
 import { LogViewer } from './components/LogViewer';
 import { WatchlistBento } from './components/WatchlistBento';
@@ -12,7 +13,19 @@ import { WatchlistItem } from './types';
 import { getApiUrl } from './utils/apiConfig';
 
 export function App() {
-  const { portfolio, displayPortfolio, lastDisplaySyncTime, logs, botStatus, isConnected, refreshData, addManualLog, clearLogs } = useTradingWebSocket();
+  const {
+    portfolio,
+    displayPortfolio,
+    quantPerformance,
+    macroStatus,
+    lastDisplaySyncTime,
+    logs,
+    botStatus,
+    isConnected,
+    refreshData,
+    addManualLog,
+    clearLogs
+  } = useTradingWebSocket();
 
   const [watchlist, setWatchlist] = useState<WatchlistItem[]>([]);
   const [selectedStockCode, setSelectedStockCode] = useState<string>('');
@@ -125,7 +138,14 @@ export function App() {
         {/* 1. 4-Card Top Bento KPI Metrics */}
         <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} />
 
-        {/* 2. Main Bento Grid Cockpit (2-Column Asymmetric Layout) */}
+        {/* 2. 퀀트 전략 성과 & 실시간 시장 국면 (Quant Performance & Macro Regime) */}
+        <QuantPerformanceBento
+          performance={quantPerformance}
+          macroStatus={macroStatus}
+          colorMode={colorMode}
+        />
+
+        {/* 3. Main Bento Grid Cockpit (2-Column Asymmetric Layout) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1">
           {/* Left Column (7/12: 58%): Realtime Log Viewer & Universe Table */}
           <div className="lg:col-span-7 flex flex-col gap-3.5">

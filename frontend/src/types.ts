@@ -10,6 +10,60 @@ export interface Position {
   yield_rate?: number;
 }
 
+export interface ClosedTrade {
+  code: string;
+  name: string;
+  buy_price: number;
+  sell_price: number;
+  qty: number;
+  pnl: number;
+  return_pct: number;
+  timestamp: string;
+}
+
+export interface EquityHistoryPoint {
+  date: string;
+  total_asset: number;
+  deposit: number;
+  profit_loss: number;
+  yield: number;
+}
+
+export interface QuantPerformanceMetrics {
+  daily_return_pct: number;
+  cumulative_return_pct: number;
+  win_rate_pct: number;
+  total_trades: number;
+  winning_trades: number;
+  losing_trades: number;
+  mdd_pct: number;
+  profit_factor: number;
+  total_profit: number;
+  total_loss: number;
+  recent_closed_trades: ClosedTrade[];
+  equity_history: EquityHistoryPoint[];
+}
+
+export interface MacroStatus {
+  regime: 'BULL_TREND' | 'NEUTRAL_RANGE' | 'PANIC_CRASH' | string;
+  regime_reason?: string;
+  kodex200_change_rate: number;
+  vix_value?: number;
+  usdkrw_change_pct?: number;
+  market_filter_passed: boolean;
+  kelly_multiplier: number;
+  is_buy_allowed: boolean;
+  target_code?: string;
+  orderbook_imbalance?: {
+    imbalance_ratio: number;
+    total_bid_qty: number;
+    total_ask_qty: number;
+    bid_ask_spread: number;
+  };
+  volume_power?: number;
+  evaluated_at?: string;
+}
+
 export interface PortfolioSnapshot {
   total_asset: number;
   current_capital: number;
@@ -20,6 +74,8 @@ export interface PortfolioSnapshot {
   positions: Position[];
   timestamp?: string;
   last_synced_at?: string;
+  quant_performance?: QuantPerformanceMetrics;
+  macro_status?: MacroStatus;
 }
 
 export interface WatchlistItem {

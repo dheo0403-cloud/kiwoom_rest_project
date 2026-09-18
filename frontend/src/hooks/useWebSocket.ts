@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { PortfolioSnapshot, LogMessage, BotStatus } from '../types';
+import { PortfolioSnapshot, LogMessage, BotStatus, QuantPerformanceMetrics, MacroStatus } from '../types';
 import { getApiUrl, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
@@ -23,6 +23,41 @@ export function useTradingWebSocket() {
     unrealized_pnl: 0,
     total_yield_rate: 0,
     positions: []
+  });
+
+  // 3. 퀀트 핵심 성과 지표(KPI) 및 시장 레짐 상태
+  const [quantPerformance, setQuantPerformance] = useState<QuantPerformanceMetrics>({
+    daily_return_pct: 0.0,
+    cumulative_return_pct: 0.0,
+    win_rate_pct: 0.0,
+    total_trades: 0,
+    winning_trades: 0,
+    losing_trades: 0,
+    mdd_pct: 0.0,
+    profit_factor: 0.0,
+    total_profit: 0.0,
+    total_loss: 0.0,
+    recent_closed_trades: [],
+    equity_history: []
+  });
+
+  const [macroStatus, setMacroStatus] = useState<MacroStatus>({
+    regime: 'BULL_TREND',
+    regime_reason: '시장 안정 상승 (정상 진입)',
+    kodex200_change_rate: 0.0,
+    vix_value: 18.0,
+    usdkrw_change_pct: 0.0,
+    market_filter_passed: true,
+    kelly_multiplier: 1.0,
+    is_buy_allowed: true,
+    target_code: '005930',
+    orderbook_imbalance: {
+      imbalance_ratio: 0.25,
+      total_bid_qty: 250000,
+      total_ask_qty: 150000,
+      bid_ask_spread: 100
+    },
+    volume_power: 128.5
   });
 
   const [lastDisplaySyncTime, setLastDisplaySyncTime] = useState<string>('');
@@ -72,6 +107,12 @@ export function useTradingWebSocket() {
       if (isSnapshotEqual(prev, newSnap)) return prev;
       return newSnap;
     });
+    if (newSnap.quant_performance) {
+      setQuantPerformance(newSnap.quant_performance);
+    }
+    if (newSnap.macro_status) {
+      setMacroStatus(prev => ({ ...prev, ...newSnap.macro_status }));
+    }
     const now = new Date();
     setLastDisplaySyncTime(now.toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' }));
   }, []);
@@ -79,14 +120,16 @@ export function useTradingWebSocket() {
   const portWsRef = useRef<WebSocket | null>(null);
   const logWsRef = useRef<WebSocket | null>(null);
 
-  // REST API 초기 데이터 및 폴백 동기화 (WebSocket 활성화 중에는 상태 경합 방지를 위해 REST 포트폴리오 덮어쓰기 스킵)
+  // REST API 초기 데이터 및 폴백 동기화
   const fetchRestData = useCallback(async () => {
     try {
       const isWsActive = isConnectedRef.current;
       const fetchList: Promise<any>[] = [
         fetch(getApiUrl('/status')),
         fetch(getApiUrl('/watchlist')),
-        fetch(getApiUrl('/logs?limit=100'))
+        fetch(getApiUrl('/logs?limit=100')),
+        fetch(getApiUrl('/quant/performance')),
+        fetch(getApiUrl('/quant/status'))
       ];
 
       // WebSocket이 끊겼거나 초기 로드일 때만 REST /portfolio를 폴백으로 요청
@@ -99,11 +142,13 @@ export function useTradingWebSocket() {
       let statusRes: PromiseSettledResult<any>;
       let watchRes: PromiseSettledResult<any>;
       let logsRes: PromiseSettledResult<any>;
+      let perfRes: PromiseSettledResult<any>;
+      let macroRes: PromiseSettledResult<any>;
 
       if (!isWsActive) {
-        [portRes, statusRes, watchRes, logsRes] = results;
+        [portRes, statusRes, watchRes, logsRes, perfRes, macroRes] = results;
       } else {
-        [statusRes, watchRes, logsRes] = results;
+        [statusRes, watchRes, logsRes, perfRes, macroRes] = results;
       }
 
       if (portRes && portRes.status === 'fulfilled' && portRes.value.ok) {
@@ -117,7 +162,9 @@ export function useTradingWebSocket() {
           unrealized_pnl: portData.unrealized_pnl ?? 0,
           total_yield_rate: portData.total_yield_rate ?? 0,
           positions: rawPositions,
-          last_synced_at: portData.last_synced_at
+          last_synced_at: portData.last_synced_at,
+          quant_performance: portData.quant_performance,
+          macro_status: portData.macro_status
         };
 
         updateBothStates(newSnap);
@@ -141,6 +188,16 @@ export function useTradingWebSocket() {
             return prev;
           });
         }
+      }
+
+      if (perfRes && perfRes.status === 'fulfilled' && perfRes.value.ok) {
+        const perfData = await perfRes.value.json();
+        setQuantPerformance(perfData);
+      }
+
+      if (macroRes && macroRes.status === 'fulfilled' && macroRes.value.ok) {
+        const macroData = await macroRes.value.json();
+        setMacroStatus(macroData);
       }
     } catch (e) {
       console.warn("REST fallback fetch error:", e);
@@ -187,7 +244,9 @@ export function useTradingWebSocket() {
                 unrealized_pnl: d.unrealized_pnl ?? d.total_pnl ?? 0,
                 total_yield_rate: d.total_yield_rate ?? d.total_yield ?? 0,
                 positions: rawPositions,
-                last_synced_at: d.last_synced_at
+                last_synced_at: d.last_synced_at,
+                quant_performance: d.quant_performance,
+                macro_status: d.macro_status
               };
               updateBothStates(newSnap);
             }
@@ -234,7 +293,7 @@ export function useTradingWebSocket() {
       if (portWsRef.current) portWsRef.current.close();
       if (logWsRef.current) logWsRef.current.close();
     };
-  }, [fetchRestData]);
+  }, [fetchRestData, updateBothStates]);
 
   const addManualLog = useCallback((level: LogMessage['level'], message: string) => {
     const newLog: LogMessage = {
@@ -258,6 +317,8 @@ export function useTradingWebSocket() {
   return {
     portfolio,           // 실시간 엔진용 포트폴리오
     displayPortfolio,    // 화면 표출 전용 포트폴리오 (10분 주기 갱신으로 깜빡임 방지)
+    quantPerformance,    // 퀀트 핵심 성과 지표(KPI)
+    macroStatus,         // 거시 시장 레짐 및 미시 수급 지표
     lastDisplaySyncTime,
     logs,
     botStatus,
