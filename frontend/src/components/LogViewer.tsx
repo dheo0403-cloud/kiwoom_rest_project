@@ -60,10 +60,10 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, portfolio, onClearLo
     });
   }, [logs, filterLevel, searchQuery]);
 
-  // 자동 스크롤 처리
+  // 자동 스크롤 처리 (윈도우 전역 스크롤 방지 및 터미널 내부 격리 스크롤)
   useEffect(() => {
-    if (autoScroll && logsEndRef.current) {
-      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    if (autoScroll && terminalBodyRef.current) {
+      terminalBodyRef.current.scrollTop = terminalBodyRef.current.scrollHeight;
     }
   }, [filteredLogs, autoScroll]);
 

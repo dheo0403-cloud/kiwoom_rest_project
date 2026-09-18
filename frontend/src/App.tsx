@@ -134,7 +134,7 @@ export function App() {
       />
 
       {/* Main Cockpit Container */}
-      <main className="flex-1 p-3.5 sm:p-5 max-w-[1920px] w-full mx-auto flex flex-col">
+      <main className="flex-1 p-2.5 sm:p-4 max-w-[1920px] w-full mx-auto flex flex-col">
         {/* 1. 4-Card Top Bento KPI Metrics */}
         <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} />
 
@@ -150,7 +150,7 @@ export function App() {
           {/* Left Column (7/12: 58%): Realtime Log Viewer & Universe Table */}
           <div className="lg:col-span-7 flex flex-col gap-3.5">
             {/* Bento A: Terminal Live Log Viewer */}
-            <div className="h-[430px]">
+            <div className="h-[380px] lg:h-[420px]">
               <LogViewer
                 logs={logs}
                 portfolio={displayPortfolio}
@@ -159,7 +159,7 @@ export function App() {
             </div>
 
             {/* Bento C: Top 30 Liquid Stocks Universe Table */}
-            <div className="h-[360px]">
+            <div className="h-[330px] lg:h-[360px]">
               <WatchlistBento
                 watchlist={watchlist}
                 onSelectStock={handleSelectStock}
@@ -172,7 +172,7 @@ export function App() {
           {/* Right Column (5/12: 42%): Active Positions & Strategy Controls */}
           <div className="lg:col-span-5 flex flex-col gap-3.5">
             {/* Bento B: Active Positions Cards */}
-            <div className="h-[430px]">
+            <div className="h-[380px] lg:h-[420px]">
               <ActivePositionsBento
                 positions={displayPortfolio.positions && displayPortfolio.positions.length > 0 ? displayPortfolio.positions : portfolio.positions}
                 colorMode={colorMode}
@@ -183,7 +183,7 @@ export function App() {
             </div>
 
             {/* Bento D: Strategy Parameters & Bot Controls */}
-            <div className="h-[360px]">
+            <div className="h-[330px] lg:h-[360px]">
               <StrategyControlsBento
                 botStatus={botStatus}
                 onRefresh={refreshData}
