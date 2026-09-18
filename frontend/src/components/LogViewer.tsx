@@ -6,6 +6,7 @@ import {
   Copy,
   Check,
   Search,
+  ArrowUpCircle,
   ArrowDownCircle,
   Pause,
   Play,
@@ -60,10 +61,10 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, portfolio, onClearLo
     });
   }, [logs, filterLevel, searchQuery]);
 
-  // 자동 스크롤 처리 (윈도우 전역 스크롤 방지 및 터미널 내부 격리 스크롤)
+  // 자동 스크롤 처리 (최신순 로그: index 0이 최신이므로 scrollTop = 0으로 최상단 고정)
   useEffect(() => {
     if (autoScroll && terminalBodyRef.current) {
-      terminalBodyRef.current.scrollTop = terminalBodyRef.current.scrollHeight;
+      terminalBodyRef.current.scrollTop = 0;
     }
   }, [filteredLogs, autoScroll]);
 
@@ -166,9 +167,9 @@ export const LogViewer: React.FC<LogViewerProps> = ({ logs, portfolio, onClearLo
                 ? 'bg-blue-600/20 text-blue-400 border-blue-500/40 hover:bg-blue-600/30'
                 : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
             }`}
-            title="새 로그 수신 시 최하단으로 자동 스크롤"
+            title="새 로그 수신 시 최신 로그(최상단)로 자동 스크롤 및 고정"
           >
-            {autoScroll ? <ArrowDownCircle className="w-3.5 h-3.5 text-blue-400 animate-bounce" /> : <Pause className="w-3.5 h-3.5" />}
+            {autoScroll ? <ArrowUpCircle className="w-3.5 h-3.5 text-blue-400 animate-pulse" /> : <Pause className="w-3.5 h-3.5" />}
             <span>Auto-Scroll {autoScroll ? 'ON' : 'OFF'}</span>
           </button>
 
