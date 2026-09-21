@@ -2,6 +2,36 @@
 
 ---
 
+## 📅 [2026-09-21 15:10] 실시간 보유 종목 리스트 새로고침 시 깜빡임(Flickering) 현상 및 렌더링 롤백 버그 수정
+
+### 1. 작업 개요 및 목적
+- **실시간 포지션 리스트 깜빡임(Flickering) 근본 원인 해결:**
+  - `App.tsx` 내 `displayPortfolio`와 `portfolio`의 핑퐁 삼항 연산자로 인해 상태 동기화 지연 시 순간적으로 빈 배열(`[]`)이 주입되며 "현재 보유 중인 포지션이 없습니다" 빈 화면이 깜빡이던 현상 해결.
+  - `useWebSocket.ts` 내에 `smartMergePositions` In-Place 지능형 병합 로직을 구축하여, 실시간 시세/수익률 수신 시 기존 배열 객체 참조를 보존하고 변경된 종목의 속성만 국소 덮어쓰도록 최적화.
+  - `ActivePositionsBento.tsx`의 개별 종목 카드를 `PositionCardItem = React.memo(...)`로 분리하여 데이터가 변하지 않은 종목의 불필요한 Virtual DOM 리렌더링을 100% 차단.
+  - `QuantPerformanceBento.tsx`의 지표 누락 시 `toFixed` TypeError 방어 로직 추가.
+
+### 2. 주요 수정 및 신설 파일
+- `frontend/src/hooks/useWebSocket.ts`:
+  - `smartMergePositions`: 기존 종목 배열과 신규 수신 데이터를 비교하여 변경된 속성만 In-Place 병합.
+  - `updateBothStates`: 단일 소스 참조 보존.
+- `frontend/src/components/ActivePositionsBento.tsx`:
+  - `PositionCardItem`: `React.memo` 분리 및 `key={pos.code}` 기반 렌더링 안정화.
+- `frontend/src/App.tsx`:
+  - `ActivePositionsBento`에 안정된 `portfolio.positions` 직접 전달 및 핑퐁 제거.
+- `frontend/src/components/QuantPerformanceBento.tsx`:
+  - `toFixed` 호출 시 undefined 방어 (`(val ?? 0).toFixed(...)`).
+- `frontend/verify_flicker_e2e.cjs`:
+  - 0.4초 간격 실시간 WebSocket 시세 브로드캐스트 주입 및 Puppeteer E2E 깜빡임 0건 검증 스크립트 작성.
+
+### 3. 검증 결과
+- **프론트엔드 빌드:** Vite 프로덕션 빌드 100% 성공 (`built in 4.73s`).
+- **Puppeteer E2E 렌더링 실측 검증 (`verify_flicker_e2e.cjs`):**
+  - 0.4초 간격 10회 연속 WebSocket 시세 변동 주입 시 **깜빡임(Empty State) 0회, 카드 소멸 0회, 콘솔 에러 0건** 통과.
+- **백엔드 단위 테스트:** `pytest` 62개 전 테스트 100% 통과.
+
+---
+
 ## 📅 [2026-09-21 14:40] 키움 매수 SendOrder 불발 버그 수정 및 승률 개선을 위한 5대 퀀트 알파 필터·하드 스탑로스(-3%) 고도화
 
 ### 1. 작업 개요 및 목적

@@ -28,8 +28,42 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   macroStatus,
   colorMode
 }) => {
-  const isDailyProfit = performance.daily_return_pct >= 0;
-  const isCumProfit = performance.cumulative_return_pct >= 0;
+  const safePerf: QuantPerformanceMetrics = performance || {
+    daily_return_pct: 0,
+    cumulative_return_pct: 0,
+    win_rate_pct: 0,
+    total_trades: 0,
+    winning_trades: 0,
+    losing_trades: 0,
+    mdd_pct: 0,
+    profit_factor: 0,
+    total_profit: 0,
+    total_loss: 0,
+    recent_closed_trades: [],
+    equity_history: []
+  };
+
+  const safeMacro: MacroStatus = macroStatus || {
+    regime: 'BULL_TREND',
+    regime_reason: '상승장',
+    kodex200_change_rate: 0,
+    vix_value: 18,
+    usdkrw_change_pct: 0,
+    market_filter_passed: true,
+    kelly_multiplier: 1.0,
+    is_buy_allowed: true,
+    target_code: '005930',
+    orderbook_imbalance: {
+      imbalance_ratio: 0.25,
+      total_bid_qty: 250000,
+      total_ask_qty: 150000,
+      bid_ask_spread: 100
+    },
+    volume_power: 120.0
+  };
+
+  const isDailyProfit = (safePerf.daily_return_pct ?? 0) >= 0;
+  const isCumProfit = (safePerf.cumulative_return_pct ?? 0) >= 0;
 
   const dailyColor = isDailyProfit
     ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
@@ -39,11 +73,11 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
     ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
     : (colorMode === 'KRX' ? 'text-blue-400' : 'text-rose-400');
 
-  const isWinRateGood = performance.win_rate_pct >= 50.0;
-  const isPfGood = performance.profit_factor >= 1.2;
+  const isWinRateGood = (safePerf.win_rate_pct ?? 0) >= 50.0;
+  const isPfGood = (safePerf.profit_factor ?? 0) >= 1.2;
 
   // Macro Regime Badge & Color Mapping
-  const regime = macroStatus.regime || 'BULL_TREND';
+  const regime = safeMacro.regime || 'BULL_TREND';
   let regimeLabel = 'BULL_TREND (강세장)';
   let regimeColorClass = 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30';
   let regimeDotClass = 'bg-emerald-400 animate-pulse';
@@ -59,7 +93,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   }
 
   // Micro Indicators (호가 불균형 & 체결강도)
-  const ob = macroStatus.orderbook_imbalance || {
+  const ob = safeMacro.orderbook_imbalance || {
     imbalance_ratio: 0.25,
     total_bid_qty: 250000,
     total_ask_qty: 150000,
@@ -68,12 +102,12 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   const totalDepth = (ob.total_bid_qty + ob.total_ask_qty) || 1;
   const bidRatio = Math.min(100, Math.max(0, (ob.total_bid_qty / totalDepth) * 100));
   const askRatio = 100 - bidRatio;
-  const isBidDominant = ob.imbalance_ratio >= 0;
+  const isBidDominant = (ob.imbalance_ratio ?? 0) >= 0;
 
-  const volumePower = macroStatus.volume_power || 100.0;
+  const volumePower = safeMacro.volume_power ?? 100.0;
   const isStrongVolume = volumePower >= 120.0;
 
-  const recentTrades: ClosedTrade[] = performance.recent_closed_trades || [];
+  const recentTrades: ClosedTrade[] = safePerf.recent_closed_trades || [];
 
   return (
     <div className="bento-card p-4 flex flex-col bg-slate-900/80 border border-slate-800 mb-3.5 relative overflow-hidden">
@@ -116,7 +150,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           </div>
           <div className="mt-1.5">
             <div className={`text-lg sm:text-xl font-black font-mono tabular-nums ${dailyColor}`}>
-              {isDailyProfit ? '+' : ''}{performance.daily_return_pct.toFixed(2)}%
+              {isDailyProfit ? '+' : ''}{(safePerf.daily_return_pct ?? 0).toFixed(2)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
               실현손익 반영
@@ -135,7 +169,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           </div>
           <div className="mt-1.5">
             <div className={`text-lg sm:text-xl font-black font-mono tabular-nums ${cumColor}`}>
-              {isCumProfit ? '+' : ''}{performance.cumulative_return_pct.toFixed(2)}%
+              {isCumProfit ? '+' : ''}{(safePerf.cumulative_return_pct ?? 0).toFixed(2)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
               기초원금 대비
@@ -151,15 +185,15 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               전략 승률
             </span>
             <span className={`text-[9px] font-bold px-1 rounded ${isWinRateGood ? 'bg-emerald-500/20 text-emerald-400' : 'bg-slate-800 text-slate-400'}`}>
-              {performance.winning_trades}승 {performance.losing_trades}패
+              {safePerf.winning_trades ?? 0}승 {safePerf.losing_trades ?? 0}패
             </span>
           </div>
           <div className="mt-1.5">
             <div className={`text-lg sm:text-xl font-black font-mono tabular-nums ${isWinRateGood ? 'text-emerald-400' : 'text-amber-400'}`}>
-              {performance.win_rate_pct.toFixed(1)}%
+              {(safePerf.win_rate_pct ?? 0).toFixed(1)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              총 {performance.total_trades}회 청산
+              총 {safePerf.total_trades ?? 0}회 청산
             </div>
           </div>
         </div>
@@ -175,7 +209,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           </div>
           <div className="mt-1.5">
             <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-rose-400">
-              {performance.mdd_pct.toFixed(2)}%
+              {(safePerf.mdd_pct ?? 0).toFixed(2)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
               최고점 대비 하락
@@ -194,7 +228,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           </div>
           <div className="mt-1.5">
             <div className={`text-lg sm:text-xl font-black font-mono tabular-nums ${isPfGood ? 'text-emerald-400' : 'text-slate-200'}`}>
-              {performance.profit_factor.toFixed(2)}
+              {(safePerf.profit_factor ?? 0).toFixed(2)}
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
               총이익/총손실
@@ -209,17 +243,17 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               <ShieldCheck className="w-3.5 h-3.5 text-cyan-400" />
               켈리 배분 비중
             </span>
-            <span className={`text-[9px] font-bold px-1 rounded ${macroStatus.is_buy_allowed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
-              {macroStatus.is_buy_allowed ? '진입 허용' : '매수 차단'}
+            <span className={`text-[9px] font-bold px-1 rounded ${safeMacro.is_buy_allowed ? 'bg-emerald-500/20 text-emerald-400' : 'bg-rose-500/20 text-rose-400'}`}>
+              {safeMacro.is_buy_allowed ? '진입 허용' : '매수 차단'}
             </span>
           </div>
           <div className="mt-1.5">
             <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-cyan-300">
-              {(macroStatus.kelly_multiplier * 20).toFixed(0)}%
+              {((safeMacro.kelly_multiplier ?? 1.0) * 20).toFixed(0)}%
               <span className="text-xs font-normal text-slate-400 ml-1">/ 종목당</span>
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              레짐 승수: {macroStatus.kelly_multiplier.toFixed(1)}x
+              레짐 승수: {(safeMacro.kelly_multiplier ?? 1.0).toFixed(1)}x
             </div>
           </div>
         </div>
@@ -235,8 +269,8 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               실시간 호가 잔량 불균형 & 체결강도
             </span>
             <span className="text-[10px] text-slate-400">
-              KODEX 200: <strong className={macroStatus.kodex200_change_rate >= 0 ? 'text-rose-400' : 'text-blue-400'}>
-                {macroStatus.kodex200_change_rate >= 0 ? '+' : ''}{macroStatus.kodex200_change_rate.toFixed(2)}%
+              KODEX 200: <strong className={(safeMacro.kodex200_change_rate ?? 0) >= 0 ? 'text-rose-400' : 'text-blue-400'}>
+                {(safeMacro.kodex200_change_rate ?? 0) >= 0 ? '+' : ''}{(safeMacro.kodex200_change_rate ?? 0).toFixed(2)}%
               </strong>
             </span>
           </div>
@@ -245,13 +279,13 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           <div>
             <div className="flex justify-between text-[11px] mb-1">
               <span className="text-slate-400">
-                매수 잔량: <strong className="text-rose-400 font-mono">{Math.round(ob.total_bid_qty).toLocaleString()}</strong>주 ({bidRatio.toFixed(1)}%)
+                매수 잔량: <strong className="text-rose-400 font-mono">{Math.round(ob.total_bid_qty || 0).toLocaleString()}</strong>주 ({bidRatio.toFixed(1)}%)
               </span>
               <span className={`font-bold font-mono ${isBidDominant ? 'text-rose-400' : 'text-blue-400'}`}>
-                불균형: {ob.imbalance_ratio >= 0 ? '+' : ''}{ob.imbalance_ratio.toFixed(2)} ({isBidDominant ? '매수 지지' : '매도 우세'})
+                불균형: {(ob.imbalance_ratio ?? 0) >= 0 ? '+' : ''}{(ob.imbalance_ratio ?? 0).toFixed(2)} ({isBidDominant ? '매수 지지' : '매도 우세'})
               </span>
               <span className="text-slate-400">
-                매도 잔량: <strong className="text-blue-400 font-mono">{Math.round(ob.total_ask_qty).toLocaleString()}</strong>주 ({askRatio.toFixed(1)}%)
+                매도 잔량: <strong className="text-blue-400 font-mono">{Math.round(ob.total_ask_qty || 0).toLocaleString()}</strong>주 ({askRatio.toFixed(1)}%)
               </span>
             </div>
             <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden flex">
@@ -291,7 +325,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               최근 퀀트 청산 타점 성과 (Recent Closed Trades)
             </span>
             <span className="text-[10px] text-slate-400 font-mono">
-              누적 이익: <strong className="text-rose-400">+{Math.round(performance.total_profit).toLocaleString()}원</strong>
+              누적 이익: <strong className="text-rose-400">+{Math.round(safePerf.total_profit || 0).toLocaleString()}원</strong>
             </span>
           </div>
 
@@ -302,30 +336,23 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               </div>
             ) : (
               recentTrades.slice(0, 3).map((trade, idx) => {
-                const isWin = trade.pnl >= 0;
+                const isWin = (trade.pnl || 0) >= 0;
                 const pColor = isWin
                   ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
                   : (colorMode === 'KRX' ? 'text-blue-400' : 'text-rose-400');
 
                 return (
-                  <div
-                    key={`${trade.code}-${idx}`}
-                    className="p-1.5 bg-slate-900/90 rounded border border-slate-800/80 flex items-center justify-between text-[11px]"
-                  >
-                    <div className="flex items-center gap-1.5">
-                      <span className="font-bold text-white">{trade.name}</span>
-                      <span className="text-[9px] text-slate-500 font-mono">({trade.code})</span>
-                      <span className="text-[9px] text-slate-400 ml-1">
-                        {trade.qty}주 @ {Math.round(trade.sell_price).toLocaleString()}원
-                      </span>
-                    </div>
-
+                  <div key={idx} className="flex items-center justify-between bg-slate-900/60 px-2.5 py-1.5 rounded text-[11px] border border-slate-800/60 font-mono">
                     <div className="flex items-center gap-2">
-                      <span className={`font-bold font-mono ${pColor}`}>
-                        {isWin ? '+' : ''}{Math.round(trade.pnl).toLocaleString()}원 ({isWin ? '+' : ''}{trade.return_pct.toFixed(2)}%)
+                      <span className="text-white font-bold">{trade.name || trade.code}</span>
+                      <span className="text-[10px] text-slate-400">{trade.code}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className={`font-bold ${pColor}`}>
+                        {isWin ? '+' : ''}{(trade.return_pct || 0).toFixed(2)}%
                       </span>
-                      <span className="text-[9px] text-slate-500 font-mono">
-                        {trade.timestamp}
+                      <span className={`text-[10px] ${pColor}`}>
+                        ({isWin ? '+' : ''}{Math.round(trade.pnl || 0).toLocaleString()}원)
                       </span>
                     </div>
                   </div>

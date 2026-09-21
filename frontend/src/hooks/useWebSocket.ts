@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { PortfolioSnapshot, LogMessage, BotStatus, QuantPerformanceMetrics, MacroStatus } from '../types';
+import { PortfolioSnapshot, Position, LogMessage, BotStatus, QuantPerformanceMetrics, MacroStatus } from '../types';
 import { getApiUrl, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
@@ -77,36 +77,105 @@ export function useTradingWebSocket() {
   const isConnectedRef = useRef<boolean>(false);
   isConnectedRef.current = isConnected;
 
-  // 두 포트폴리오 스냅샷의 동일성 비교 (플리커링 및 불필요한 DOM 리렌더링 방지)
-  const isSnapshotEqual = (a: PortfolioSnapshot, b: PortfolioSnapshot): boolean => {
-    if (a.total_asset !== b.total_asset) return false;
-    if (a.current_capital !== b.current_capital) return false;
-    if (a.invested_capital !== b.invested_capital) return false;
-    if (a.stock_count !== b.stock_count) return false;
-    if (a.unrealized_pnl !== b.unrealized_pnl) return false;
-    if (a.total_yield_rate !== b.total_yield_rate) return false;
-    const aPos = a.positions || [];
-    const bPos = b.positions || [];
-    if (aPos.length !== bPos.length) return false;
-    for (let i = 0; i < aPos.length; i++) {
-      if (aPos[i].code !== bPos[i].code) return false;
-      if (aPos[i].qty !== bPos[i].qty) return false;
-      if (aPos[i].current_price !== bPos[i].current_price) return false;
-      if (aPos[i].buy_price !== bPos[i].buy_price) return false;
+  // 지능형 포지션 병합 (In-Place Smart Merge: 기존 객체 참조 보존 및 깜빡임 방지)
+  const smartMergePositions = (prevPositions: Position[], nextPositions: Position[]): Position[] => {
+    if (!nextPositions || nextPositions.length === 0) {
+      return [];
     }
-    return true;
+    if (!prevPositions || prevPositions.length === 0) {
+      return nextPositions;
+    }
+
+    const prevMap = new Map<string, Position>();
+    prevPositions.forEach(p => {
+      if (p && p.code) prevMap.set(p.code, p);
+    });
+
+    let hasAnyChanges = false;
+    const merged: Position[] = [];
+
+    for (const nextPos of nextPositions) {
+      if (!nextPos || !nextPos.code) continue;
+      const prevPos = prevMap.get(nextPos.code);
+
+      if (!prevPos) {
+        // 신규 진입 종목
+        merged.push(nextPos);
+        hasAnyChanges = true;
+      } else {
+        // 기존 종목 속성 비교
+        const isPriceSame = prevPos.current_price === nextPos.current_price;
+        const isQtySame = prevPos.qty === nextPos.qty;
+        const isBuyPriceSame = prevPos.buy_price === nextPos.buy_price;
+        const isPnlSame = prevPos.pnl === nextPos.pnl;
+        const isYieldSame = prevPos.yield_rate === nextPos.yield_rate;
+        const isStageSame = prevPos.sell_stage === nextPos.sell_stage;
+
+        if (isPriceSame && isQtySame && isBuyPriceSame && isPnlSame && isYieldSame && isStageSame) {
+          // 변경 없음 -> 기존 객체 참조 유지 (Virtual DOM 리렌더링 완전 방지)
+          merged.push(prevPos);
+        } else {
+          // 변경된 속성만 In-Place 병합
+          merged.push({
+            ...prevPos,
+            ...nextPos,
+            buy_price: nextPos.buy_price > 1 ? nextPos.buy_price : prevPos.buy_price,
+            current_price: nextPos.current_price > 0 ? nextPos.current_price : prevPos.current_price
+          });
+          hasAnyChanges = true;
+        }
+      }
+    }
+
+    // 종목 수가 달라졌거나 변경사항이 있으면 새 merged 배열 반환, 아니면 이전 배열 참조 유지
+    if (merged.length !== prevPositions.length || hasAnyChanges) {
+      return merged;
+    }
+    return prevPositions;
   };
 
   // 실시간 포트폴리오 변경 시 실제 수치 변경이 있을 때만 안전 동기화
   const updateBothStates = useCallback((newSnap: PortfolioSnapshot) => {
     setPortfolio(prev => {
-      if (isSnapshotEqual(prev, newSnap)) return prev;
-      return newSnap;
+      const mergedPositions = smartMergePositions(prev.positions || [], newSnap.positions || []);
+      const mergedSnap: PortfolioSnapshot = {
+        ...newSnap,
+        positions: mergedPositions
+      };
+
+      if (
+        prev.total_asset === mergedSnap.total_asset &&
+        prev.current_capital === mergedSnap.current_capital &&
+        prev.invested_capital === mergedSnap.invested_capital &&
+        prev.unrealized_pnl === mergedSnap.unrealized_pnl &&
+        prev.total_yield_rate === mergedSnap.total_yield_rate &&
+        prev.positions === mergedSnap.positions
+      ) {
+        return prev;
+      }
+      return mergedSnap;
     });
+
     setDisplayPortfolio(prev => {
-      if (isSnapshotEqual(prev, newSnap)) return prev;
-      return newSnap;
+      const mergedPositions = smartMergePositions(prev.positions || [], newSnap.positions || []);
+      const mergedSnap: PortfolioSnapshot = {
+        ...newSnap,
+        positions: mergedPositions
+      };
+
+      if (
+        prev.total_asset === mergedSnap.total_asset &&
+        prev.current_capital === mergedSnap.current_capital &&
+        prev.invested_capital === mergedSnap.invested_capital &&
+        prev.unrealized_pnl === mergedSnap.unrealized_pnl &&
+        prev.total_yield_rate === mergedSnap.total_yield_rate &&
+        prev.positions === mergedSnap.positions
+      ) {
+        return prev;
+      }
+      return mergedSnap;
     });
+
     if (newSnap.quant_performance) {
       setQuantPerformance(newSnap.quant_performance);
     }

@@ -69,29 +69,25 @@ export function App() {
   // 실제 보유 종목(1순위) 또는 감시 종목(2순위)으로 초기 종목 자동 선택
   useEffect(() => {
     if (!selectedStockCode) {
-      const targetPositions = displayPortfolio.positions && displayPortfolio.positions.length > 0
-        ? displayPortfolio.positions
-        : portfolio.positions;
-
-      if (targetPositions && targetPositions.length > 0) {
-        setSelectedStockCode(targetPositions[0].code);
-        setSelectedStockName(targetPositions[0].name);
+      if (portfolio.positions && portfolio.positions.length > 0) {
+        setSelectedStockCode(portfolio.positions[0].code);
+        setSelectedStockName(portfolio.positions[0].name);
       } else if (watchlist.length > 0) {
         setSelectedStockCode(watchlist[0].code);
         setSelectedStockName(watchlist[0].name);
       }
     }
-  }, [displayPortfolio.positions, portfolio.positions, watchlist, selectedStockCode]);
+  }, [portfolio.positions, watchlist, selectedStockCode]);
 
   const handleSelectStock = useCallback((code: string, name?: string) => {
     setSelectedStockCode(code);
     if (name) {
       setSelectedStockName(name);
     } else {
-      const item = watchlist.find(w => w.code === code) || displayPortfolio.positions.find(p => p.code === code) || portfolio.positions.find(p => p.code === code);
+      const item = watchlist.find(w => w.code === code) || portfolio.positions.find(p => p.code === code);
       if (item) setSelectedStockName(item.name);
     }
-  }, [watchlist, displayPortfolio.positions, portfolio.positions]);
+  }, [watchlist, portfolio.positions]);
 
   const handleOpenKillSwitch = useCallback(() => setIsKillSwitchOpen(true), []);
   const handleOpenParams = useCallback(() => setIsParamsOpen(true), []);
@@ -174,7 +170,7 @@ export function App() {
             {/* Bento B: Active Positions Cards */}
             <div className="h-[380px] lg:h-[420px]">
               <ActivePositionsBento
-                positions={displayPortfolio.positions && displayPortfolio.positions.length > 0 ? displayPortfolio.positions : portfolio.positions}
+                positions={portfolio.positions}
                 colorMode={colorMode}
                 onSelectStock={handleSelectStock}
                 selectedStockCode={selectedStockCode}
