@@ -291,7 +291,7 @@ class AsyncTradingBot:
                 self.watchlist[code]['open_price'] = open_price
 
         # 3. 피보나치 및 ATR 변동성 돌파 매수 조건 평가 함수 즉각 호출
-        await self._evaluate_buy_condition(code, cur_price, cur_volume)
+        await self._evaluate_buy_condition(code, cur_price, cur_volume, raw_data=real_data)
 
     async def OnReceiveChejanData(self, gubun: str, item_cnt: int, fid_list: str, data: Dict[str, Any]):
         """
@@ -1052,10 +1052,11 @@ class AsyncTradingBot:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
             await self.db.log_message("ERROR", f"분할 익절 실패: {name}({code}) - {msg}")
 
-    async def _evaluate_buy_condition(self, code: str, cur_price: float, cur_volume: float):
+    async def _evaluate_buy_condition(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
         """
         실시간 피보나치 눌림목 및 ATR 변동성 돌파 매수 조건 평가 함수
         - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
+        - 5대 퀀트 알파 필터(체결강도, 호가불균형, VWAP, 스퀴즈모멘텀, 거래대금) 연동
         """
         if self.mdd_shutdown:
             return
@@ -1082,9 +1083,13 @@ class AsyncTradingBot:
         if not await self.portfolio.can_buy(code):
             return
 
-        # 2. 지표 산출 (인메모리 버퍼 기반)
+        # 2. 지표 산출 (인메모리 버퍼 기반 + 결측치 안전 보정)
         candle_df = self.buffer.get_dataframe(code, limit=20)
         ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
+        if ind is None:
+            ind = {}
+
+        # 3. 실시간 시세 및 알파 피처 결합
         ind['avg_vol'] = info.get('avg_volume', 0)
         ind['high10'] = period_high if period_high > 0 else cur_price
         ind['period_high'] = period_high
@@ -1096,7 +1101,20 @@ class AsyncTradingBot:
         ind['fib_rebound'] = (fib_618 <= cur_price <= fib_382) if (fib_618 > 0 and fib_382 > 0) else False
         ind['skip_time_filter'] = skip_time_filter
 
-        # 3. 퀀트 전략 매수 시그널 검증 (ATR 적응형 변동성 돌파 & 스퀴즈 모멘텀 & 피보나치)
+        # 누적 거래량 / 체결강도 추출 및 주입
+        if raw_data and isinstance(raw_data, dict):
+            raw_dict = raw_data.get('raw', raw_data) if isinstance(raw_data.get('raw'), dict) else raw_data
+            acml_vol = abs(float(str(raw_dict.get('acml_vol') or raw_dict.get('volume') or cur_volume).replace(',', '').strip() or 0))
+            vol_pwr = abs(float(str(raw_dict.get('volume_power') or raw_dict.get('chg_pwr') or raw_dict.get('cntg_pwr') or 0).replace(',', '').strip() or 0))
+            if acml_vol > 0:
+                ind['acml_vol'] = acml_vol
+            if vol_pwr > 0:
+                ind['volume_power'] = vol_pwr
+
+        if 'acml_vol' not in ind or ind['acml_vol'] <= 0:
+            ind['acml_vol'] = cur_volume
+
+        # 4. 퀀트 전략 매수 시그널 검증 (5대 고승률 퀀트 알파 필터 통합)
         buy_signal, reason = await self.strategy.check_buy_signal(
             code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
         )
@@ -1109,18 +1127,29 @@ class AsyncTradingBot:
             order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
 
             if order_qty <= 0:
-                print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
-                await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
-                return
+                # 소액 계좌 최소 1주 안전 가드 (가용 예수금 >= 1주 가격)
+                if current_deposit >= cur_price:
+                    order_qty = 1
+                else:
+                    print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
+                    await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
+                    return
 
             # [2차 방어] 실시간 매수 시 잔고 초과 최종 체크 (매수가 × 수량 > D+2 예수금 → 매수 스킵)
             total_buy_amount = cur_price * order_qty
             if total_buy_amount > current_deposit:
-                print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 예수금({int(current_deposit):,}원) (수량: {order_qty}주 × {int(cur_price):,}원)")
-                await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 예수금 {int(current_deposit):,}원")
-                return
+                # 수량 축소 시도 (가용 예수금 내 구매 가능한 최대 수량)
+                max_possible_qty = int(current_deposit // cur_price)
+                if max_possible_qty > 0:
+                    order_qty = max_possible_qty
+                    total_buy_amount = cur_price * order_qty
+                    print(f"🔧 [수량 자동 보정] {name}({code}) 예수금 범위 내 수량 조정: {order_qty}주 (총 {int(total_buy_amount):,}원)")
+                else:
+                    print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 예수금({int(current_deposit):,}원)")
+                    await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 예수금 {int(current_deposit):,}원")
+                    return
 
-            print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 켈리목표: {order_qty}주)")
+            print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 발주수량: {order_qty}주)")
             await self._execute_smart_buy(code, name, order_qty, cur_price, reason=reason)
         else:
             # 매수 대기 상세 이유 상태 가시화 출력 (전략 사유 우선 표출)

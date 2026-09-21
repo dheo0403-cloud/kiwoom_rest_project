@@ -169,6 +169,31 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(buy_sig)
         self.assertIn("ATR_적응형변동성돌파", reason)
 
+    async def test_alpha_filters_volume_power_and_imbalance(self):
+        """체결강도(Volume Power) 및 호가 불균형 알파 필터 검증"""
+        code = "005930"
+        open_price = 70000.0
+        atr14 = 2000.0
+
+        # 1) 체결강도 부족 (105% < 110%) -> 가짜 돌파 기각
+        ind_low_pwr = {
+            'open': open_price, 'atr14': atr14, 'avg_vol': 100000,
+            'volume_power': 105.0, 'acml_vol': 200000,
+            'skip_time_filter': True
+        }
+        sig1, reason1 = await self.strategy.check_buy_signal(code, 71500, 200000, ind=ind_low_pwr)
+        self.assertFalse(sig1)
+        self.assertIn("체결강도부족", reason1)
+
+        # 2) 체결강도 우수 (135% >= 110%) -> 정상 진입
+        ind_high_pwr = {
+            'open': open_price, 'atr14': atr14, 'avg_vol': 100000,
+            'volume_power': 135.0, 'acml_vol': 200000,
+            'skip_time_filter': True
+        }
+        sig2, reason2 = await self.strategy.check_buy_signal(code, 71500, 200000, ind=ind_high_pwr)
+        self.assertTrue(sig2)
+
 
 if __name__ == '__main__':
     unittest.main()

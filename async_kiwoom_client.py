@@ -196,7 +196,10 @@ class AsyncKiwoomClient:
         return {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {self.access_token}",
-            "api-id": api_id
+            "appkey": str(self.app_key or ""),
+            "appsecret": str(self.app_secret or ""),
+            "api-id": api_id,
+            "tr_id": api_id
         }
 
     async def _dispatcher_worker(self):
@@ -337,11 +340,14 @@ class AsyncKiwoomClient:
             return None
 
         rt_cd = data.get('rt_cd') if data.get('rt_cd') is not None else data.get('return_code')
-        if str(rt_cd) == '0':
-            print(f"✅ [ORDER_SUCCESS] 주문 완료 ({side} {clean_code} {qty}주 @ {price}원, 계좌: {self.account})")
+        ord_no = str(data.get('ord_no') or data.get('odno') or data.get('order_no') or '').strip()
+        msg = data.get('msg1') or data.get('return_msg') or data.get('msg') or data.get('raw_text') or ''
+        msg_cd = data.get('msg_cd') or data.get('return_code') or ''
+
+        if str(rt_cd) == '0' or (ord_no and ord_no != '0'):
+            print(f"✅ [ORDER_SUCCESS] {side} 주문 접수 완료 (종목: {clean_code}, 수량: {qty}주 @ {price:,}원, 주문번호: {ord_no}, 계좌: {self.account})")
         else:
-            msg = data.get('msg1') or data.get('return_msg') or '주문 거절'
-            print(f"⚠️ [ORDER_REJECTED] 주문 거절 ({side} {clean_code} @ {price}원, 계좌: {self.account}): {msg}")
+            print(f"⚠️ [ORDER_REJECTED] {side} 주문 거절 (종목: {clean_code} @ {price:,}원, 에러코드: {msg_cd}/{rt_cd}, 사유: {msg}, 계좌: {self.account})")
         return data
 
     async def cancel_order(self, order_no: str, code: str, qty: int,
