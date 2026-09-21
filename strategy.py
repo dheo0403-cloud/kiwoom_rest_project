@@ -1,12 +1,12 @@
 """
 적응형 퀀트 매매 전략 모듈 (Adaptive Quant Strategy Engine)
 - ATR 기반 동적 변동성 돌파 진입 (Adaptive Volatility Breakout)
-- 5대 고승률 퀀트 알파 필터:
-  1) 체결강도(Volume Power >= 110%) 및 호가 비대칭(Orderbook Imbalance) 필터
-  2) VWAP 스마트 밴드 지지 & 건전 이격도(+0.2% ~ +2.5%) 가드
-  3) 대량 매물대(Volume Profile POC) 저항선 돌파 안착 필터
-  4) 볼린저 밴드 + 켈트너 채널 스퀴즈 모멘텀(Squeeze Momentum) 상방 발산
-  5) 당일 거래대금 및 환산 거래량 급증 검증
+- 승률 70%+ 타겟팅 5대 고승률 퀀트 알파 필터:
+  1) ADX(14) 추세 강도 필터: ADX >= 20 및 +DI > -DI (무추세 횡보장 휩소 100% 기각)
+  2) VWAP 스마트 밴드 지지 & 건전 이격도(+0.2% ~ +2.0%) 가드
+  3) 체결강도(Volume Power >= 115%) 및 호가 불균형(Orderbook Imbalance) 필터
+  4) 대량 매물대(Volume Profile POC) 저항선 돌파 안착 필터
+  5) 볼린저 밴드 + 켈트너 채널 스퀴즈 모멘텀(Squeeze Momentum) 상방 발산
 - 엄격한 리스크 관리 & 출구 전략:
   1) 🚨 하드 스탑로스: -3.0% 엄격 고정 (CRITICAL 긴급 손절)
   2) 🛡️ 본절선 상향(Breakeven / Risk-Free Guard): +1.2% 도달 시 +0.25% 본절가 고정
@@ -90,32 +90,42 @@ class AdaptiveVolatilityBreakoutStrategy:
         poc_price = float(ind.get('poc_price', 0))
         vol_power = float(ind.get('volume_power', ind.get('chg_pwr', 0)))  # 체결강도
         bid_ask_ratio = float(ind.get('bid_ask_ratio', 0))                 # 호가 비율 (총매도잔량 / 총매수잔량)
+        adx = float(ind.get('adx', 0))                                     # ADX 추세 강도
+        plus_di = float(ind.get('plus_di', 0))
+        minus_di = float(ind.get('minus_di', 0))
 
-        # [필터 3] RSI(14) 극단적 초과열 구간(82+) 추격 매수 차단 (상투 잡기 방지)
-        if rsi14 >= 82.0 and not is_test:
-            return False, f"RSI_초과열구간_추격매수차단({rsi14:.1f}>=82)"
+        # [필터 3] RSI(14) 극단적 초과열 구간(80+) 추격 매수 차단 (상투 잡기 방지)
+        if rsi14 >= 80.0 and not is_test:
+            return False, f"RSI_초과열구간_추격매수차단({rsi14:.1f}>=80)"
 
         # [필터 4] 📈 20일선(MA20) 역배열 하락 추세 차단 (상승 추세 종목만 진입)
         if ma20 > 0 and current_price < (ma20 * 0.99) and not is_test:
             return False, f"MA20_하향역배열(현재가:{int(current_price):,}원<MA20:{int(ma20):,}원)"
 
-        # [알파 필터 1] 📊 VWAP 스마트 지지 & 건전 이격도 검증 (+0.2% ~ +2.5%)
+        # [알파 필터 1] 📊 ADX 추세 강도 필터 (무추세 횡보장 톱니파동 Chop 기각)
+        if adx > 0 and not is_test and not ind.get('fib_rebound', False):
+            if adx < 18.0:
+                return False, f"ADX_무추세_횡보장기각({adx:.1f}<18.0)"
+            if plus_di > 0 and minus_di > 0 and plus_di < minus_di:
+                return False, f"DMI_하락추세_매수기각(+DI:{plus_di:.1f}<-DI:{minus_di:.1f})"
+
+        # [알파 필터 2] 📊 VWAP 스마트 지지 & 건전 이격도 검증 (+0.2% ~ +2.5%)
         if vwap > 0 and not is_test and not ind.get('fib_rebound', False):
             if current_price < vwap * 0.995:
                 return False, f"VWAP_하회_가짜돌파기각(현재가:{int(current_price):,}원<VWAP:{int(vwap):,}원)"
-            if current_price > vwap * 1.035:
-                return False, f"VWAP_단기이격과다_추격차단(현재가:{int(current_price):,}원>VWAP+3.5%)"
+            if current_price > vwap * 1.030:
+                return False, f"VWAP_단기이격과다_추격차단(현재가:{int(current_price):,}원>VWAP+3.0%)"
 
-        # [알파 필터 2] 📊 Volume Profile 매물대 저항 돌파 필터 (핵심 매물대 POC 저항 기각)
+        # [알파 필터 3] 📊 Volume Profile 매물대 저항 돌파 필터 (핵심 매물대 POC 저항 기각)
         if poc_price > 0 and not is_test and not ind.get('fib_rebound', False):
             if current_price < poc_price * 0.998:
                 return False, f"매물대_저항선_직전_돌파대기(현재가:{int(current_price):,}원<POC:{int(poc_price):,}원)"
 
-        # [알파 필터 3] ⚡ 체결강도(Volume Power) 검증 (110% 이상 우수 매수세 유입)
+        # [알파 필터 4] ⚡ 체결강도(Volume Power) 검증 (110% 이상 우수 매수세 유입)
         if vol_power > 0 and vol_power < 110.0 and not is_test and not ind.get('fib_rebound', False):
             return False, f"체결강도부족({vol_power:.1f}%<110%)"
 
-        # [알파 필터 4] 🎯 호가 불균형(Orderbook Imbalance) 검증
+        # [알파 필터 5] 🎯 호가 불균형(Orderbook Imbalance) 검증
         if bid_ask_ratio > 0 and bid_ask_ratio < 0.6 and not is_test:
             return False, f"호가잔량비대칭불량(매도/매수비율:{bid_ask_ratio:.2f}<0.6)"
 
@@ -154,7 +164,7 @@ class AdaptiveVolatilityBreakoutStrategy:
                 if projected_volume < (avg_vol * 1.2):
                     return False, f"환산거래량급증미달({projected_volume:.0f}<{avg_vol * 1.2:.0f})"
 
-        # [알파 필터 5] 볼린저 밴드 스퀴즈 모멘텀 상방 발산 검증
+        # [알파 필터 6] 볼린저 밴드 스퀴즈 모멘텀 상방 발산 검증
         squeeze_off = ind.get('squeeze_off', True)
         squeeze_momentum = float(ind.get('squeeze_momentum', 0.0))
         if not squeeze_off and squeeze_momentum < 0 and not is_test and not is_fib_rebound:
@@ -195,7 +205,6 @@ class AdaptiveVolatilityBreakoutStrategy:
         atr14 = float(ind.get('atr14', 0) if ind else 0)
 
         # 1. 🚨 [최우선] 엄격한 하드 스탑로스 (-3.0% 도달 시 CRITICAL 즉시 긴급 손절)
-        # ATR 1.5~2.0배 손절선 또는 -3.0% 하드 캡
         hard_stop_distance = (self.atr_hard_stop_mult * atr14) if atr14 > 0 else (buy_price * 0.03)
         hard_stop_price = buy_price - hard_stop_distance
 

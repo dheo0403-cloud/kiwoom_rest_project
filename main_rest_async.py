@@ -165,6 +165,9 @@ class AsyncTradingBot:
         self.kodex200_change_rate = 0.0
         self.mdd_shutdown = False
         self.highest_total_asset = 0.0  # 최초 계좌 동기화 시 실제 자산으로 캘리브레이션
+        self.daily_start_capital = 0.0  # 당일 시작 자산 (일일 손실률 추적용)
+        self.daily_loss_limit_rate = -0.025  # 당일 최대 손실 한도: -2.5% (초과 시 서킷 브레이커 발동)
+        self.daily_circuit_breaker = False   # 일일 최대 손실 제한 차단 플래그
         self.is_running = False
         self.is_paused = False
         self.is_shutdown = False
@@ -555,7 +558,23 @@ class AsyncTradingBot:
         if self.highest_total_asset == 0.0 or snap['total_asset'] > self.highest_total_asset:
             self.highest_total_asset = snap['total_asset']
 
-        # MDD 셧다운 검사 (-5% 초과 하락 시 신규 매수 차단)
+        # 당일 시작 자산 기준점 캘리브레이션
+        if self.daily_start_capital == 0.0 and snap['total_asset'] > 0:
+            self.daily_start_capital = snap['total_asset']
+
+        # 🚨 [일일 최대 손실 서킷 브레이커] 당일 손실 -2.5% 초과 시 신규 매수 즉시 전면 차단
+        if self.daily_start_capital > 0:
+            daily_loss_pct = (snap['total_asset'] - self.daily_start_capital) / self.daily_start_capital
+            if daily_loss_pct <= self.daily_loss_limit_rate and not self.daily_circuit_breaker:
+                self.daily_circuit_breaker = True
+                self.mdd_shutdown = True
+                breaker_msg = f"🚨 [일일 서킷 브레이커] 당일 누적 손실({daily_loss_pct:.2%})이 일일 한도({self.daily_loss_limit_rate:.1%})를 초과하여 금일 신규 매수를 전면 차단합니다."
+                print(breaker_msg)
+                await self.db.log_message("CRITICAL", breaker_msg)
+                if hasattr(self.notifier, 'send_message'):
+                    self.notifier.send_message(breaker_msg)
+
+        # 전체 최고점 대비 MDD 셧다운 검사 (-5% 초과 하락 시 신규 매수 차단)
         if self.highest_total_asset > 0:
             mdd = ((snap['total_asset'] - self.highest_total_asset) / self.highest_total_asset) * 100.0
             if mdd <= -5.0 and not self.mdd_shutdown:
@@ -1058,6 +1077,8 @@ class AsyncTradingBot:
         - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
         - 5대 퀀트 알파 필터(체결강도, 호가불균형, VWAP, 스퀴즈모멘텀, 거래대금) 연동
         """
+        if self.daily_circuit_breaker:
+            return
         if self.mdd_shutdown:
             return
         if not self.market_filter_passed:
@@ -1352,8 +1373,10 @@ class AsyncTradingBot:
                 self.is_paused = False
                 self.is_running = True
                 self.mdd_shutdown = False
+                self.daily_circuit_breaker = False
+                self.daily_start_capital = 0.0
                 self.market_filter_passed = True
-                wake_msg = f"🌅 [자동 재시작 스케줄러] 익일 영업일 아침({next_open.strftime('%H:%M')}) 도달: 수동 일시정지 상태를 해제하고 봇을 '실행(RUNNING)' 상태로 자동 전환합니다."
+                wake_msg = f"🌅 [자동 재시작 스케줄러] 익일 영업일 아침({next_open.strftime('%H:%M')}) 도달: 수동 일시정지 및 서킷브레이커를 해제하고 봇을 '실행(RUNNING)' 상태로 자동 전환합니다."
                 print(wake_msg)
                 if self.notifier:
                     self.notifier.send_message(f"🌅 [Kiwoom Quant Bot] 익일 장전 자동 웨이크업: 봇 '실행(RUNNING)' 상태로 자동 재개되었습니다.")
