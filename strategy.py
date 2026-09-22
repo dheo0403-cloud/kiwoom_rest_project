@@ -22,23 +22,30 @@ import numpy as np
 class AdaptiveVolatilityBreakoutStrategy:
     """
     고승률 퀀트 엔진: ATR 적응형 변동성 돌파 + 5대 스마트 알파 필터
-    - 하드 스탑로스: -3.0% 엄격 적용
+    - 하드 스탑로스: -3.0% 엄격 적용 (CRITICAL 긴급 손절)
     - 본절 트리거: +1.2% 도달 시 제세공과금/슬리피지 포함 +0.25% 본절선 상향
-    - 샹들리에 엑시트 & 3단계 다단계 분할 익절
+    - 트레일링 스탑: 최고가 실시간 갱신 & 고점 대비 -2.0% 반락 시 추세 청산 (수익 극대화)
+    - 타임 컷: 15시 15분 이후 오버나잇 방지 강제 전량 청산
     """
     def __init__(self, db_manager=None, buffer_manager=None,
                  k_breakout: float = 0.5,
                  atr_hard_stop_mult: float = 1.5,
                  atr_trailing_stop_mult: float = 2.0,
                  breakeven_trigger_pct: float = 0.012,
-                 hard_stop_loss_rate: float = -0.03):
+                 hard_stop_loss_rate: float = -0.03,
+                 trailing_stop_drop_rate: float = -0.02,
+                 trailing_activation_pct: float = 0.015,
+                 use_trailing_stop_only: bool = True):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
         self.atr_hard_stop_mult = atr_hard_stop_mult
         self.atr_trailing_stop_mult = atr_trailing_stop_mult
-        self.breakeven_trigger_pct = breakeven_trigger_pct  # +1.2% 도달 시 본절 가동
-        self.hard_stop_loss_rate = hard_stop_loss_rate      # -3.0% 엄격 하드 스탑
+        self.breakeven_trigger_pct = breakeven_trigger_pct      # +1.2% 도달 시 본절 가동
+        self.hard_stop_loss_rate = hard_stop_loss_rate          # -3.0% 엄격 하드 스탑
+        self.trailing_stop_drop_rate = trailing_stop_drop_rate  # 고점 대비 -2.0% 하락 시 청산
+        self.trailing_activation_pct = trailing_activation_pct  # +1.5% 이상 상승 시 트레일링 가동
+        self.use_trailing_stop_only = use_trailing_stop_only    # 데이트레이딩 모드 (고정 분할익절 배제하고 추세 추종)
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -186,12 +193,12 @@ class AdaptiveVolatilityBreakoutStrategy:
                                 ind: Optional[Dict[str, Any]] = None, sell_stage: int = 0,
                                 highest_price: Optional[float] = None) -> Tuple[str, str]:
         """
-        고도화된 출구 전략:
+        추세 추종형 데이트레이딩 출구 전략:
         1. 🚨 하드 스탑로스: -3.0% 엄격 고정 (CRITICAL 긴급 손절)
-        2. 🛡️ 본절선 상향(Breakeven Guard): 최고가 +1.2% 달성 시 +0.25% 본절가 고정
-        3. 🚨 샹들리에 트레일링 스탑: 최고가 대비 ATR 2.0배(또는 -1.8%) 반락 시 청산
-        4. 🎯 3단계 R-배수 적응형 분할 익절 (+2.5%~3% 50%, +4.5%~5% 50%, 잔여 전량)
-        5. ⏰ 장마감 오버나잇 방지 강제 청산 (15:15 이후)
+        2. ⏰ 장마감 오버나잇 방지 강제 청산 (15:15 이후)
+        3. 🛡️ 본절선 상향(Breakeven Guard): 최고가 +1.2% 달성 시 +0.25% 본절가 고정
+        4. 🚀 동적 트레일링 스탑: 최고가 실시간 갱신 & 고점 대비 -2.0% 하락 시 추세 청산
+        5. 🎯 (옵션) 3단계 분할 익절: use_trailing_stop_only=False 시에만 작동
         Returns: (action: "WAIT" | "SELL_ALL" | "SELL_PARTIAL", reason: str)
         """
         if buy_price <= 0 or current_price <= 0:
@@ -211,53 +218,56 @@ class AdaptiveVolatilityBreakoutStrategy:
         if current_price <= hard_stop_price or profit_rate <= self.hard_stop_loss_rate:
             return "SELL_ALL", f"ATR_하드스탑로스_긴급손절({profit_rate:.2%}, 스탑가:{int(hard_stop_price):,}원)"
 
-        # 2. 🛡️ [Risk-Free Guard] 본절선 상향 (최고가가 +1.2% 이상 도달 후 본절선 하회 시 손실 전환 원천 차단)
-        if highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
-            breakeven_price = buy_price * 1.0025  # 제세공과금/슬리피지 0.25% 보전
-            if current_price <= breakeven_price:
-                return "SELL_ALL", f"본절스탑_손실전환방어(최고{int(highest_p):,}원→현재{int(current_price):,}원, {profit_rate:.2%})"
-
-        # 3. 🚨 샹들리에 트레일링 스탑 (Chandelier Exit)
-        if atr14 > 0:
-            chandelier_stop = highest_p - (self.atr_trailing_stop_mult * atr14)
-            # 최고가 +1.2% 이상 달성 또는 1차 익절 이후에는 최소 본절가(+0.25%) 보장
-            if sell_stage >= 1 or highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
-                chandelier_stop = max(buy_price * 1.0025, chandelier_stop)
-
-            if current_price <= chandelier_stop and highest_p >= buy_price * 1.015:
-                return "SELL_ALL", f"샹들리에_트레일링스탑_최고{int(highest_p):,}원→스탑{int(chandelier_stop):,}원({profit_rate:.2%})"
-        else:
-            # ATR 부재 시 폴백: 최고가 대비 -1.8% 반락 시 매도
-            if highest_p >= buy_price * 1.018 and (current_price - highest_p) / highest_p <= -0.018:
-                return "SELL_ALL", f"폴백_트레일링스탑({profit_rate:.2%})"
-
-        # 4. 🎯 ATR R-배수 및 단계별 분할 익절 (Take-Profit Stages)
-        if atr14 > 0:
-            r1_target = buy_price + (1.5 * atr14)
-            r2_target = buy_price + (2.5 * atr14)
-            r3_target = buy_price + (3.5 * atr14)
-
-            if sell_stage == 0 and current_price >= r1_target:
-                return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_50%({profit_rate:.2%}, 목표가:{int(r1_target):,}원)"
-            if sell_stage == 1 and current_price >= r2_target:
-                return "SELL_PARTIAL", f"2차_ATR_R2_분할익절_50%({profit_rate:.2%}, 목표가:{int(r2_target):,}원)"
-            if sell_stage >= 2 and current_price >= r3_target:
-                return "SELL_ALL", f"3차_ATR_R3_전량익절_100%({profit_rate:.2%}, 목표가:{int(r3_target):,}원)"
-        else:
-            # 폴백 고정 % 분할 익절
-            if sell_stage == 0 and profit_rate >= 0.03:
-                return "SELL_PARTIAL", f"1차_고정_분할익절_50%({profit_rate:.2%})"
-            if sell_stage == 1 and profit_rate >= 0.05:
-                return "SELL_PARTIAL", f"2차_고정_분할익절_50%({profit_rate:.2%})"
-            if sell_stage >= 2 and profit_rate >= 0.08:
-                return "SELL_ALL", f"3차_고정_전량익절_100%({profit_rate:.2%})"
-
-        # 5. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 회피, 15:15 이후)
+        # 2. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 100% 회피, 15:15 이후)
         skip_time_filter = ind.get('skip_time_filter', False) if ind else False
         if not skip_time_filter:
             now = datetime.now()
             if now.hour == 15 and now.minute >= 15:
                 return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.2%})"
+
+        # 3. 🛡️ [Risk-Free Guard] 본절선 상향 (최고가가 +1.2% 이상 도달 후 본절선 하회 시 손실 전환 원천 차단)
+        if highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
+            breakeven_price = buy_price * 1.0025  # 제세공과금/슬리피지 0.25% 보전
+            if current_price <= breakeven_price:
+                return "SELL_ALL", f"본절스탑_손실전환방어(최고{int(highest_p):,}원→현재{int(current_price):,}원, {profit_rate:.2%})"
+
+        # 4. 🚀 [동적 트레일링 스탑] 최고가 대비 반락 시 추세 청산 (수익 극대화)
+        if highest_p >= buy_price * (1.0 + self.trailing_activation_pct):
+            drop_from_high = (current_price - highest_p) / highest_p
+
+            # 1) 고점 대비 일정 비율(기본 -2.0%) 하락 시 즉시 청산
+            if drop_from_high <= self.trailing_stop_drop_rate:
+                return "SELL_ALL", f"트레일링스탑_고점대비하락청산(최고{int(highest_p):,}원→현재{int(current_price):,}원, 고점대비:{drop_from_high:.2%}, 실현수익률:{profit_rate:.2%})"
+
+            # 2) ATR 샹들리에 스탑 하회 시 청산
+            if atr14 > 0:
+                chandelier_stop = highest_p - (self.atr_trailing_stop_mult * atr14)
+                if sell_stage >= 1 or highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
+                    chandelier_stop = max(buy_price * 1.0025, chandelier_stop)
+
+                if current_price <= chandelier_stop and highest_p >= buy_price * 1.015:
+                    return "SELL_ALL", f"샹들리에_트레일링스탑_최고{int(highest_p):,}원→스탑{int(chandelier_stop):,}원({profit_rate:.2%})"
+
+        # 5. 🎯 (옵션) ATR R-배수 및 단계별 분할 익절 (use_trailing_stop_only=False 일 때만 작동)
+        if not self.use_trailing_stop_only:
+            if atr14 > 0:
+                r1_target = buy_price + (1.5 * atr14)
+                r2_target = buy_price + (2.5 * atr14)
+                r3_target = buy_price + (3.5 * atr14)
+
+                if sell_stage == 0 and current_price >= r1_target:
+                    return "SELL_PARTIAL", f"1차_ATR_R1_분할익절_50%({profit_rate:.2%}, 목표가:{int(r1_target):,}원)"
+                if sell_stage == 1 and current_price >= r2_target:
+                    return "SELL_PARTIAL", f"2차_ATR_R2_분할익절_50%({profit_rate:.2%}, 목표가:{int(r2_target):,}원)"
+                if sell_stage >= 2 and current_price >= r3_target:
+                    return "SELL_ALL", f"3차_ATR_R3_전량익절_100%({profit_rate:.2%}, 목표가:{int(r3_target):,}원)"
+            else:
+                if sell_stage == 0 and profit_rate >= 0.03:
+                    return "SELL_PARTIAL", f"1차_고정_분할익절_50%({profit_rate:.2%})"
+                if sell_stage == 1 and profit_rate >= 0.05:
+                    return "SELL_PARTIAL", f"2차_고정_분할익절_50%({profit_rate:.2%})"
+                if sell_stage >= 2 and profit_rate >= 0.08:
+                    return "SELL_ALL", f"3차_고정_전량익절_100%({profit_rate:.2%})"
 
         return "WAIT", ""
 

@@ -67,6 +67,7 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
 
     async def test_chandelier_trailing_stop_signal(self):
         """샹들리에 엑시트(최고가 대비 -2.5 ATR) 트레일링 스탑 검증"""
+        self.strategy.trailing_stop_drop_rate = -0.10  # 샹들리에 스탑 단독 검증용 버퍼 설정
         code = "000660"
         buy_price = 100000.0
         atr14 = 3000.0
@@ -90,30 +91,69 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action, "SELL_ALL")
         self.assertIn("샹들리에_트레일링스탑", reason)
 
+    async def test_dynamic_trailing_stop_trend_following(self):
+        """추세 추종형 트레일링 스탑 (상승 중 홀딩 -> 최고가 갱신 -> 고점 대비 -2.0% 하락 시 청산) 검증"""
+        code = "005930"
+        buy_price = 100000.0
+        ind = {'atr14': 0.0, 'skip_time_filter': True}
+
+        # 1) 주가 상승 (+5% 105,000원 -> 최고가 105,000원) -> 계속 홀딩 (WAIT)
+        action1, _ = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=105000, ind=ind,
+            highest_price=105000.0
+        )
+        self.assertEqual(action1, "WAIT")
+
+        # 2) 주가 추가 급등 (+10% 110,000원 -> 최고가 110,000원) -> 계속 홀딩 (WAIT)
+        action2, _ = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=110000, ind=ind,
+            highest_price=110000.0
+        )
+        self.assertEqual(action2, "WAIT")
+
+        # 3) 최고가 110,000원에서 -1.0% 미세 눌림 (108,900원) -> 허용폭(-2.0%) 이내이므로 홀딩 (WAIT)
+        action3, _ = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=108900, ind=ind,
+            highest_price=110000.0
+        )
+        self.assertEqual(action3, "WAIT")
+
+        # 4) 최고가 110,000원에서 -2.1% 반락 (107,690원) -> 트레일링 스탑 발동 및 전량 청산 (SELL_ALL)
+        action4, reason4 = await self.strategy.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=107690, ind=ind,
+            highest_price=110000.0
+        )
+        self.assertEqual(action4, "SELL_ALL")
+        self.assertIn("트레일링스탑", reason4)
+
     async def test_atr_take_profit_stages(self):
-        """ATR R-배수 다단계 분할 익절 검증"""
+        """(옵션) ATR R-배수 다단계 분할 익절 검증 (use_trailing_stop_only=False)"""
+        strategy_split = AdaptiveVolatilityBreakoutStrategy(
+            use_trailing_stop_only=False,
+            atr_trailing_stop_mult=5.0  # 트레일링 스탑 간섭 방지
+        )
         code = "035420"
         buy_price = 200000.0
         atr14 = 4000.0
         ind = {'atr14': atr14, 'skip_time_filter': True}
 
         # 1차 목표가: 200,000 + 1.5 * 4,000 = 206,000원 (+3%)
-        action, reason = await self.strategy.check_sell_signal(
-            code=code, buy_price=buy_price, current_price=206500, ind=ind, sell_stage=0
+        action, reason = await strategy_split.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=206500, ind=ind, sell_stage=0, highest_price=206500
         )
         self.assertEqual(action, "SELL_PARTIAL")
         self.assertIn("1차_ATR_R1_분할익절", reason)
 
         # 2차 목표가: 200,000 + 2.5 * 4,000 = 210,000원 (+5%)
-        action, reason = await self.strategy.check_sell_signal(
-            code=code, buy_price=buy_price, current_price=210500, ind=ind, sell_stage=1
+        action, reason = await strategy_split.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=210500, ind=ind, sell_stage=1, highest_price=210500
         )
         self.assertEqual(action, "SELL_PARTIAL")
         self.assertIn("2차_ATR_R2_분할익절", reason)
 
         # 3차 목표가: 200,000 + 3.5 * 4,000 = 214,000원 (+7~8%) -> 잔여 전량 청산
-        action, reason = await self.strategy.check_sell_signal(
-            code=code, buy_price=buy_price, current_price=215000, ind=ind, sell_stage=2
+        action, reason = await strategy_split.check_sell_signal(
+            code=code, buy_price=buy_price, current_price=215000, ind=ind, sell_stage=2, highest_price=215000
         )
         self.assertEqual(action, "SELL_ALL")
         self.assertIn("3차_ATR_R3_전량익절", reason)

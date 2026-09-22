@@ -280,6 +280,8 @@ async def test_three_stage_profit_taking():
     mock_db = MockDatabaseManager()
     portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+    bot.strategy.use_trailing_stop_only = False  # 분할 익절 모드 활성화
+    bot.strategy.atr_trailing_stop_mult = 5.0    # 트레일링 스탑 간섭 방지
 
     # 매수가 100,000원, 100주 보유 포지션 설정
     await portfolio.add_position("000660", "SK하이닉스", qty=100, buy_price=100000.0)
@@ -743,6 +745,8 @@ async def test_dynamic_watchlist_and_full_quant_workflow():
     mock_db = MockDatabaseManager()
     portfolio = AsyncPortfolioManager(initial_capital=10_000_000.0, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000.0, client=mock_client, portfolio=portfolio, db=mock_db)
+    bot.strategy.use_trailing_stop_only = False
+    bot.strategy.atr_trailing_stop_mult = 5.0
 
     # 1. 감시 목록 동적 갱신
     await bot.update_watchlist(top_n=5)
@@ -1414,6 +1418,36 @@ async def test_vwap_and_volume_profile_filters():
     assert sig3 is True, "모든 필터 통과 시 정상 매수 시그널이 발생해야 합니다."
     print(f"  ✅ VWAP 지지 + POC 매물대 돌파 정규 타점 승인 완료: {reason3}")
 
+async def test_market_close_time_cut():
+    """25. 장 마감 15:15 타임 컷(Time Cut) 일괄 청산 및 오버나잇 방지 검증"""
+    print("▶ [Test 25] 15:15 장 마감 타임 컷(Time Cut) 전 종목 일괄 청산 검증...")
+    mock_client = MockKiwoomClient()
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 2개 종목 포지션 보유 설정
+    await portfolio.add_position("005930", "삼성전자", qty=10, buy_price=70000.0)
+    await portfolio.add_position("000660", "SK하이닉스", qty=5, buy_price=150000.0)
+    mock_client.holdings["005930"] = {"name": "삼성전자", "qty": 10, "buy_price": 70000.0}
+    mock_client.holdings["000660"] = {"name": "SK하이닉스", "qty": 5, "buy_price": 150000.0}
+
+    assert len(portfolio.positions) == 2
+
+    # 2. 15:15 타임 컷 실행
+    mock_client.sent_orders.clear()
+    await bot.execute_market_close_time_cut()
+
+    # 3. 검증: 전 종목에 대해 CRITICAL 시장가(03) 매도 주문 발송 및 포지션 청산 확인
+    assert bot.time_cut_executed is True
+    assert len(portfolio.positions) == 0, "타임 컷 후 모든 포지션이 청산되어야 합니다."
+    sell_orders = [o for o in mock_client.sent_orders if o.get('side') == 'SELL']
+    assert len(sell_orders) == 2, "보유 2개 종목 모두 매도 주문이 발송되어야 합니다."
+    for o in sell_orders:
+        assert o['priority'] == RequestPriority.CRITICAL
+        assert o['order_type'] == "03"  # 시장가
+    print("  ✅ 15:15 장 마감 타임 컷 전 종목 CRITICAL 시장가(03) 일괄 청산 완벽 검증")
+
 async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
@@ -1442,6 +1476,7 @@ async def main():
     await test_order_timeout_manager_sell_replace()
     await test_vwap_and_volume_profile_filters()
     await test_daily_drawdown_circuit_breaker()
+    await test_market_close_time_cut()
     print("=" * 65)
     print("🎉 모든 퀀트 매매, 미체결 방어 및 VWAP 필터 시뮬레이션 테스트 (총 24개) 100% 통과 완료!")
     print("=" * 65)

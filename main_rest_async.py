@@ -74,11 +74,14 @@ class OrderTimeoutManager:
             if order_no in self.tracked_orders:
                 item = self.tracked_orders[order_no]
                 cntg_qty = int(float(str(data.get('cntg_qty') or data.get('chejan_qty') or 0)))
-                uncl_qty = int(float(str(data.get('uncl_qty') or data.get('otst_qty') or 0)))
+                uncl_raw = data.get('uncl_qty') if data.get('uncl_qty') is not None else data.get('otst_qty')
                 status = str(data.get('ord_stts') or data.get('status') or '')
 
-                if uncl_qty > 0:
-                    item['unfilled_qty'] = uncl_qty
+                if uncl_raw is not None:
+                    try:
+                        item['unfilled_qty'] = max(0, int(float(str(uncl_raw))))
+                    except (ValueError, TypeError):
+                        pass
                 elif cntg_qty > 0:
                     item['unfilled_qty'] = max(0, item['unfilled_qty'] - cntg_qty)
 
@@ -87,7 +90,7 @@ class OrderTimeoutManager:
                     del self.tracked_orders[order_no]
 
     async def check_and_resolve_timeouts(self):
-        """3분 경과 미체결 주문 검사 및 자동 취소/재발주 실행"""
+        """설정된 타임아웃(N초) 경과 미체결 주문 검사 및 자동 취소/재발주 실행"""
         now = time.time()
         expired_orders = []
 
@@ -115,13 +118,22 @@ class OrderTimeoutManager:
                         await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환")
                     print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환)")
             elif side == "SELL":
-                # 미체결 매도 -> 지정가 취소 후 즉시 긴급 시장가(03) 전량 재발주
+                # 미체결 매도 -> 지정가 취소 후 KRX 락 해제 대기 및 즉시 긴급 시장가(03) CRITICAL 전량 재발주
                 if self.client and hasattr(self.client, 'cancel_order'):
                     await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    await asyncio.sleep(0.2)  # KRX 매도가능수량 락 해제 비동기 대기
 
                 print(f"🚨 [미체결 매도 타임아웃] {name}({code}) 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주!")
                 if self.client:
                     sell_res = await self.client.send_order(code=code, qty=uncl_qty, price=0, order_type="03", side="SELL", priority=RequestPriority.CRITICAL)
+                    rt_cd = (sell_res or {}).get('rt_cd') if (sell_res or {}).get('rt_cd') is not None else (sell_res or {}).get('return_code')
+                    msg = (sell_res or {}).get('msg1') or (sell_res or {}).get('return_msg') or ''
+                    # 800033(매도가능수량 부족) 반환 시 Fail-Safe 1회 재시도
+                    if sell_res and str(rt_cd) != '0' and ('800033' in str(msg) or '매도가능수량' in str(msg)):
+                        print(f"⚠️ [800033 타임아웃 재시도] {name}({code}) 매도가능수량 락 재감지 -> 재발주 시도...")
+                        await asyncio.sleep(0.3)
+                        sell_res = await self.client.send_order(code=code, qty=uncl_qty, price=0, order_type="03", side="SELL", priority=RequestPriority.CRITICAL)
+
                     new_ord_no = str((sell_res or {}).get('ord_no') or (sell_res or {}).get('odno') or '').strip()
                     if new_ord_no and new_ord_no != '0':
                         await self.track_order(new_ord_no, code, name, "SELL", uncl_qty, 0, order_type="03")
@@ -194,6 +206,7 @@ class AsyncTradingBot:
         # 미체결 주문 30초 타임아웃 자동 취소/대체 매니저
         timeout_sec = float(os.getenv("ORDER_TIMEOUT_SECONDS", "30.0"))
         self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
+        self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
 
     @property
     def running(self) -> bool:
@@ -959,6 +972,49 @@ class AsyncTradingBot:
                 print(f"🎯 [EXIT_SIGNAL/SELL_PARTIAL] {name}({code}) -> {reason} ({sell_qty}주 매도, 잔여 {qty - sell_qty}주 유지)")
                 await self._execute_profit_sell(code, name, sell_qty, cur_price, next_stage, reason=reason)
 
+    async def execute_market_close_time_cut(self):
+        """
+        15시 15분 장 마감 오버나잇(Overnight) 방지 전 종목 일괄 강제 청산 (Time Cut)
+        - 당일 1회만 실행 보장 (self.time_cut_executed)
+        - 1. 모든 보유 종목의 미체결 주문 선제 취소
+        - 2. 0.2초 KRX 락 해제 대기
+        - 3. RequestPriority.CRITICAL 우선순위로 시장가(03) 전량 일괄 매도
+        """
+        if self.time_cut_executed:
+            return
+
+        snap = await self.portfolio.get_snapshot()
+        positions = snap.get('positions', [])
+        if not positions:
+            self.time_cut_executed = True
+            return
+
+        self.time_cut_executed = True
+        cut_msg = f"⏰ [장 마감 타임 컷] 15:15 도달: 오버나잇 리스크 원천 방지를 위해 보유 {len(positions)}종목 일괄 시장가 청산을 시작합니다."
+        print(cut_msg)
+        await self.db.log_message("CRITICAL", cut_msg)
+        if self.notifier:
+            self.notifier.send_message(cut_msg)
+
+        for pos in positions:
+            code = pos['code']
+            name = pos['name']
+            qty = pos['qty']
+            cur_price = pos['current_price']
+
+            # 1. 미체결 주문 선제 취소
+            await self._cancel_unexecuted_orders_for_stock(code)
+            await asyncio.sleep(0.1)
+
+            # 2. CRITICAL 긴급 시장가 매도 발주
+            await self._execute_emergency_sell(
+                code=code, name=name, qty=qty, cur_price=cur_price,
+                reason="장마감_15:15_타임컷_일괄시장가청산",
+                force_market_price=True
+            )
+
+        print("✅ [장 마감 타임 컷] 보유 종목 일괄 청산 주문 발송 완료.")
+
     async def cleanup_unexecuted_orders(self):
         """
         미체결 주문(Unfilled Order) 자동 감시 및 3분 타임아웃 취소/재발주 안전장치
@@ -1075,33 +1131,37 @@ class AsyncTradingBot:
 
         return cancelled_count
 
-    async def _execute_emergency_sell(self, code: str, name: str, qty: int, cur_price: float, reason: str):
-        """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스 주문 (미체결 사전 취소 파이프라인 연동)"""
+    async def _execute_emergency_sell(self, code: str, name: str, qty: int, cur_price: float, reason: str, force_market_price: bool = False):
+        """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스/타임컷 주문 (미체결 사전 취소 파이프라인 연동)"""
         # [단계 1] 매도가능수량 0주(800033 에러) 방지를 위해 기존 미체결 주문 전수 선제 취소
         await self._cancel_unexecuted_orders_for_stock(code)
 
-        # [단계 2] 호가창 조회 후 매수 2호가 또는 시장가 발주
-        orderbook = await self.client.get_orderbook(code, priority=RequestPriority.CRITICAL) if (self.client and hasattr(self.client, 'get_orderbook')) else None
-        sell_price = int(cur_price)
-        order_type = "00"
-
-        if orderbook:
-            out = orderbook.get('output', orderbook)
-            if isinstance(out, list) and len(out) > 0:
-                out = out[0]
-            elif not isinstance(out, dict):
-                out = {}
-            # 매수 2호가 타겟팅으로 빠른 체결 유도
-            bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
-            if bid2 and str(bid2).isdigit() and int(bid2) > 0:
-                sell_price = int(bid2)
-            elif out.get('buy_fpr_bid') or out.get('bid_price1'):
-                bid1 = out.get('buy_fpr_bid') or out.get('bid_price1')
-                if bid1 and str(bid1).isdigit() and int(bid1) > 0:
-                    sell_price = int(bid1)
-        else:
+        # [단계 2] 호가창 조회 후 매수 2호가 또는 시장가(03) 발주
+        if force_market_price:
             order_type = "03"
             sell_price = 0
+        else:
+            orderbook = await self.client.get_orderbook(code, priority=RequestPriority.CRITICAL) if (self.client and hasattr(self.client, 'get_orderbook')) else None
+            sell_price = int(cur_price)
+            order_type = "00"
+
+            if orderbook:
+                out = orderbook.get('output', orderbook)
+                if isinstance(out, list) and len(out) > 0:
+                    out = out[0]
+                elif not isinstance(out, dict):
+                    out = {}
+                # 매수 2호가 타겟팅으로 빠른 체결 유도
+                bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
+                if bid2 and str(bid2).isdigit() and int(bid2) > 0:
+                    sell_price = int(bid2)
+                elif out.get('buy_fpr_bid') or out.get('bid_price1'):
+                    bid1 = out.get('buy_fpr_bid') or out.get('bid_price1')
+                    if bid1 and str(bid1).isdigit() and int(bid1) > 0:
+                        sell_price = int(bid1)
+            else:
+                order_type = "03"
+                sell_price = 0
 
         # [단계 3] CRITICAL 우선순위로 긴급 매도 발주
         res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
@@ -1153,6 +1213,17 @@ class AsyncTradingBot:
 
         res = await self.client.send_order(code, qty, sell_price, order_type="00", side="SELL", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+        msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or ''
+        msg_cd = (res or {}).get('msg_cd') or (res or {}).get('return_code') or ''
+
+        # [단계 2] 800033 에러 반환 시 Fail-Safe 재시도
+        if res and str(rt_cd) != '0' and ('800033' in str(msg) or '800033' in str(msg_cd) or '매도가능수량' in str(msg)):
+            print(f"⚠️ [800033 분할익절 복구] {name}({code}) 매도가능수량 락 재감지 -> 추가 미체결 취소 및 재발주 시도...")
+            await asyncio.sleep(0.3)
+            await self._cancel_unexecuted_orders_for_stock(code)
+            res = await self.client.send_order(code, qty, sell_price, order_type="00", side="SELL", priority=RequestPriority.HIGH)
+            rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+
         if res and str(rt_cd) == '0':
             ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
             if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
@@ -1475,6 +1546,7 @@ class AsyncTradingBot:
                 self.daily_circuit_breaker = False
                 self.daily_start_capital = 0.0
                 self.market_filter_passed = True
+                self.time_cut_executed = False
                 wake_msg = f"🌅 [자동 재시작 스케줄러] 익일 영업일 아침({next_open.strftime('%H:%M')}) 도달: 수동 일시정지 및 서킷브레이커를 해제하고 봇을 '실행(RUNNING)' 상태로 자동 전환합니다."
                 print(wake_msg)
                 if self.notifier:
@@ -1516,17 +1588,21 @@ class AsyncTradingBot:
                         await self.check_market_filter()
                         await self._sync_account_balance()
 
-                    # 3. 감시 종목 갱신 (60초 주기)
+                    # 4. 감시 종목 갱신 (60초 주기)
                     if loop_count % 30 == 1:
                         await self.update_watchlist()
 
-                    # 4. 포지션 감시 및 출구 전략 (매 2초마다 최우선 감시)
+                    # 5. 장 마감 타임 컷 (15:15 도달 시 보유 전 종목 일괄 청산)
+                    if (now_time.hour == 15 and now_time.minute >= 15) and not self.time_cut_executed:
+                        await self.execute_market_close_time_cut()
+
+                    # 6. 포지션 감시 및 출구 전략 (매 2초마다 최우선 감시)
                     await self.monitor_positions_and_exit()
 
-                    # 5. 신규 매수 기회 탐색 (매 2초마다 2중 보완)
+                    # 7. 신규 매수 기회 탐색 (매 2초마다 2중 보완)
                     await self.monitor_watchlist_and_enter()
 
-                    # 6. 장 마감(15:30) 도달 시 당일 루프 종료 후 정산
+                    # 8. 장 마감(15:30) 도달 시 당일 루프 종료 후 정산
                     if now_time.hour >= 15 and now_time.minute >= 30:
                         print("🏁 [장 마감] 당일 정규 거래 시간이 종료되었습니다.")
                         snap = await self.portfolio.get_snapshot()

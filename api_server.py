@@ -746,17 +746,51 @@ async def create_manual_order(req: ManualOrderRequest):
     if not ctx.bot or not ctx.client:
         raise HTTPException(status_code=503, detail="서버 엔진이 준비되지 않았습니다.")
 
-    order_type = "03" if req.price == 0 else "00"
+    code = req.code.replace('A', '').split('_')[0].strip()
+    side = req.side.upper()
+    qty = req.qty
+    price = req.price or 0
+
+    order_type = "03" if price == 0 else "00"
+
+    # [안전 가드] 매수(BUY) 시장가 주문은 현재가 또는 호가 기반 지정가(00)로 안전 전환 (855056 에러 방지)
+    if side == "BUY" and order_type == "03":
+        target_price = price
+        if target_price <= 0:
+            price_data = await ctx.client.get_price(code, priority=RequestPriority.HIGH)
+            if price_data:
+                out = price_data.get('output', price_data)
+                if isinstance(out, list) and len(out) > 0:
+                    out = out[0]
+                elif not isinstance(out, dict):
+                    out = {}
+                raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or 0
+                try:
+                    target_price = int(abs(float(str(raw_p).replace(',', '').strip())))
+                except (ValueError, TypeError):
+                    target_price = 0
+        if target_price > 0:
+            price = target_price
+            order_type = "00"
+            print(f"🛡️ [API 수동 매수 가드] 시장가→지정가 자동 전환: {code} @ {price:,}원")
+
     res = await ctx.client.send_order(
-        code=req.code,
-        qty=req.qty,
-        price=req.price or 0,
+        code=code,
+        qty=qty,
+        price=price,
         order_type=order_type,
-        side=req.side.upper(),
+        side=side,
         priority=RequestPriority.HIGH
     )
 
-    log_msg = f"[수동주문] {req.side} {req.code}: {req.qty}주 @ {req.price if req.price > 0 else '시장가'}"
+    rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+    ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
+    if res and str(rt_cd) == '0' and ord_no and ord_no != '0':
+        if hasattr(ctx.bot, 'order_timeout_mgr') and ctx.bot.order_timeout_mgr:
+            name = ctx.bot.watchlist.get(code, {}).get('name', code) if hasattr(ctx.bot, 'watchlist') else code
+            await ctx.bot.order_timeout_mgr.track_order(ord_no, code, name, side, qty, price, order_type=order_type)
+
+    log_msg = f"[수동주문] {side} {code}: {qty}주 @ {price if price > 0 else '시장가'}"
     if ctx.db:
         await ctx.db.log_message("MANUAL_ORDER", log_msg)
 
@@ -782,6 +816,9 @@ async def control_bot(req: BotControlRequest):
     if action == "START":
         ctx.bot.is_paused = False
         ctx.bot.running = True
+        ctx.bot.mdd_shutdown = False
+        ctx.bot.daily_circuit_breaker = False
+        ctx.bot.market_filter_passed = True
         if ctx.bot_task is None or ctx.bot_task.done():
             ctx.bot_task = asyncio.create_task(ctx.bot.run_daily_trading_loop())
             return {"status": "started", "message": "트레이딩 루프가 시작되었습니다."}

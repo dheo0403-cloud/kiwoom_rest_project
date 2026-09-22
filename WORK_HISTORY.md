@@ -2,6 +2,37 @@
 
 ---
 
+## 📅 [2026-09-22 13:45] 고강도 8-Angle 코드 리뷰 기반 미체결 타임아웃 락 해제·수동주문 안전가드·pytest 런타임 최적화 (--fix)
+
+### 1. 작업 개요 및 목적
+- **고강도 8 독립 앵글 코드 리뷰(Recall 중심) 및 실전 안정성 결함 전수 해결:**
+  1. **미체결 매도 타임아웃 KRX 락 해제 대기 및 800033 Fail-Safe 탑재 (`main_rest_async.py`):**
+     - `OrderTimeoutManager.check_and_resolve_timeouts()`에서 매도 지정가 주문 타임아웃(30초) 취소 후 대기 없이 시장가(03)를 발주할 때 KRX 매도가능수량 락으로 인해 800033 에러가 발생할 수 있는 결함을 `await asyncio.sleep(0.2)` 및 Fail-Safe 1회 재시도로 원천 차단.
+  2. **체결 데이터 `uncl_qty == 0` 미반영 오취소 버그 수정 (`main_rest_async.py`):**
+     - `on_chejan_data()`에서 키움 Chejan 전량 체결 이벤트 수신 시 `uncl_qty > 0` 조건으로 인해 잔여 수량이 0으로 갱신되지 않고 30초 후 오취소/재발주되던 버그를 `uncl_raw is not None` 명시적 판별로 수정.
+  3. **분할 익절(`_execute_profit_sell`) 800033 Fail-Safe 복구 탑재 (`main_rest_async.py`):**
+     - 정규 분할 익절 시 일시적 미체결 락으로 800033 에러 반환 시 선제 취소 후 재발주하는 Fail-Safe 복구 로직 보강.
+  4. **수동 매수 안전 가드 및 타임아웃 트래커 연동 (`api_server.py`):**
+     - `/order/manual` 엔드포인트에서 시장가(03) 매수 요청 시 현재가 기반 지정가(00)로 자동 변환하여 키움 855056(증거금 부족) 에러를 방지하고, 주문 접수 성공 시 `order_timeout_mgr.track_order`에 자동 등록.
+  5. **비상 킬스위치 후 수동 시작(START) 시 매수 차단 해제 연동 (`api_server.py`):**
+     - `/bot/emergency-stop`으로 `mdd_shutdown=True` 설정 후 대시보드에서 `START`를 눌렀을 때 `mdd_shutdown` 및 `daily_circuit_breaker`가 초기화되지 않아 매수 평가가 영구 차단되던 결함 수정.
+  6. **`pytest.ini` 레거시 격리 및 테스트 속도 50% 단축 (`pytest.ini`, `legacy/test_balance.py`):**
+     - `norecursedirs`에 `legacy`, `frontend`, `node_modules`를 명시하고 `legacy/test_balance.py`의 최상단 동기 HTTP 호출을 `main()`으로 캡슐화하여 `RuntimeWarning: coroutine was never awaited` 제거 및 테스트 실행 시간 대폭 단축 (31.37s ➔ 16.43s).
+
+### 2. 수정 파일 목록
+- `main_rest_async.py`: 미체결 타임아웃 KRX 락 해제 대기(0.2s), `on_chejan_data` 0주 잔여수량 갱신, `_execute_profit_sell` 800033 복구 로직 탑재.
+- `api_server.py`: 수동 매수 시장가→지정가 변환 및 OrderTimeoutManager 연동, `START` 액션 시 `mdd_shutdown` 리셋.
+- `pytest.ini`: `norecursedirs` 설정으로 `legacy` 디렉토리 자동 수집 제외.
+- `legacy/test_balance.py`: `if __name__ == '__main__':` 가드로 모듈 임포트 시 동기 네트워크 호출 차단.
+
+### 3. 검증 결과
+- **단위 테스트:** `pytest` 63개 전 테스트 100% 통과 (PASS, 16.43s, 경고 0건).
+- **실측 검증:** `verify_unexecuted_cancel_and_sell.py` 1~3단계 교차 검증 100% 통과.
+- **FastAPI/대시보드 검증:** `test_api_server.py` 15개 엔드포인트 100% 통과.
+- **프론트엔드 빌드:** `npm run build` 번들 정상 빌드 완료.
+
+---
+
 ## 📅 [2026-09-22 11:05] 심층 코드 리뷰 피드백 반영 및 실시간 매매/비상 정지 핵심 버그 수정 (--fix)
 
 ### 1. 작업 개요 및 목적
