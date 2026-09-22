@@ -469,6 +469,7 @@ class TechnicalIndicators:
             'vah': float(vp.get('vah', 0)),
             'val': float(vp.get('val', 0)),
             'is_above_poc': bool(vp.get('is_above_poc', True)),
+            'adx': float(latest.get('adx14', 0)),
             'adx14': float(latest.get('adx14', 0)),
             'chandelier_long': float(latest.get('chandelier_long', 0)),
             'chandelier_short': float(latest.get('chandelier_short', 0)),

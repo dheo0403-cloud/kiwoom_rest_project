@@ -384,7 +384,7 @@ class AsyncKiwoomClient:
 
     async def get_unexecuted_orders(self, code: str = "", priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
         """
-        계좌 미체결 주문 목록 조회 (kt00007 / 계좌미체결내역조회)
+        계좌 미체결 주문 목록 조회 (kt00007 계좌미체결내역 / ka10075 폴백)
         - 특정 종목 또는 전체 미체결 목록 조회
         """
         clean_code = str(code).replace('A', '').strip() if code else ""
@@ -397,6 +397,17 @@ class AsyncKiwoomClient:
             "qry_tp": "0"
         }
         data, _ = await self.request("kt00007", url, payload, priority=priority)
+        if not data or (isinstance(data, dict) and data.get('http_status')):
+            # ka10075 폴백 조회
+            payload_ka = {
+                "dmst_stex_tp": "KRX",
+                "accNo": self.account,
+                "accPwd": self.password,
+                "qry_tp": "1"
+            }
+            data_ka, _ = await self.request("ka10075", url, payload_ka, priority=priority)
+            if data_ka and not (isinstance(data_ka, dict) and data_ka.get('http_status')):
+                return data_ka
         return data
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
@@ -540,18 +551,6 @@ class AsyncKiwoomClient:
                     has_pos = True
 
         return merged_data if merged_data else None
-
-    async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
-        """미체결 주문 내역 조회 (ka10075 / kt00001 호환)"""
-        url = f"{self.base_url}/api/dostk/acnt"
-        payload = {
-            "dmst_stex_tp": "KRX",
-            "accNo": self.account,
-            "accPwd": self.password,
-            "qry_tp": "1"  # 1: 미체결
-        }
-        data, _ = await self.request("ka10075", url, payload, priority=priority)
-        return data
 
     async def get_top_trading_value(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """거래대금 상위 종목 조회 (KRX/통합 다중 거래소 파라미터 방어 지원)"""

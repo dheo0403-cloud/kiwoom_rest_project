@@ -2,6 +2,41 @@
 
 ---
 
+## 📅 [2026-09-22 11:05] 심층 코드 리뷰 피드백 반영 및 실시간 매매/비상 정지 핵심 버그 수정 (--fix)
+
+### 1. 작업 개요 및 목적
+- **심층 8개 앵글 코드 리뷰 기반 버그 및 안정성 결함 전수 해결:**
+  1. **미체결 주문 조회 중복 선언 및 `TypeError` 제거 (`async_kiwoom_client.py`):**
+     - `get_unexecuted_orders`가 385줄(kt00007, `code` 지원)과 544줄(ka10075, `code` 미지원)에 중복 선언되어 544줄이 덮어쓰면서 발생하던 `code` 키워드 인자 TypeError 결함 완벽 해결 (kt00007 + ka10075 폴백 통합).
+  2. **ADX 실시간 지표 키 불일치 및 횡보장 휩소 바이패스 버그 수정 (`indicators.py` & `strategy.py`):**
+     - `TechnicalIndicators.get_latest_indicators`의 `'adx14'` 키와 `strategy.py`의 `ind.get('adx')` 간 키 불일치로 인해 실전 매매 중 ADX가 0으로 처리되어 추세 필터가 상시 무력화되던 버그를 다중 키(`adx`, `adx14`) 지원으로 완벽 수정.
+  3. **장전 08:50 스케줄러 서킷브레이커 리셋 누락 수정 (`api_server.py`):**
+     - 전일 -2.5% 손실로 서킷브레이커가 발동된 후 익일 08:50 아침 자동 재개 시 `daily_circuit_breaker = False` 및 `daily_start_capital = 0.0` 초기화가 누락되어 당일 매수가 영구 차단되던 결함 수정.
+  4. **비상 킬스위치 800033 매도 거절 방어 (`api_server.py`):**
+     - `/bot/emergency-stop` 실행 시 미체결 주문 선제 취소 파이프라인(`_cancel_unexecuted_orders_for_stock`)을 연동하여 매도가능수량 0주 락으로 인한 청산 실패 방어.
+  5. **환산 거래량 급증 필터 `skip_time_filter` 방어 가드 보완 (`strategy.py`):**
+     - 오프마켓/데모/백테스트 환경에서 실시간 경과 시간 계산으로 인해 유효 타점이 오기각되던 현상 방지.
+  6. **핫 패스 마이크로 최적화 (`main_rest_async.py`):**
+     - 틱당 호출되는 `_evaluate_buy_condition` 내부의 중복 `import time` 제거.
+
+### 2. 수정 파일 목록
+- `async_kiwoom_client.py`: `get_unexecuted_orders` 중복 제거 및 kt00007 / ka10075 통합 폴백 지원.
+- `indicators.py`: `get_latest_indicators`에 `'adx'` 및 `'adx14'` 듀얼 키 매핑.
+- `strategy.py`: `adx` 지표 다중 키 조회 및 환산 거래량 `skip_time_filter` 가드 탑재.
+- `api_server.py`: 장전 08:50 스케줄러 서킷브레이커/자본 리셋 추가 및 비상 킬스위치 미체결 선제 취소 연동.
+- `main_rest_async.py`: 실시간 틱 평가 함수 내 중복 `import time` 제거.
+
+### 3. 검증 결과
+- **단위 테스트:** `pytest` 62개 전 테스트 100% 통과 (PASS).
+- **시뮬레이션 및 교차 검증:**
+  - `test_async_trading_loop.py` 23개 시뮬레이션 테스트 100% 통과.
+  - `verify_order_pipeline.py` 매수/예수금/켈리/주문 파이프라인 100% 실측 완료.
+  - `verify_quant_winrate_defense.py` 가짜 돌파 100% 거절, 서킷브레이커 100% 방어 실측 완료.
+  - `verify_unexecuted_cancel_and_sell.py` 800033 에러 방어 및 선제 취소 청산 100% 통과.
+- **프론트엔드 빌드:** `npm run build` 번들 정상 빌드 완료 (에러 0건).
+
+---
+
 ## 📅 [2026-09-21 15:40] 퀀트 승률(37.3% ➔ 70%+) 개선용 다중 필터(ADX/VWAP/체결강도) 및 일일 최대 손실(-2.5%) Circuit Breaker 도입
 
 ### 1. 작업 개요 및 목적

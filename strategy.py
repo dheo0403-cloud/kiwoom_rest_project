@@ -90,7 +90,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         poc_price = float(ind.get('poc_price', 0))
         vol_power = float(ind.get('volume_power', ind.get('chg_pwr', 0)))  # 체결강도
         bid_ask_ratio = float(ind.get('bid_ask_ratio', 0))                 # 호가 비율 (총매도잔량 / 총매수잔량)
-        adx = float(ind.get('adx', 0))                                     # ADX 추세 강도
+        adx = float(ind.get('adx', ind.get('adx14', 0)))                   # ADX 추세 강도
         plus_di = float(ind.get('plus_di', 0))
         minus_di = float(ind.get('minus_di', 0))
 
@@ -153,7 +153,7 @@ class AdaptiveVolatilityBreakoutStrategy:
                 return False, f"당일거래대금부족({int(accumulated_amount / 100_000_000):,}억<10억)"
 
             # 2) 전일 20일 평균 거래량 대비 당일 환산 거래량 1.2배 이상 급증 검증
-            if avg_vol > 0 and acml_vol > 0:
+            if avg_vol > 0 and acml_vol > 0 and not skip_time_filter:
                 market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
                 market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
                 total_seconds = (market_close - market_open).total_seconds()

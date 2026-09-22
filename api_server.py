@@ -125,6 +125,8 @@ async def daily_market_scheduler_loop():
                     ctx.bot.is_paused = False
                     ctx.bot.running = True
                     ctx.bot.mdd_shutdown = False
+                    ctx.bot.daily_circuit_breaker = False
+                    ctx.bot.daily_start_capital = 0.0
                     ctx.bot.market_filter_passed = True
 
                     # 3. 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석
@@ -824,6 +826,13 @@ async def emergency_kill_switch():
         name = pos['name']
         qty = pos['qty']
         if qty > 0:
+            # 800033(매도가능수량 부족) 에러 방지를 위해 기존 미체결 주문 선제 취소
+            if hasattr(ctx.bot, '_cancel_unexecuted_orders_for_stock'):
+                try:
+                    await ctx.bot._cancel_unexecuted_orders_for_stock(code)
+                except Exception as e:
+                    print(f"⚠️ [Emergency Kill-Switch] 미체결 취소 예외({code}): {e}")
+
             res = await ctx.client.send_order(
                 code=code, qty=qty, price=0, order_type="03", side="SELL",
                 priority=RequestPriority.CRITICAL

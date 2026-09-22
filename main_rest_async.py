@@ -1283,7 +1283,6 @@ class AsyncTradingBot:
                 status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
 
             # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회 또는 괴리율 0.5%p 이상 변동 시에만 콘솔/DB/웹 출력)
-            import time
             now_ts = time.time()
             last_time = self._last_watch_log_time.get(code, 0.0)
             last_diff = self._last_watch_diff_pct.get(code, -999.0)
