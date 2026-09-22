@@ -114,7 +114,7 @@ class MockKiwoomClient:
         ]
         return {"output2": candles}
 
-    async def get_unexecuted_orders(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+    async def get_unexecuted_orders(self, code: str = "", priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """미체결 주문 조회"""
         return {"output": []}
 

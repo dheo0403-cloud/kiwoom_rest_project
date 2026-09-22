@@ -4,10 +4,16 @@
 [매수 시그널 발생 -> D+2 예수금 확인 -> 켈리 수량 산출 -> SendOrder 정상 호출 -> 체결 및 포트폴리오 편입] 전 과정 실측 검증
 """
 import asyncio
+import sys
 import time
 from datetime import datetime
 from typing import Dict, Any, List
 from unittest.mock import AsyncMock, MagicMock
+
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
 
 from async_kiwoom_client import RequestPriority
 from async_portfolio import AsyncPortfolioManager

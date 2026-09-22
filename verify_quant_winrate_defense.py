@@ -9,6 +9,11 @@ import sys
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
 
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(encoding='utf-8')
+if hasattr(sys.stderr, 'reconfigure'):
+    sys.stderr.reconfigure(encoding='utf-8')
+
 from strategy import AdaptiveVolatilityBreakoutStrategy
 from main_rest_async import AsyncTradingBot
 from async_portfolio import AsyncPortfolioManager

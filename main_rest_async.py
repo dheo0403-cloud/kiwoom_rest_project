@@ -1003,10 +1003,84 @@ class AsyncTradingBot:
         except Exception as e:
             print(f"⚠️ [미체결 주문 정리 오류] {e}")
 
+    async def _cancel_unexecuted_orders_for_stock(self, code: str) -> int:
+        """
+        특정 종목의 미체결 주문(Unfilled Orders) 전수 조회 및 선제적 취소(Cancel) 파이프라인
+        - 800033(매도가능수량 부족) 에러 원천 방지
+        - OrderTimeoutManager 및 키움 kt00007(계좌미체결내역) 듀얼 조회
+        - 원주문번호(orig_ord_no)를 정확히 바인딩하여 kt10003 취소 주문 발송
+        - KRX 주식 락 해제 및 예수금/매도가능수량 복구를 위한 비동기 대기(0.2s) 보장
+        - 취소된 주문 건수 반환
+        """
+        clean_code = str(code).replace('A', '').strip()
+        cancelled_count = 0
+        cancelled_order_nos = set()
+
+        # 1. 인메모리 OrderTimeoutManager 추적 중인 미체결 주문 취소
+        if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
+            async with self.order_timeout_mgr._lock:
+                for ord_no, info in list(self.order_timeout_mgr.tracked_orders.items()):
+                    if info['code'] == clean_code and info['unfilled_qty'] > 0:
+                        if ord_no not in cancelled_order_nos:
+                            print(f"🛡️ [미체결 사전 취소/Tracker] {info['name']}({clean_code}) 주문번호 {ord_no} ({info['side']} {info['unfilled_qty']}주) 취소 발송...")
+                            if self.client and hasattr(self.client, 'cancel_order'):
+                                await self.client.cancel_order(
+                                    order_no=ord_no,
+                                    code=clean_code,
+                                    qty=info['unfilled_qty'],
+                                    priority=RequestPriority.CRITICAL
+                                )
+                            cancelled_order_nos.add(ord_no)
+                            cancelled_count += 1
+                            del self.order_timeout_mgr.tracked_orders[ord_no]
+
+        # 2. 키움 REST API kt00007 (계좌미체결내역조회) 실시간 전수 조회 및 취소
+        if self.client and hasattr(self.client, 'get_unexecuted_orders') and hasattr(self.client, 'cancel_order'):
+            try:
+                uncl_data = await self.client.get_unexecuted_orders(code=clean_code, priority=RequestPriority.CRITICAL)
+                items = []
+                if isinstance(uncl_data, dict):
+                    items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
+                elif isinstance(uncl_data, list):
+                    items = uncl_data
+
+                if items:
+                    for order in items:
+                        if not isinstance(order, dict):
+                            continue
+                        ord_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
+                        ord_code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').replace('A', '').strip()
+                        uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
+
+                        if (not ord_code or ord_code == clean_code) and ord_no and uncl_qty > 0:
+                            if ord_no not in cancelled_order_nos:
+                                print(f"🛡️ [미체결 사전 취소/API] {clean_code} 주문번호 {ord_no} ({uncl_qty}주) kt10003 취소 발송...")
+                                await self.client.cancel_order(
+                                    order_no=ord_no,
+                                    code=clean_code,
+                                    qty=uncl_qty,
+                                    priority=RequestPriority.CRITICAL
+                                )
+                                cancelled_order_nos.add(ord_no)
+                                cancelled_count += 1
+            except Exception as e:
+                print(f"⚠️ [미체결 사전 취소 예외] {clean_code}: {e}")
+
+        if cancelled_count > 0:
+            print(f"✅ [미체결 해소 완료] {clean_code} 총 {cancelled_count}건의 미체결 주문 취소 완료 -> KRX 매도가능수량 락 해제 대기(0.2초)")
+            await asyncio.sleep(0.2)  # KRX 매도가능수량 락 해제 비동기 대기
+            if hasattr(self, '_sync_account_balance'):
+                await self._sync_account_balance()
+
+        return cancelled_count
+
     async def _execute_emergency_sell(self, code: str, name: str, qty: int, cur_price: float, reason: str):
-        """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스 주문"""
-        # 호가창 조회 후 매수 2호가 또는 시장가 발주
-        orderbook = await self.client.get_orderbook(code, priority=RequestPriority.CRITICAL)
+        """CRITICAL 우선순위로 큐를 추월하는 긴급 스탑로스 주문 (미체결 사전 취소 파이프라인 연동)"""
+        # [단계 1] 매도가능수량 0주(800033 에러) 방지를 위해 기존 미체결 주문 전수 선제 취소
+        await self._cancel_unexecuted_orders_for_stock(code)
+
+        # [단계 2] 호가창 조회 후 매수 2호가 또는 시장가 발주
+        orderbook = await self.client.get_orderbook(code, priority=RequestPriority.CRITICAL) if (self.client and hasattr(self.client, 'get_orderbook')) else None
         sell_price = int(cur_price)
         order_type = "00"
 
@@ -1014,31 +1088,56 @@ class AsyncTradingBot:
             out = orderbook.get('output', orderbook)
             if isinstance(out, list) and len(out) > 0:
                 out = out[0]
+            elif not isinstance(out, dict):
+                out = {}
             # 매수 2호가 타겟팅으로 빠른 체결 유도
             bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
             if bid2 and str(bid2).isdigit() and int(bid2) > 0:
                 sell_price = int(bid2)
+            elif out.get('buy_fpr_bid') or out.get('bid_price1'):
+                bid1 = out.get('buy_fpr_bid') or out.get('bid_price1')
+                if bid1 and str(bid1).isdigit() and int(bid1) > 0:
+                    sell_price = int(bid1)
+        else:
+            order_type = "03"
+            sell_price = 0
 
+        # [단계 3] CRITICAL 우선순위로 긴급 매도 발주
         res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+        msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or ''
+        msg_cd = (res or {}).get('msg_cd') or (res or {}).get('return_code') or ''
+
+        # [단계 4] 만약 800033 에러가 여전히 반환될 경우의 Fail-Safe 재시도
+        if res and str(rt_cd) != '0' and ('800033' in str(msg) or '800033' in str(msg_cd) or '매도가능수량' in str(msg)):
+            print(f"⚠️ [800033 긴급 복구] {name}({code}) 매도가능수량 락 재감지 -> 추가 미체결 취소 및 재발주 시도...")
+            await asyncio.sleep(0.3)
+            await self._cancel_unexecuted_orders_for_stock(code)
+            res = await self.client.send_order(code, qty, sell_price, order_type=order_type, side="SELL", priority=RequestPriority.CRITICAL)
+            rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+
         if res and str(rt_cd) == '0':
             ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
             if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
                 await self.order_timeout_mgr.track_order(ord_no, code, name, "SELL", qty, sell_price, order_type=order_type)
 
-            pos = await self.portfolio.remove_position(code, sell_price)
-            await self.db.log_order(code, name, "SELL", qty, sell_price)
-            await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
-            pnl = (sell_price - pos['buy_price']) * qty if pos else None
-            yield_rt = (sell_price - pos['buy_price']) / pos['buy_price'] * 100.0 if pos and pos['buy_price'] > 0 else None
-            self.notifier.notify_order_filled("SELL", name, code, qty, sell_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
+            pos = await self.portfolio.remove_position(code, cur_price if sell_price == 0 else sell_price)
+            actual_exit_price = cur_price if sell_price == 0 else sell_price
+            await self.db.log_order(code, name, "SELL", qty, int(actual_exit_price))
+            await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {int(actual_exit_price):,}원 ({reason})")
+            pnl = (actual_exit_price - pos['buy_price']) * qty if pos else None
+            yield_rt = (actual_exit_price - pos['buy_price']) / pos['buy_price'] * 100.0 if pos and pos['buy_price'] > 0 else None
+            self.notifier.notify_order_filled("SELL", name, code, qty, actual_exit_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
             await self._sync_account_balance()
         else:
-            msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
-            await self.db.log_message("ERROR", f"긴급 매도 실패: {name}({code}) - {msg}")
+            err_msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
+            await self.db.log_message("ERROR", f"긴급 매도 실패: {name}({code}) - {err_msg}")
 
     async def _execute_profit_sell(self, code: str, name: str, qty: int, cur_price: float, next_stage: int, reason: str):
-        """HIGH 우선순위로 스마트 호가(매수 1호가) 분할 익절 주문"""
+        """HIGH 우선순위로 스마트 호가(매수 1호가) 분할 익절 주문 (미체결 사전 취소 연동)"""
+        # [단계 1] 미체결 잔량 선제 정리
+        await self._cancel_unexecuted_orders_for_stock(code)
+
         orderbook = await self.client.get_orderbook(code, priority=RequestPriority.HIGH)
         sell_price = int(cur_price)
 
