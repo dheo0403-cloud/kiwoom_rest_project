@@ -31,8 +31,9 @@ class OrderTimeoutManager:
     """
     미체결 주문(Unfilled Orders) 실시간 추적 및 N초(기본 30초) 타임아웃 자동 취소/대체(Cancel & Replace) 안전장치
     - 주문 접수 후 N초(30초~60초) 경과 미체결 주문 식별
-    - 미체결 매수(BUY): kt10003 취소 발송 -> 예수금 증거금 즉시 반환
+    - 미체결 매수(BUY): kt10003 취소 발송 -> 예수금 증거금 즉시 반환 및 30초 쿨다운(Over-trading 방지)
     - 미체결 매도(SELL): kt10003 취소 후 RequestPriority.CRITICAL 시장가(03) 전량 청산 재발주
+    - 가용 예수금 실시간 락: 대기 중인 미체결 매수 주문 증거금(Pending Margin) 계산
     """
     def __init__(self, bot=None, client=None, db=None, timeout_seconds: float = 30.0):
         self.bot = bot
@@ -40,17 +41,45 @@ class OrderTimeoutManager:
         self.db = db
         self.timeout_seconds = timeout_seconds
         self.tracked_orders: Dict[str, Dict[str, Any]] = {}
+        self.cancelled_cooldowns: Dict[str, float] = {}  # 취소된 종목코드 -> 쿨다운 만료 시각(timestamp)
         self._lock = asyncio.Lock()
+
+    def is_in_cooldown(self, code: str) -> bool:
+        """취소 직후 30초 쿨다운 중인지 확인 (반복적 주문 핑퐁 차단)"""
+        clean_code = str(code).replace('A', '').strip()
+        expire_time = self.cancelled_cooldowns.get(clean_code, 0.0)
+        return time.time() < expire_time
+
+    def get_pending_buy_amount(self) -> float:
+        """현재 대기 중인 모든 미체결 매수 주문들의 묶인 증거금 합계 반환"""
+        total_pending = 0.0
+        for info in self.tracked_orders.values():
+            if info.get('side') == 'BUY' and info.get('unfilled_qty', 0) > 0:
+                total_pending += info['unfilled_qty'] * info.get('price', 0.0)
+        return total_pending
+
+    def get_pending_buy_codes(self) -> set:
+        """현재 미체결 매수 주문이 진행 중인 종목 코드 집합 반환"""
+        codes = set()
+        for info in self.tracked_orders.values():
+            if info.get('side') == 'BUY' and info.get('unfilled_qty', 0) > 0:
+                codes.add(info['code'])
+        return codes
+
+    def get_pending_order_count(self) -> int:
+        """현재 추적 중인 미체결 주문 건수 반환"""
+        return sum(1 for info in self.tracked_orders.values() if info.get('unfilled_qty', 0) > 0)
 
     async def track_order(self, order_no: str, code: str, name: str, side: str, qty: int, price: float, order_type: str = "00"):
         """신규 발주된 주문 추적 등록"""
         if not order_no or str(order_no).strip() == "" or str(order_no) == "0":
             return
         clean_ord_no = str(order_no).strip()
+        clean_code = str(code).replace('A', '').strip()
         async with self._lock:
             self.tracked_orders[clean_ord_no] = {
                 "order_no": clean_ord_no,
-                "code": str(code).replace('A', '').strip(),
+                "code": clean_code,
                 "name": name,
                 "side": side.upper(),
                 "qty": int(qty),
@@ -111,12 +140,13 @@ class OrderTimeoutManager:
             print(f"⚠️ [OrderTimeout] 미체결 타임아웃({int(self.timeout_seconds)}초 경과) 감지: 주문번호 {ord_no} ({side} {name} {uncl_qty}주)")
 
             if side == "BUY":
-                # 미체결 매수 -> 취소하여 예수금 반환
+                # 미체결 매수 -> 취소하여 예수금 반환 및 30초 쿨다운 적용
+                self.cancelled_cooldowns[code] = time.time() + 30.0
                 if self.client and hasattr(self.client, 'cancel_order'):
                     await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
                     if self.db:
-                        await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환")
-                    print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환)")
+                        await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환 (30초 쿨다운)")
+                    print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환, 30초 쿨다운)")
             elif side == "SELL":
                 # 미체결 매도 -> 지정가 취소 후 KRX 락 해제 대기 및 즉시 긴급 시장가(03) CRITICAL 전량 재발주
                 if self.client and hasattr(self.client, 'cancel_order'):
@@ -139,6 +169,9 @@ class OrderTimeoutManager:
                         await self.track_order(new_ord_no, code, name, "SELL", uncl_qty, 0, order_type="03")
                 if self.db:
                     await self.db.log_message("CRITICAL", f"🚨 [미체결 매도 대체] {name}({code}) {uncl_qty}주 긴급 시장가(03) 재청산 발주 완료!")
+
+            if self.bot and hasattr(self.bot, '_sync_account_balance'):
+                await self.bot._sync_account_balance()
 
             if self.bot and hasattr(self.bot, '_sync_account_balance'):
                 await self.bot._sync_account_balance()
@@ -1269,19 +1302,31 @@ class AsyncTradingBot:
         period_high = info.get('period_high', 0)
         period_low = info.get('period_low', 0)
         open_price = float(info.get('open_price') or info.get('open') or cur_price)
-        current_deposit = self.portfolio.current_capital
 
-        # 1. 포지션 한도 및 중복 매수 체크
-        if not await self.portfolio.can_buy(code):
+        # 1. 미체결 매수 주문(Pending Orders) 증거금 락 및 종목 집합 조회
+        pending_buy_codes = self.order_timeout_mgr.get_pending_buy_codes() if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr else set()
+        pending_buy_amount = self.order_timeout_mgr.get_pending_buy_amount() if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr else 0.0
+
+        # 2. 포지션 한도(최대 5종목) 및 중복 매수 체크 (보유 종목 + 미체결 대기 종목 합산 슬롯 검증)
+        if not await self.portfolio.can_buy(code, pending_buy_codes=pending_buy_codes):
             return
 
-        # 2. 지표 산출 (인메모리 버퍼 기반 + 결측치 안전 보정)
+        # 3. 30초 취소 쿨다운 체크 (단기 주문 핑퐁 차단)
+        if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and self.order_timeout_mgr.is_in_cooldown(code):
+            return
+
+        # 4. 미체결 증거금 락을 차감한 '실제 가용 주문가능금액' 산출
+        real_available_cash = self.portfolio.get_available_cash_with_pending_lock(pending_buy_amount)
+        if real_available_cash < cur_price:
+            return
+
+        # 5. 지표 산출 (인메모리 버퍼 기반 + 결측치 안전 보정)
         candle_df = self.buffer.get_dataframe(code, limit=20)
         ind = TechnicalIndicators.get_latest_indicators(candle_df) if not candle_df.empty else {}
         if ind is None:
             ind = {}
 
-        # 3. 실시간 시세 및 알파 피처 결합
+        # 6. 실시간 시세 및 알파 피처 결합
         ind['avg_vol'] = info.get('avg_volume', 0)
         ind['high10'] = period_high if period_high > 0 else cur_price
         ind['period_high'] = period_high
@@ -1306,7 +1351,7 @@ class AsyncTradingBot:
         if 'acml_vol' not in ind or ind['acml_vol'] <= 0:
             ind['acml_vol'] = cur_volume
 
-        # 4. 퀀트 전략 매수 시그널 검증 (5대 고승률 퀀트 알파 필터 통합)
+        # 7. 퀀트 전략 매수 시그널 검증 (5대 고승률 퀀트 알파 필터 통합)
         buy_signal, reason = await self.strategy.check_buy_signal(
             code=code, current_price=cur_price, current_volume=cur_volume, ind=ind
         )
@@ -1315,33 +1360,31 @@ class AsyncTradingBot:
 
         if buy_signal:
             atr14 = ind.get('atr14', 0)
-            # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산
-            order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14)
+            # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
+            order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14, available_cash=real_available_cash)
 
             if order_qty <= 0:
-                # 소액 계좌 최소 1주 안전 가드 (가용 예수금 >= 1주 가격)
-                if current_deposit >= cur_price:
+                if real_available_cash >= cur_price:
                     order_qty = 1
                 else:
-                    print(f"⚠️ [매수 실패/자금부족] {name}({code}) - 타점 도달({reason})했으나 예수금 부족 (현재 예수금: {int(current_deposit):,}원 / 1주 가격: {int(cur_price):,}원)")
-                    await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 예수금 {int(current_deposit):,}원")
+                    print(f"⚠️ [매수 차단/자금부족] {name}({code}) - 타점 도달({reason})했으나 가용 예수금 부족 (D+2: {int(self.portfolio.current_capital):,}원 - 미체결락: {int(pending_buy_amount):,}원 = 가용: {int(real_available_cash):,}원 / 1주 가격: {int(cur_price):,}원)")
+                    await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 가용 예수금 {int(real_available_cash):,}원")
                     return
 
-            # [2차 방어] 실시간 매수 시 잔고 초과 최종 체크 (매수가 × 수량 > D+2 예수금 → 매수 스킵)
+            # [2차 방어] 실시간 매수 시 잔고 초과 최종 체크 (매수가 × 수량 > 가용 예수금 → 수량 축소 또는 차단)
             total_buy_amount = cur_price * order_qty
-            if total_buy_amount > current_deposit:
-                # 수량 축소 시도 (가용 예수금 내 구매 가능한 최대 수량)
-                max_possible_qty = int(current_deposit // cur_price)
+            if total_buy_amount > real_available_cash:
+                max_possible_qty = int(real_available_cash // cur_price)
                 if max_possible_qty > 0:
                     order_qty = max_possible_qty
                     total_buy_amount = cur_price * order_qty
-                    print(f"🔧 [수량 자동 보정] {name}({code}) 예수금 범위 내 수량 조정: {order_qty}주 (총 {int(total_buy_amount):,}원)")
+                    print(f"🔧 [수량 자동 보정] {name}({code}) 가용 예수금 범위 내 수량 조정: {order_qty}주 (총 {int(total_buy_amount):,}원)")
                 else:
-                    print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 예수금({int(current_deposit):,}원)")
-                    await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 예수금 {int(current_deposit):,}원")
+                    print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 가용 예수금({int(real_available_cash):,}원)")
+                    await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 가용 예수금 {int(real_available_cash):,}원")
                     return
 
-            print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 발주수량: {order_qty}주)")
+            print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 발주수량: {order_qty}주, 가용예수금: {int(real_available_cash):,}원)")
             await self._execute_smart_buy(code, name, order_qty, cur_price, reason=reason)
         else:
             # 매수 대기 상세 이유 상태 가시화 출력 (전략 사유 우선 표출)

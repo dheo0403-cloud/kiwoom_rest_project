@@ -2,6 +2,34 @@
 
 ---
 
+## 📅 [2026-09-22 14:30] 매수 미체결 방치로 인한 증거금 부족 에러 해결 및 매수 타임아웃 자동 취소(Auto-Cancel) 로직 도입
+
+### 1. 작업 개요 및 목적
+- **매수 미체결 증거금 실시간 락(Margin Lock) & 실제 가용 주문금액 검증:**
+  - 매수 주문 직후 `_sync_account_balance()` 호출 시 키움 TR이 미체결을 미반영한 원래 예수금(12만 원)을 내려주어 로컬 자금이 롤백되던 결함 교정.
+  - `OrderTimeoutManager`에 `get_pending_buy_amount()`, `get_pending_buy_codes()`를 구현하여 대기 중인 미체결 매수 증거금을 실시간 락(Lock) 차감한 `real_available_cash = max(0, current_capital - pending_amt)` 기준으로 매수 가능 여부를 100% 통제.
+- **최대 활성 슬롯(보유 종목 + 미체결 대기 종목) 제한 (Over-trading 방지):**
+  - `async_portfolio.py`의 `can_buy(code, pending_buy_codes)`에서 체결된 포지션뿐만 아니라 미체결 매수 대기 종목까지 합산 슬롯으로 검증하여 최대 종목 수(3~5개)를 초과한 주문 난사 및 동일 종목 중복 매수를 원천 차단.
+- **매수 미체결 30초 타임아웃 자동 취소 & 30초 쿨다운(Cooldown) 방어선 구축:**
+  - 30초 이내 미체결 매수 주문은 `kt10003` 취소 주문을 즉시 발송하여 묶인 예수금을 실시간 반환.
+  - 취소된 종목은 30초간 재매수 쿨다운(`cancelled_cooldowns`)을 적용하여 불필요한 API 호출 과부하(Infinite Loop) 방지.
+
+### 2. 수정된 파일
+- `main_rest_async.py`: `OrderTimeoutManager` 미체결 매수 증거금/종목 조회 및 30초 쿨다운 로직 탑재, `_evaluate_buy_condition` 실제 가용 예수금 기반 매수 통제 연동
+- `async_portfolio.py`: `can_buy` 미체결 종목 합산 슬롯 검증 및 `get_available_cash_with_pending_lock`, `get_order_qty` 실제 가용 예수금 연동
+- `verify_unexecuted_timeout_and_margin_lock.py`: 4단계 라이프사이클(자금부족 차단 ➔ 30초 타임아웃 취소 ➔ 예수금 반환 ➔ 신규 정상 매수) 투명성 실측 검증 스크립트 작성
+
+### 3. 검증 결과
+- **단위 테스트:** `pytest` 65개 전 테스트 100% 통과 (PASS, 12.29s).
+- **투명성 실측 검증 (`verify_unexecuted_timeout_and_margin_lock.py`):**
+  - ① 삼성전자(70,000원) 미체결 매수 발주 ➔ 70,000원 락 ➔ 가용 자금 50,000원 축소 실측.
+  - ② SK하이닉스(150,000원) 매수 시도 ➔ 가용 자금(50,000원) 부족으로 신규 매수 100% 차단 실측.
+  - ③ 펄어비스(35,000원) 매수 발주 ➔ 105,000원 락 ➔ 파인엠텍(20,000원) 매수 시도 차단(가용 15,000원 부족) 실측.
+  - ④ 30초 타임아웃 도달 ➔ `kt10003` 2건 자동 취소 발송 ➔ 가용 예수금 120,000원 전액 복구 실측.
+  - ⑤ 예수금 반환 후 비에이치(20,100원) 신규 정상 매수 100% 성공 실측.
+
+---
+
 ## 📅 [2026-09-22 13:45] 고강도 8-Angle 코드 리뷰 기반 미체결 타임아웃 락 해제·수동주문 안전가드·pytest 런타임 최적화 (--fix)
 
 ### 1. 작업 개요 및 목적

@@ -509,16 +509,23 @@ class AsyncPortfolioManager:
                 if current_price > pos.get('highest_price', 0):
                     pos['highest_price'] = current_price
 
-    async def get_order_qty(self, current_price: float, atr: Optional[float] = None) -> int:
+    def get_available_cash_with_pending_lock(self, pending_buy_amount: float = 0.0) -> float:
+        """미체결 매수 주문 증거금을 차감한 순수 가용 주문 가능 금액 반환"""
+        return max(0.0, self.current_capital - float(pending_buy_amount or 0.0))
+
+    async def get_order_qty(self, current_price: float, atr: Optional[float] = None, available_cash: Optional[float] = None) -> int:
         """
         프랙셔널 켈리 공식 및 변동성 기반 주문 수량 계산
         - 1회 거래 최대 허용 위험액(Risk-at-Risk) 1.5% 한도 적용
+        - 미체결 매수 증거금 락이 반영된 실제 가용 예수금(available_cash) 기준 산출
         """
         async with self._lock:
             if current_price <= 0:
                 return 0
+
+            effective_cash = float(available_cash) if available_cash is not None else self.current_capital
             invested = sum(pos['buy_price'] * pos['qty'] for pos in self.positions.values())
-            total_asset = self.current_capital + invested
+            total_asset = effective_cash + invested
 
             # 1. 켈리 비중 산출
             kelly_alloc = self.get_kelly_allocation_fraction()
@@ -534,22 +541,25 @@ class AsyncPortfolioManager:
 
             # 슬리피지 및 예수금 초과 방지 5% 안전 버퍼
             safe_allocate_amt = allocate_amt * 0.95
-            max_available = self.current_capital * 0.95
+            max_available = effective_cash * 0.95
 
             target_amt = min(safe_allocate_amt, max_available)
             qty = int(target_amt // current_price)
             # 소액 자본(10~50만원대)에서 켈리 비중 배분액이 1주 가격보다 적더라도,
             # 가용 예수금이 1주 가격 이상이면 최소 1주 매수 허용
-            if qty == 0 and self.current_capital >= current_price:
+            if qty == 0 and effective_cash >= current_price:
                 qty = 1
             return qty
 
-    async def can_buy(self, code: str) -> bool:
-        """신규 매수 가능 여부 검증 (종목 수 한도 및 중복 체크)"""
+    async def can_buy(self, code: str, pending_buy_codes: Optional[set] = None) -> bool:
+        """신규 매수 가능 여부 검증 (보유 종목 + 미체결 매수 대기 종목 수 한도 및 중복 체크)"""
         async with self._lock:
             if code in self.positions:
                 return False
-            return len(self.positions) < self.max_stocks
+            if pending_buy_codes and code in pending_buy_codes:
+                return False
+            active_slots = len(self.positions) + (len(pending_buy_codes) if pending_buy_codes else 0)
+            return active_slots < self.max_stocks
 
     async def get_snapshot(self) -> Dict[str, Any]:
         """웹소켓/대시보드 표출용 전체 포트폴리오 스냅샷 (PnL 실시간 산출)"""
