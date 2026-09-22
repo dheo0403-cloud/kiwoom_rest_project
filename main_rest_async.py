@@ -29,12 +29,12 @@ load_dotenv(env_path, override=False)
 
 class OrderTimeoutManager:
     """
-    미체결 주문(Unfilled Orders) 실시간 추적 및 자동 취소/대체(Cancel & Replace) 안전장치
-    - 주문 접수 후 3분(180초) 경과 미체결 주문 식별
+    미체결 주문(Unfilled Orders) 실시간 추적 및 N초(기본 30초) 타임아웃 자동 취소/대체(Cancel & Replace) 안전장치
+    - 주문 접수 후 N초(30초~60초) 경과 미체결 주문 식별
     - 미체결 매수(BUY): kt10003 취소 발송 -> 예수금 증거금 즉시 반환
     - 미체결 매도(SELL): kt10003 취소 후 RequestPriority.CRITICAL 시장가(03) 전량 청산 재발주
     """
-    def __init__(self, bot=None, client=None, db=None, timeout_seconds: float = 180.0):
+    def __init__(self, bot=None, client=None, db=None, timeout_seconds: float = 30.0):
         self.bot = bot
         self.client = client
         self.db = db
@@ -59,7 +59,7 @@ class OrderTimeoutManager:
                 "order_type": order_type,
                 "timestamp": time.time()
             }
-        print(f"📋 [OrderTracker] 주문 추적 등록: 주문번호 {clean_ord_no} ({side} {name} {qty}주 @ {price:,.0f}원)")
+        print(f"📋 [OrderTracker] 주문 추적 등록 (타임아웃 {int(self.timeout_seconds)}초): 주문번호 {clean_ord_no} ({side} {name} {qty}주 @ {price:,.0f}원)")
 
     async def on_chejan_data(self, data: Dict[str, Any]):
         """키움 OnReceiveChejanData 체결/잔고 실시간 이벤트 수신 처리"""
@@ -191,8 +191,9 @@ class AsyncTradingBot:
         self._last_watch_diff_pct: Dict[str, float] = {}
         self.unclosed_orders_count = 0
 
-        # 미체결 주문 3분 타임아웃 자동 취소/대체 매니저
-        self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=180.0)
+        # 미체결 주문 30초 타임아웃 자동 취소/대체 매니저
+        timeout_sec = float(os.getenv("ORDER_TIMEOUT_SECONDS", "30.0"))
+        self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
 
     @property
     def running(self) -> bool:
@@ -1507,10 +1508,12 @@ class AsyncTradingBot:
                     # 1. 수동 주문 큐 처리 (매 루프마다)
                     await self.process_manual_orders()
 
-                    # 2. 시장 필터, 계좌 싱크 및 미체결 방어 (10초 주기)
+                    # 2. 미체결 주문 타임아웃(30초) 자동 취소/대체 감시 (매 루프마다 즉시 검사)
+                    await self.cleanup_unexecuted_orders()
+
+                    # 3. 시장 필터 및 계좌 싱크 (10초 주기)
                     if loop_count % 5 == 0:
                         await self.check_market_filter()
-                        await self.cleanup_unexecuted_orders()
                         await self._sync_account_balance()
 
                     # 3. 감시 종목 갱신 (60초 주기)

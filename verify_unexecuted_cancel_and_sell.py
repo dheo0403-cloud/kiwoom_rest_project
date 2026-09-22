@@ -283,8 +283,58 @@ async def run_transparency_cross_verification():
     print(f"  • 정규 진입 승인: {approved}건 (진입 성공률: {approved}%)")
     assert approved == 100, f"❌ 정규 주도주 진입률이 100%가 아닙니다. ({approved}/100)"
 
+    # =========================================================================
+    # [투명성 교차 검증 3] 미체결 30초 타임아웃 자동 취소 & 일일 서킷 브레이커 실측
+    # =========================================================================
     print("\n" + "=" * 90)
-    print("🎉 [최종 검증 완료] 모든 파이프라인 및 퀀트 승률 방어 테스트가 100% 성공하였습니다.")
+    print("🔬 [투명성 교차 검증 3] 미체결 30초 타임아웃 자동 취소 & 일일 서킷 브레이커(-2.5%) 실측")
+    print("=" * 90)
+
+    # 1. 30초 타임아웃 미체결 매수 자동 취소 검증
+    mock_client.sent_orders.clear()
+    await bot.order_timeout_mgr.track_order("ORD_AUTO_TIMEOUT_BUY", "005930", "삼성전자", "BUY", 10, 70000.0, "00")
+    bot.order_timeout_mgr.tracked_orders["ORD_AUTO_TIMEOUT_BUY"]["timestamp"] = time.time() - 35.0  # 35초 경과
+    await bot.cleanup_unexecuted_orders()
+
+    auto_cancel_orders = [o for o in mock_client.sent_orders if o['action'] == 'CANCEL' and o['orig_ord_no'] == 'ORD_AUTO_TIMEOUT_BUY']
+    assert len(auto_cancel_orders) == 1, "❌ 30초 타임아웃 미체결 매수 취소 주문이 발송되지 않았습니다."
+    print(f"  ✅ [30초 타임아웃 매수 취소 실측] 주문번호 'ORD_AUTO_TIMEOUT_BUY' 35초 경과 감지 ➔ kt10003 자동 취소 발송 완료 (예수금 반환)")
+
+    # 2. 30초 타임아웃 미체결 매도 자동 취소 후 긴급 시장가(03) 전량 재발주 검증
+    mock_client.sent_orders.clear()
+    await bot.order_timeout_mgr.track_order("ORD_AUTO_TIMEOUT_SELL", "000660", "SK하이닉스", "SELL", 5, 150000.0, "00")
+    bot.order_timeout_mgr.tracked_orders["ORD_AUTO_TIMEOUT_SELL"]["timestamp"] = time.time() - 35.0 # 35초 경과
+    await bot.cleanup_unexecuted_orders()
+
+    sell_cancel = [o for o in mock_client.sent_orders if o['action'] == 'CANCEL' and o['orig_ord_no'] == 'ORD_AUTO_TIMEOUT_SELL']
+    sell_replace = [o for o in mock_client.sent_orders if o['action'] == 'SELL' and o['code'] == '000660']
+    assert len(sell_cancel) == 1, "❌ 미체결 매도 취소가 발송되지 않았습니다."
+    assert len(sell_replace) == 1, "❌ 미체결 매도 대체 긴급 시장가(03) 주문이 발송되지 않았습니다."
+    assert sell_replace[0]['priority'] == 'CRITICAL', "❌ 대체 매도가 CRITICAL 우선순위가 아닙니다."
+    print(f"  ✅ [30초 타임아웃 매도 대체 실측] 주문번호 'ORD_AUTO_TIMEOUT_SELL' 취소 ➔ 긴급 시장가(03) CRITICAL 전량 재발주 완료")
+
+    # 3. 일일 손실 제한(-2.5%) 서킷 브레이커 발동 및 신규 매수 전면 차단 실측
+    bot.daily_start_capital = 10_000_000.0
+    bot.daily_circuit_breaker = False
+    portfolio.total_asset = 9_650_000.0  # -3.50% 손실 발생
+    portfolio.current_capital = 9_650_000.0
+    mock_client.deposit = 9_650_000.0
+    await bot._sync_account_balance()
+    assert bot.daily_circuit_breaker is True, "❌ 당일 -2.5% 초과 손실 시 서킷 브레이커가 발동되지 않았습니다."
+
+    mock_client.sent_orders.clear()
+    bot.watchlist["005930"] = {
+        "name": "삼성전자", "period_high": 80000.0, "period_low": 70000.0,
+        "fib_382": 76180.0, "fib_500": 75000.0, "fib_618": 73820.0,
+        "current_price": 75000.0
+    }
+    await bot._evaluate_buy_condition("005930", cur_price=75000.0, cur_volume=100000.0)
+    blocked_buys = [o for o in mock_client.sent_orders if o.get('action') == 'BUY']
+    assert len(blocked_buys) == 0, "❌ 서킷 브레이커 발동 중 신규 매수가 차단되지 않았습니다."
+    print(f"  ✅ [일일 서킷 브레이커 실측] 당일 누적 손실 -3.50% (한도 -2.5%) ➔ Daily Circuit Breaker 발동 (신규 매수 차단: 100%)")
+
+    print("\n" + "=" * 90)
+    print("🎉 [최종 검증 완료] 모든 파이프라인, 30초 타임아웃 자동 취소 및 서킷 브레이커 테스트가 100% 성공하였습니다.")
     print("=" * 90)
 
 

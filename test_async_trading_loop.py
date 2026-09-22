@@ -1276,17 +1276,17 @@ async def test_buy_signal_open_price_and_0915_time_filter():
     print(f"  ✅ 시가(70,000원) + 0.5*ATR(1,000원) = 71,000원 변동성 돌파 매수 성공: {last_order['qty']}주 @ {last_order['price']}원")
 
 async def test_order_timeout_manager_buy_cancel():
-    """21. 미체결 매수 주문 3분(180초) 타임아웃 감시 및 자동 취소(D+2 예수금 증거금 반환) 검증"""
-    print("▶ [Test 21] 미체결 매수 주문 3분 타임아웃 감시 및 자동 취소(kt10003) 검증...")
+    """21. 미체결 매수 주문 30초 타임아웃 감시 및 자동 취소(D+2 예수금 증거금 반환) 검증"""
+    print("▶ [Test 21] 미체결 매수 주문 30초 타임아웃 감시 및 자동 취소(kt10003) 검증...")
     mock_client = MockKiwoomClient()
     mock_db = MockDatabaseManager()
     portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
 
-    # 1. 매수 주문 등록 (3분 10초 전 발주 가정)
+    # 1. 매수 주문 등록 (35초 전 발주 가정)
     await bot.order_timeout_mgr.track_order("ORD_BUY_001", "005930", "삼성전자", "BUY", 10, 70000.0, "00")
-    # 시간 인위적 과거로 설정
-    bot.order_timeout_mgr.tracked_orders["ORD_BUY_001"]["timestamp"] = time.time() - 190.0
+    # 시간 인위적 35초 전으로 설정
+    bot.order_timeout_mgr.tracked_orders["ORD_BUY_001"]["timestamp"] = time.time() - 35.0
 
     assert "ORD_BUY_001" in bot.order_timeout_mgr.tracked_orders
 
@@ -1301,19 +1301,19 @@ async def test_order_timeout_manager_buy_cancel():
     assert cancel_order["side"] == "CANCEL"
     assert cancel_order["order_no"] == "ORD_BUY_001"
     assert cancel_order["qty"] == 10
-    print(f"  ✅ 미체결 매수 주문(ORD_BUY_001, 10주) 3분 타임아웃 자동 취소 완료 (예수금 증거금 반환)")
+    print(f"  ✅ 미체결 매수 주문(ORD_BUY_001, 10주) 30초 타임아웃 자동 취소 완료 (예수금 증거금 반환)")
 
 async def test_order_timeout_manager_sell_replace():
-    """22. 미체결 매도 주문 3분(180초) 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 재발주 검증"""
-    print("▶ [Test 22] 미체결 매도 주문 3분 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) 전량 재청산 검증...")
+    """22. 미체결 매도 주문 30초 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 재발주 검증"""
+    print("▶ [Test 22] 미체결 매도 주문 30초 타임아웃 지정가 취소 후 즉시 긴급 시장가(03) 전량 재청산 검증...")
     mock_client = MockKiwoomClient()
     mock_db = MockDatabaseManager()
     portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
 
-    # 1. 지정가 매도 주문 등록 (3분 20초 전 발주)
+    # 1. 지정가 매도 주문 등록 (35초 전 발주)
     await bot.order_timeout_mgr.track_order("ORD_SELL_002", "000660", "SK하이닉스", "SELL", 5, 150000.0, "00")
-    bot.order_timeout_mgr.tracked_orders["ORD_SELL_002"]["timestamp"] = time.time() - 200.0
+    bot.order_timeout_mgr.tracked_orders["ORD_SELL_002"]["timestamp"] = time.time() - 35.0
 
     mock_client.sent_orders.clear()
     # 2. 타임아웃 해소 실행
@@ -1333,6 +1333,44 @@ async def test_order_timeout_manager_sell_replace():
     assert second_op["order_type"] == "03"  # 시장가
     assert second_op["priority"] == RequestPriority.CRITICAL
     print(f"  ✅ 미체결 매도 지정가 취소 -> 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주 완료")
+
+async def test_daily_drawdown_circuit_breaker():
+    """24. 일일 손실 제한(-2.5% ~ -3.0%) 서킷 브레이커 발동 및 신규 매수 전면 차단 검증"""
+    print("▶ [Test 24] 일일 최대 손실 제한(Circuit Breaker) 발동 및 신규 매수 차단 검증...")
+    mock_client = MockKiwoomClient(deposit=10_000_000.0)
+    mock_db = MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
+
+    # 1. 초기 상태: 당일 시작 자산 10,000,000원 설정
+    bot.daily_start_capital = 10_000_000.0
+    bot.daily_circuit_breaker = False
+
+    # 2. 정상 범위 손실 (-1.0%, 총자산 9,900,000원)
+    portfolio.total_asset = 9_900_000.0
+    portfolio.current_capital = 9_900_000.0
+    mock_client.deposit = 9_900_000.0
+    await bot._sync_account_balance()
+    assert bot.daily_circuit_breaker is False, "-1.0% 손실에서는 서킷브레이커가 발동되지 않아야 합니다."
+
+    # 3. 일일 한도 초과 손실 (-3.20%, 총자산 9,680,000원)
+    portfolio.total_asset = 9_680_000.0
+    portfolio.current_capital = 9_680_000.0
+    mock_client.deposit = 9_680_000.0
+    await bot._sync_account_balance()
+    assert bot.daily_circuit_breaker is True, "당일 누적 손실 -2.5% 초과 시 서킷브레이커가 발동되어야 합니다."
+
+    # 4. 서킷브레이커 발동 상태에서 매수 타점 시도 시 매수 전면 차단 검증
+    bot.watchlist["005930"] = {
+        "name": "삼성전자", "period_high": 80000.0, "period_low": 70000.0,
+        "fib_382": 76180.0, "fib_500": 75000.0, "fib_618": 73820.0,
+        "current_price": 75000.0
+    }
+    mock_client.sent_orders.clear()
+    await bot._evaluate_buy_condition("005930", cur_price=75000.0, cur_volume=100000.0)
+    buy_orders = [o for o in mock_client.sent_orders if o.get('side') == 'BUY']
+    assert len(buy_orders) == 0, "서킷브레이커 발동 중에는 신규 매수 주문이 차단되어야 합니다."
+    print("  ✅ 일일 손실 제한(-2.5%) 서킷 브레이커 발동 및 신규 매수 전면 차단 검증 완료")
 
 async def test_vwap_and_volume_profile_filters():
     """23. VWAP 스마트 지지 필터 및 Volume Profile(매물대 POC) 가짜 돌파(휩소) 기각 검증"""
@@ -1403,8 +1441,9 @@ async def main():
     await test_order_timeout_manager_buy_cancel()
     await test_order_timeout_manager_sell_replace()
     await test_vwap_and_volume_profile_filters()
+    await test_daily_drawdown_circuit_breaker()
     print("=" * 65)
-    print("🎉 모든 퀀트 매매, 미체결 방어 및 VWAP 필터 시뮬레이션 테스트 (총 23개) 100% 통과 완료!")
+    print("🎉 모든 퀀트 매매, 미체결 방어 및 VWAP 필터 시뮬레이션 테스트 (총 24개) 100% 통과 완료!")
     print("=" * 65)
 
 if __name__ == "__main__":
