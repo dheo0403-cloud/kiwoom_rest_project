@@ -446,7 +446,7 @@ class AsyncKiwoomClient:
                 # 유의미한 D+2 예수금이나 복수 필드가 있는지 확인
                 if not best_data:
                     best_data = data
-                for k in ['d2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'ord_psbl_cash', 'output1']:
+                for k in ['d2_deposit', 'd2_auto_amt', 'd2_entra', 'entr_d2', 'd2_prvs_rcdl_amt', 'ord_psbl_cash', 'output1']:
                     if k in data and data[k]:
                         return data
 
@@ -459,6 +459,7 @@ class AsyncKiwoomClient:
         combined_holdings_map: Dict[str, Dict[str, Any]] = {}
 
         pos_list_keys = [
+            'acnt_evlt_remn_indv_tot', 'stk_acnt_evlt_prst', 'stk_cntr_remn',
             'output2', 'Output2', 'output_2', 'acnt_dtl_list', 'holdings',
             'stk_list', 'item_list', 'list', 'data', 'grid', 'table',
             'rows', 'items', 'output', 'Output', 'stocks', 'positions',
@@ -521,8 +522,8 @@ class AsyncKiwoomClient:
                                         if ik not in prev_item or prev_item[ik] is None or prev_item[ik] == "" or prev_item[ik] == 0:
                                             prev_item[ik] = iv
 
-        # 1. kt00018 (계좌평가잔고개별합산 - qry_tp="1" 합산 및 "2" 개별 전수 스캔)
-        for q_tp in ["1", "2"]:
+        # 1. kt00018 (계좌평가잔고개별합산 - qry_tp="0" 전체합산, "1", "2" 전수 스캔)
+        for q_tp in ["0", "1", "2"]:
             payload_kt00018 = {
                 "dmst_stex_tp": "KRX",
                 "accNo": self.account,
@@ -532,17 +533,8 @@ class AsyncKiwoomClient:
             data18, _ = await self.request("kt00018", url, payload_kt00018, priority=priority)
             merge_tr_response(data18)
 
-        # 2. kt00018 순수 페이로드 (qry_tp 없는 기본 요청)
-        payload_kt00018_pure = {
-            "dmst_stex_tp": "KRX",
-            "accNo": self.account,
-            "accPwd": self.password
-        }
-        data18_pure, _ = await self.request("kt00018", url, payload_kt00018_pure, priority=priority)
-        merge_tr_response(data18_pure)
-
-        # 3. kt00004 (계좌평가잔고내역 - 당일매매/체결 잔고 전수 스캔)
-        for q_tp in ["1", "2"]:
+        # 2. kt00004 (계좌평가잔고내역 - 당일매매/체결 잔고 전수 스캔: qry_tp="0", "1", "2")
+        for q_tp in ["0", "1", "2"]:
             payload_kt00004 = {
                 "dmst_stex_tp": "KRX",
                 "accNo": self.account,
@@ -552,7 +544,7 @@ class AsyncKiwoomClient:
             data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
             merge_tr_response(data4)
 
-        # 4. kt00005 (체결잔고 - 실시간 체결 잔고 전수 스캔)
+        # 3. kt00005 (체결잔고 - 실시간 체결 잔고 전수 스캔)
         payload_kt00005 = {
             "dmst_stex_tp": "KRX",
             "accNo": self.account,
@@ -561,9 +553,11 @@ class AsyncKiwoomClient:
         data5, _ = await self.request("kt00005", url, payload_kt00005, priority=priority)
         merge_tr_response(data5)
 
-        # 5. 최종 5대 전 종목 output2에 스마트 합집합 탑재
+        # 4. 최종 전 종목 output2 및 acnt_evlt_remn_indv_tot에 스마트 합집합 탑재
         if combined_holdings_map:
-            merged_data['output2'] = list(combined_holdings_map.values())
+            holdings_list = list(combined_holdings_map.values())
+            merged_data['output2'] = holdings_list
+            merged_data['acnt_evlt_remn_indv_tot'] = holdings_list
             merged_data['tot_hldg_qty'] = str(len(combined_holdings_map))
         elif 'output2' not in merged_data:
             merged_data['output2'] = []

@@ -107,13 +107,14 @@ class AsyncPortfolioManager:
                 '종목명', '상품명', '한글종목명', '종목'
             ]
             qty_keys = [
-                'hldg_qty', 'hold_qty', 'ord_psbl_qty', 'bal_qty', 'rmnd_qty',
+                'hldg_qty', 'hold_qty', 'ord_psbl_qty', 'bal_qty', 'rmnd_qty', 'cur_qty',
+                'trde_able_qty', 'setl_remn',
                 'tot_hldg_qty', 'hld_qty', 'jango_qty', 'now_qty', 'stck_qty',
                 'ccls_qty_sum', 'qty', 'ccls_qty',
                 '보유수량', '잔고수량', '체결수량', '주문가능수량', '수량'
             ]
             buy_p_keys = [
-                'pchs_avg_pric', 'buy_price', 'pchs_price', 'avg_buy_price',
+                'pur_pric', 'pchs_avg_pric', 'buy_price', 'pchs_price', 'avg_buy_price',
                 'buy_uv', 'pchs_unit_amt', 'pchs_avg_amt', 'avg_pchs_price',
                 'pchs_prc', 'buy_prc', 'ccls_avg_pric', 'ccls_avg_prc', 'ccls_prc',
                 'ccls_uv', 'pchs_uv', 'ord_uv', 'pur_prc', 'pur_avg_prc',
@@ -138,11 +139,11 @@ class AsyncPortfolioManager:
                 '평가금액', '총평가금액', '평가금'
             ]
             pnl_keys = [
-                'evlu_pfls_amt', 'pnl', 'evlt_pfls_amt', 'tot_evlu_pfls_amt', 'pfls_amt',
+                'evltv_prft', 'pl_amt', 'evlu_pfls_amt', 'pnl', 'evlt_pfls_amt', 'tot_evlu_pfls_amt', 'pfls_amt',
                 '평가손익', '손익금액', '평가손익금액'
             ]
             rt_keys = [
-                'evlu_pfls_rt', 'yield_rate', 'evlt_pfls_rt', 'tot_pnl_rt', 'pnl_rt', 'pfls_rt',
+                'prft_rt', 'pl_rt', 'evlu_pfls_rt', 'yield_rate', 'evlt_pfls_rt', 'tot_pnl_rt', 'pnl_rt', 'pfls_rt',
                 '수익률', '평가손익률', '손익률'
             ]
 
@@ -203,6 +204,7 @@ class AsyncPortfolioManager:
                     return []
 
                 priority_keys = [
+                    'acnt_evlt_remn_indv_tot', 'stk_acnt_evlt_prst', 'stk_cntr_remn',
                     'output2', 'Output2', 'output_2', 'acnt_dtl_list', 'holdings',
                     'stk_list', 'item_list', 'list', 'data', 'grid', 'table',
                     'rows', 'items', 'output', 'Output', 'stocks', 'positions',

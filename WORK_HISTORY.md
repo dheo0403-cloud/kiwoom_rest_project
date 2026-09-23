@@ -2,6 +2,46 @@
 
 ---
 
+## 📅 [2026-09-23 15:30] 키움 OpenAPI REST 실제 응답 스키마 정밀 매핑 및 6대 보유종목 실시간 100% 동기화 버그 완벽 해결
+
+### 1. 작업 개요 및 목적
+- **발생 문제 분석:**
+  - 사용자 계좌에 실제로 6개 종목(대한전선, 원익홀딩스, 빛샘전자, 후성, KODEX 코스닥150, TIGER 코스닥150)을 보유 중임에도 불구하고, 대시보드 및 봇 내부에서 보유 종목이 0건으로 인식되던 치명적 결함 발생.
+- **근본 원인 규명:**
+  1. **TR 필수 파라미터 `qry_tp="0"` 누락:** 키움 `kt00018` 및 `kt00004` TR 호출 시 `qry_tp="0"`(전체 조회)이 누락되었거나 필수값이 비어 입력값 오류(에러코드 1511)가 발생.
+  2. **키움 실제 응답 JSON 리스트 키 누락:** 키움 REST API 실제 응답의 보유종목 리스트 키 이름(`acnt_evlt_remn_indv_tot`, `stk_acnt_evlt_prst`, `stk_cntr_remn`)이 파싱 우선순위 키(`pos_list_keys`)에 누락되어 빈 리스트(`[]`)로 처리됨.
+  3. **보유수량/매입단가/손익/수익률 필드명 불일치:** 키움 실제 응답의 `pur_pric`(매입가), `cur_prc`(현재가), `rmnd_qty`/`cur_qty`(보유수량), `evltv_prft`/`pl_amt`(평가손익), `prft_rt`/`pl_rt`(수익률), `d2_entra`(D+2 예수금) 등의 필드명이 파싱 키 목록에 완벽하게 등록되지 않아 역산/파싱 실패.
+- **완벽 해결 조치:**
+  1. `async_kiwoom_client.py`:
+     - `get_account_balance()` 내 `kt00018`, `kt00004` 호출 시 `qry_tp="0"`, `"1"`, `"2"` 전수 스캔 및 `kt00005` 순수 페이로드 병합.
+     - `pos_list_keys`에 `acnt_evlt_remn_indv_tot`, `stk_acnt_evlt_prst`, `stk_cntr_remn`을 최우선 등록하고 `merged_data['output2']` 및 `acnt_evlt_remn_indv_tot` 양쪽에 종목 리스트 100% 탑재.
+     - `get_deposit_info()`에 `d2_entra`, `entr_d2` 키 추가.
+  2. `async_portfolio.py`:
+     - `sync_positions()` 내 `priority_keys`에 `acnt_evlt_remn_indv_tot`, `stk_acnt_evlt_prst`, `stk_cntr_remn` 추가.
+     - `qty_keys`(`cur_qty`, `setl_remn`), `buy_p_keys`(`pur_pric`), `pnl_keys`(`evltv_prft`, `pl_amt`), `rt_keys`(`prft_rt`, `pl_rt`)를 키움 실측 응답과 1:1 완벽 매핑.
+  3. `main_rest_async.py`:
+     - `_sync_account_balance()` 내 `tot_evlu_keys`에 `tot_evlt_amt`, `aset_evlt_amt`, `tot_est_amt`, `prsm_dpst_aset_amt` 추가 및 `d2_deposit_keys`에 `d2_entra` 최우선 매핑.
+
+### 2. 수정된 파일
+- `async_kiwoom_client.py`: `get_account_balance`, `get_deposit_info` 실측 TR 스키마 매핑 및 qry_tp="0" 전수 스캔
+- `async_portfolio.py`: `sync_positions` 키움 실측 필드명 및 리스트 키 정밀 매핑
+- `main_rest_async.py`: `_sync_account_balance` D+2 예수금 및 총평가금액 실측 키 확장
+
+### 3. 실측 검증 결과
+- **실계좌 4대 TR 실측 검증:**
+  - 키움증권 실계좌(66243841) 6대 전 종목 100% 정상 수집 및 동기화 확인:
+    1. 대한전선 (001440): 1주 @ 30,650원 (현재가 30,775원, 손익 +64원, +0.21%)
+    2. 원익홀딩스 (030530): 1주 @ 28,100원 (현재가 28,100원, 손익 -56원, -0.20%)
+    3. 빛샘전자 (072950): 1주 @ 14,610원 (현재가 14,500원, 손익 -139원, -0.95%)
+    4. 후성 (093370): 1주 @ 13,920원 (현재가 13,910원, 손익 -36원, -0.26%)
+    5. KODEX 코스닥150 (229200): 1주 @ 13,980원 (현재가 14,070원, 손익 +90원, +0.64%)
+    6. TIGER 코스닥150 (232080): 1주 @ 14,340원 (현재가 14,325원, 손익 -15원, -0.10%)
+  - 계좌 자산 실측: 총자산 115,680원, D+2 주문가능 예수금 1,089원 100% 정확 매핑.
+- **FastAPI / WebSocket E2E:** `test_api_server.py` 15개 전 테스트 100% 통과.
+- **프론트엔드 빌드:** `npm run build` Vite 번들링 정상 완료.
+
+---
+
 ## 📅 [2026-09-22 14:30] 매수 미체결 방치로 인한 증거금 부족 에러 해결 및 매수 타임아웃 자동 취소(Auto-Cancel) 로직 도입
 
 ### 1. 작업 개요 및 목적

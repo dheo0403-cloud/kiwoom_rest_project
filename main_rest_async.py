@@ -463,16 +463,16 @@ class AsyncTradingBot:
 
         # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원 / 64,400원 주식평가 + 82,819원 D+2예수금)
         tot_evlu_keys = [
-            'tot_evlu_amt', 'tot_asst_amt', 'aset_evlt_amt', 'asst_tot_amt',
-            'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
+            'tot_evlu_amt', 'tot_evlt_amt', 'aset_evlt_amt', 'tot_est_amt', 'tot_asst_amt', 'asst_tot_amt',
+            'evlu_amt_tot', 'evlt_amt_tot', 'prsm_dpst_aset_amt', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
         # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 D+2 예수금: 82,819원)
         # 중요: 키움 REST API에서 dnca_tot_amt는 당일 예수금(1,122원)으로 올 수 있으므로 진짜 D+2 키를 최우선 순위로 배치
         d2_deposit_keys = [
-            'd2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
+            'd2_deposit', 'd2_entra', 'entr_d2', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
             'd2_ccls_amt', 'd2_estm_amt', 'prvs_rcdl_excc_amt_smtl_amt',
-            'entr_d2', 'd2_entr', 'd2_ord_psbl_amt', 'ord_psbl_cash', 'ord_psbl_amt',
+            'd2_entr', 'd2_ord_psbl_amt', 'ord_psbl_cash', 'ord_psbl_amt',
             'ord_alowa', 'd2_psbl_amt', 'D+2예수금', 'D+2추정예수금', '추정예수금',
             '주문가능금액', '주문가능현금', 'dnca_tot_amt'
         ]
