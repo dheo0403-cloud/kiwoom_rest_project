@@ -1346,23 +1346,28 @@ async def test_daily_drawdown_circuit_breaker():
     portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, initial_capital=10_000_000, client=mock_client, portfolio=portfolio, db=mock_db)
 
-    # 1. 초기 상태: 당일 시작 자산 10,000,000원 설정
+    # 1. 초기 상태: 당일 시작 자산 10,000,000원 설정 (웜업 3회 완료 상태)
     bot.daily_start_capital = 10_000_000.0
+    bot.highest_total_asset = 10_000_000.0
+    bot.sync_warmup_count = 3
     bot.daily_circuit_breaker = False
 
-    # 2. 정상 범위 손실 (-1.0%, 총자산 9,900,000원)
+    # 2. 정상 범위 손실 (-1.0%, 실현손실 -100,000원)
+    portfolio.daily_realized_pnl = -100_000.0
     portfolio.total_asset = 9_900_000.0
     portfolio.current_capital = 9_900_000.0
     mock_client.deposit = 9_900_000.0
     await bot._sync_account_balance()
     assert bot.daily_circuit_breaker is False, "-1.0% 손실에서는 서킷브레이커가 발동되지 않아야 합니다."
 
-    # 3. 일일 한도 초과 손실 (-3.20%, 총자산 9,680,000원)
+    # 3. 일일 한도 초과 손실 (-3.20%, 실현손실 -320,000원) 3회 연속 확인 시뮬레이션
+    portfolio.daily_realized_pnl = -320_000.0
     portfolio.total_asset = 9_680_000.0
     portfolio.current_capital = 9_680_000.0
     mock_client.deposit = 9_680_000.0
-    await bot._sync_account_balance()
-    assert bot.daily_circuit_breaker is True, "당일 누적 손실 -2.5% 초과 시 서킷브레이커가 발동되어야 합니다."
+    for _ in range(3):
+        await bot._sync_account_balance()
+    assert bot.daily_circuit_breaker is True, "당일 누적 손실 -2.5% 초과 3회 지속 시 서킷브레이커가 발동되어야 합니다."
 
     # 4. 서킷브레이커 발동 상태에서 매수 타점 시도 시 매수 전면 차단 검증
     bot.watchlist["005930"] = {

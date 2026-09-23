@@ -211,8 +211,11 @@ class AsyncTradingBot:
         self.mdd_shutdown = False
         self.highest_total_asset = 0.0  # 최초 계좌 동기화 시 실제 자산으로 캘리브레이션
         self.daily_start_capital = 0.0  # 당일 시작 자산 (일일 손실률 추적용)
-        self.daily_loss_limit_rate = -0.025  # 당일 최대 손실 한도: -2.5% (초과 시 서킷 브레이커 발동)
+        self.daily_loss_limit_rate = -0.025  # 당일 최대 손실 한도: -2.5% (실제 퀀트 매매 손실 기준)
         self.daily_circuit_breaker = False   # 일일 최대 손실 제한 차단 플래그
+        self.sync_warmup_count = 0  # 초기 캘리브레이션 웜업 카운터 (최초 3회는 baseline 안정화)
+        self.circuit_breaker_breach_count = 0  # 서킷 브레이커 조건 연속 충족 카운트 (3회 연속 시 발동)
+        self.circuit_breaker_breach_threshold = 3  # 3회 연속 확인 방어
         self.is_running = False
         self.is_paused = False
         self.is_shutdown = False
@@ -266,6 +269,16 @@ class AsyncTradingBot:
         self.is_paused = False
         self.is_running = True
         print("▶️ [AsyncTradingBot] 봇 매매 재개 (RUNNING)")
+
+    def reset_circuit_breaker(self):
+        """서킷 브레이커 플래그 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션"""
+        self.mdd_shutdown = False
+        self.daily_circuit_breaker = False
+        self.circuit_breaker_breach_count = 0
+        if self.portfolio and self.portfolio.total_asset > 0:
+            self.highest_total_asset = self.portfolio.total_asset
+            self.daily_start_capital = self.portfolio.total_asset
+        print(f"🔓 [AsyncTradingBot] 서킷 브레이커 수동 해제 완료 (최고/기준자산: {int(self.highest_total_asset):,}원 재동기화)")
 
     @staticmethod
     def is_korean_market_holiday(dt: datetime) -> bool:
@@ -602,32 +615,79 @@ class AsyncTradingBot:
 
         # 4. DB 저장 및 스냅샷 확인
         snap = await self.portfolio.get_snapshot()
-        if self.highest_total_asset == 0.0 or snap['total_asset'] > self.highest_total_asset:
-            self.highest_total_asset = snap['total_asset']
+        current_total_asset = float(snap['total_asset'])
+        unrealized_pnl = float(snap.get('unrealized_pnl', 0.0))
+        daily_realized_pnl = float(snap.get('daily_realized_pnl', 0.0))
+        total_trading_pnl = float(snap.get('total_trading_pnl', unrealized_pnl + daily_realized_pnl))
+        invested_pchs = float(snap.get('invested_pchs', 0.0))
+        position_yield_rate = float(snap.get('total_yield_rate', 0.0))  # 보유 종목 평가 수익률 (예: -0.79%)
 
-        # 당일 시작 자산 기준점 캘리브레이션
-        if self.daily_start_capital == 0.0 and snap['total_asset'] > 0:
-            self.daily_start_capital = snap['total_asset']
+        self.sync_warmup_count += 1
 
-        # 🚨 [일일 최대 손실 서킷 브레이커] 당일 손실 -2.5% 초과 시 신규 매수 즉시 전면 차단
+        # 당일 시작 자산 및 최고 자산 기준점 캘리브레이션
+        if self.daily_start_capital == 0.0 and current_total_asset > 0:
+            self.daily_start_capital = current_total_asset
+
+        if self.highest_total_asset == 0.0 or current_total_asset > self.highest_total_asset:
+            self.highest_total_asset = current_total_asset
+
+        # 초기 3회 웜업 기간 동안은 기준 자산 안정화 (서킷 브레이커 판단 유예)
+        if self.sync_warmup_count <= 3:
+            if current_total_asset > 0:
+                self.daily_start_capital = max(self.daily_start_capital, current_total_asset)
+                self.highest_total_asset = max(self.highest_total_asset, current_total_asset)
+            print(f"🌱 [계좌 캘리브레이션/Warm-up {self.sync_warmup_count}/3] 기준자산: {int(self.daily_start_capital):,}원 | 최고자산: {int(self.highest_total_asset):,}원")
+
+        # 🎯 [실제 퀀트 트레이딩 손익률 기반 서킷 브레이커]
+        # (1) 실제 매매 누적 손익률 (당일 실현손익 + 보유주식 평가손익) / 기준자산
+        trading_loss_pct = 0.0
         if self.daily_start_capital > 0:
-            daily_loss_pct = (snap['total_asset'] - self.daily_start_capital) / self.daily_start_capital
-            if daily_loss_pct <= self.daily_loss_limit_rate and not self.daily_circuit_breaker:
-                self.daily_circuit_breaker = True
-                self.mdd_shutdown = True
-                breaker_msg = f"🚨 [일일 서킷 브레이커] 당일 누적 손실({daily_loss_pct:.2%})이 일일 한도({self.daily_loss_limit_rate:.1%})를 초과하여 금일 신규 매수를 전면 차단합니다."
-                print(breaker_msg)
-                await self.db.log_message("CRITICAL", breaker_msg)
-                if hasattr(self.notifier, 'send_message'):
-                    self.notifier.send_message(breaker_msg)
+            trading_loss_pct = total_trading_pnl / self.daily_start_capital
 
-        # 전체 최고점 대비 MDD 셧다운 검사 (-5% 초과 하락 시 신규 매수 차단)
-        if self.highest_total_asset > 0:
-            mdd = ((snap['total_asset'] - self.highest_total_asset) / self.highest_total_asset) * 100.0
-            if mdd <= -5.0 and not self.mdd_shutdown:
-                self.mdd_shutdown = True
-                await self.db.log_message("WARNING", f"🚨 [서킷 브레이커] 계좌 MDD {mdd:.2f}% 도달. 당일 신규 매수를 중단합니다.")
-                print(f"🚨 [서킷 브레이커] 당일 최고 자산 대비 -5% 초과 하락! (MDD: {mdd:.2f}%) 신규 매수 중단.")
+        # (2) 계좌 총자산 변동률 및 MDD (외형 참고용)
+        raw_asset_loss_pct = ((current_total_asset - self.daily_start_capital) / self.daily_start_capital) if self.daily_start_capital > 0 else 0.0
+        raw_mdd_pct = ((current_total_asset - self.highest_total_asset) / self.highest_total_asset) if self.highest_total_asset > 0 else 0.0
+
+        # 🛡️ [이상치 스파이크(Spike) 방어 필터]
+        # 총자산 수치는 급락(-5% 초과)했으나 실제 매매 손익률(trading_loss_pct)은 정상(예: > -2.0%)인 경우:
+        # -> 키움 TR 파싱 불일치, 예수금 락, 입출금 등으로 판정하여 가짜 서킷 브레이커 발동을 원천 차단
+        is_data_spike = False
+        if (raw_asset_loss_pct <= -0.05 or raw_mdd_pct <= -0.05) and trading_loss_pct > -0.020:
+            is_data_spike = True
+            # 기준 자산 정상치로 재조정
+            if current_total_asset > 0 and self.sync_warmup_count > 3:
+                self.highest_total_asset = current_total_asset
+
+        # 서킷 브레이커 발동 조건 검사 (웜업 이후, 이상치가 아닐 때 실제 퀀트 매매 손실 기준)
+        if self.sync_warmup_count > 3 and not is_data_spike:
+            # 실제 트레이딩 손실이 -2.5%를 초과하거나, 보유 종목 평가손실이 심각한 경우(-5% 이하)
+            is_breach = (trading_loss_pct <= self.daily_loss_limit_rate) or (invested_pchs > 0 and position_yield_rate <= -5.0)
+
+            if is_breach:
+                self.circuit_breaker_breach_count += 1
+                if self.circuit_breaker_breach_count >= self.circuit_breaker_breach_threshold and not self.mdd_shutdown:
+                    self.daily_circuit_breaker = True
+                    self.mdd_shutdown = True
+                    breaker_msg = f"🚨 [서킷 브레이커 발동] 실제 매매 손익률({trading_loss_pct:.2%}, 평가수익률: {position_yield_rate:.2f}%)이 위험 한도({self.daily_loss_limit_rate:.1%})를 초과하여 신규 매수를 전면 차단합니다."
+                    print(breaker_msg)
+                    await self.db.log_message("CRITICAL", breaker_msg)
+                    if hasattr(self.notifier, 'send_message'):
+                        self.notifier.send_message(breaker_msg)
+            else:
+                # 손실 조건 미달 시 카운터 초기화
+                self.circuit_breaker_breach_count = 0
+
+                # 🔄 [자가 복구(Self-Healing Auto-Recovery)]
+                # 과거 일시적 왜곡으로 서킷 브레이커가 켜져 있었으나 현재 손익률이 정상(-1.5% 이상)인 경우 자동 해제
+                if (self.mdd_shutdown or self.daily_circuit_breaker) and trading_loss_pct > -0.015 and position_yield_rate > -3.0:
+                    self.mdd_shutdown = False
+                    self.daily_circuit_breaker = False
+                    self.highest_total_asset = current_total_asset
+                    heal_msg = f"✅ [서킷 브레이커 자가 복구] 계좌 상태 정상화 확인(실제 손익률: {trading_loss_pct:.2%}, 평가수익률: {position_yield_rate:.2f}%). 신규 매수를 정상 재개합니다."
+                    print(heal_msg)
+                    await self.db.log_message("INFO", heal_msg)
+                    if hasattr(self.notifier, 'send_message'):
+                        self.notifier.send_message(heal_msg)
 
         await self.db.save_portfolio(self.portfolio.positions)
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])

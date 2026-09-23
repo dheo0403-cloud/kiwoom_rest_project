@@ -26,6 +26,7 @@ class AsyncPortfolioManager:
         self.positions: Dict[str, Dict[str, Any]] = {}
         # 최근 50회 매매 수익률 이력 (예: +0.05, -0.02)
         self.trade_returns: collections.deque = collections.deque(maxlen=50)
+        self.daily_realized_pnl: float = 0.0  # 당일 실현 손익 누적 (원)
         self._lock = asyncio.Lock()
 
     async def sync_capital(self, available_cash: float, total_asset: Optional[float] = None):
@@ -474,7 +475,7 @@ class AsyncPortfolioManager:
             self.current_capital = max(0.0, self.current_capital - (qty * buy_price))
 
     async def remove_position(self, code: str, sell_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
-        """포지션 청산 (전량 매도) 및 수익률 기록"""
+        """포지션 청산 (전량 매도) 및 수익률/실현손익 기록"""
         async with self._lock:
             pos = self.positions.pop(code, None)
             if pos and sell_price:
@@ -482,7 +483,9 @@ class AsyncPortfolioManager:
                 buy_p = pos['buy_price']
                 if buy_p > 0:
                     ret = (sell_price - buy_p) / buy_p
+                    pnl = (sell_price - buy_p) * pos['qty']
                     self.trade_returns.append(ret)
+                    self.daily_realized_pnl += pnl
             return pos
 
     async def update_partial_sell(self, code: str, sold_qty: int, sell_price: float, next_stage: int):
@@ -496,7 +499,9 @@ class AsyncPortfolioManager:
                 buy_p = pos['buy_price']
                 if buy_p > 0:
                     ret = (sell_price - buy_p) / buy_p
+                    pnl = (sell_price - buy_p) * sold_qty
                     self.trade_returns.append(ret)
+                    self.daily_realized_pnl += pnl
                 if pos['qty'] == 0:
                     self.positions.pop(code, None)
 
@@ -621,6 +626,8 @@ class AsyncPortfolioManager:
                 'invested_eval': invested_eval,
                 'total_pnl': total_pnl,
                 'unrealized_pnl': total_pnl,
+                'daily_realized_pnl': self.daily_realized_pnl,
+                'total_trading_pnl': self.daily_realized_pnl + total_pnl,
                 'total_yield': round(total_yield, 2),
                 'total_yield_rate': round(total_yield, 2),
                 'kelly_allocation_pct': self.get_kelly_allocation_fraction() * 100.0,

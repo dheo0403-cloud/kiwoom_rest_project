@@ -420,18 +420,19 @@ async def get_bot_status():
     if not ctx.bot:
         raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
 
-    circuit_open = False
-    try:
-        if ctx.client and hasattr(ctx.client, 'circuit_breaker') and ctx.client.circuit_breaker:
-            cb = ctx.client.circuit_breaker
-            if hasattr(cb, 'state'):
-                circuit_open = (cb.state == "OPEN")
-            elif hasattr(cb, 'is_open'):
-                circuit_open = cb.is_open() if callable(cb.is_open) else bool(cb.is_open)
-            elif hasattr(cb, 'can_proceed'):
-                circuit_open = not cb.can_proceed()
-    except Exception:
-        circuit_open = False
+    circuit_open = getattr(ctx.bot, 'mdd_shutdown', False) or getattr(ctx.bot, 'daily_circuit_breaker', False)
+    if not circuit_open:
+        try:
+            if ctx.client and hasattr(ctx.client, 'circuit_breaker') and ctx.client.circuit_breaker:
+                cb = ctx.client.circuit_breaker
+                if hasattr(cb, 'state'):
+                    circuit_open = (cb.state == "OPEN")
+                elif hasattr(cb, 'is_open'):
+                    circuit_open = cb.is_open() if callable(cb.is_open) else bool(cb.is_open)
+                elif hasattr(cb, 'can_proceed'):
+                    circuit_open = not cb.can_proceed()
+        except Exception:
+            circuit_open = False
 
     return {
         "running": ctx.bot.running,
@@ -441,7 +442,9 @@ async def get_bot_status():
         "kodex200_change_rate": ctx.bot.kodex200_change_rate,
         "watchlist_count": len(ctx.bot.watchlist),
         "active_positions_count": len(ctx.portfolio.positions) if ctx.portfolio else 0,
-        "circuit_breaker_open": circuit_open
+        "circuit_breaker_open": circuit_open,
+        "mdd_shutdown": getattr(ctx.bot, 'mdd_shutdown', False),
+        "daily_circuit_breaker": getattr(ctx.bot, 'daily_circuit_breaker', False)
     }
 
 @api_router.get("/portfolio")
@@ -836,8 +839,44 @@ async def control_bot(req: BotControlRequest):
         await ctx.bot.prepare_morning_universe()
         return {"status": "refreshed", "message": "계좌 잔고 및 감시 유니버스가 갱신되었습니다."}
 
+    elif action in ("RESET_CIRCUIT_BREAKER", "RESET_BREAKER", "RESET"):
+        if hasattr(ctx.bot, 'reset_circuit_breaker'):
+            ctx.bot.reset_circuit_breaker()
+        else:
+            ctx.bot.mdd_shutdown = False
+            ctx.bot.daily_circuit_breaker = False
+        return {"status": "reset", "message": "서킷 브레이커가 정상 해제되고 계좌 기준선이 재캘리브레이션되었습니다."}
+
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
+
+@api_router.post("/bot/reset-circuit-breaker")
+async def reset_circuit_breaker_endpoint():
+    """
+    🔓 서킷 브레이커 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션
+    """
+    if not ctx.bot:
+        raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
+
+    if hasattr(ctx.bot, 'reset_circuit_breaker'):
+        ctx.bot.reset_circuit_breaker()
+    else:
+        ctx.bot.mdd_shutdown = False
+        ctx.bot.daily_circuit_breaker = False
+
+    log_msg = "🔓 [서킷 브레이커 리셋] 사용자에 의해 서킷 브레이커가 수동 해제되었으며 정상 신규 매수 감시가 재개됩니다."
+    if ctx.db:
+        await ctx.db.log_message("SYSTEM", log_msg)
+    await ws_manager.broadcast_log({
+        "type": "LOG_EVENT",
+        "data": {
+            "id": str(int(time.time() * 1000)),
+            "level": "SYSTEM",
+            "message": log_msg,
+            "timestamp": format_kst_time_str(datetime.now())
+        }
+    })
+    return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}
 
 @api_router.post("/bot/emergency-stop")
 async def emergency_kill_switch():

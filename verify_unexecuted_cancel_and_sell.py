@@ -313,13 +313,17 @@ async def run_transparency_cross_verification():
     assert sell_replace[0]['priority'] == 'CRITICAL', "❌ 대체 매도가 CRITICAL 우선순위가 아닙니다."
     print(f"  ✅ [30초 타임아웃 매도 대체 실측] 주문번호 'ORD_AUTO_TIMEOUT_SELL' 취소 ➔ 긴급 시장가(03) CRITICAL 전량 재발주 완료")
 
-    # 3. 일일 손실 제한(-2.5%) 서킷 브레이커 발동 및 신규 매수 전면 차단 실측
+    # 3. 일일 손실 제한(-2.5%) 서킷 브레이커 발동 및 신규 매수 전면 차단 실측 (3회 연속 확인)
     bot.daily_start_capital = 10_000_000.0
+    bot.highest_total_asset = 10_000_000.0
+    bot.sync_warmup_count = 3
     bot.daily_circuit_breaker = False
-    portfolio.total_asset = 9_650_000.0  # -3.50% 손실 발생
+    portfolio.daily_realized_pnl = -350_000.0  # -3.50% 실현 손실 발생
+    portfolio.total_asset = 9_650_000.0
     portfolio.current_capital = 9_650_000.0
     mock_client.deposit = 9_650_000.0
-    await bot._sync_account_balance()
+    for _ in range(3):
+        await bot._sync_account_balance()
     assert bot.daily_circuit_breaker is True, "❌ 당일 -2.5% 초과 손실 시 서킷 브레이커가 발동되지 않았습니다."
 
     mock_client.sent_orders.clear()

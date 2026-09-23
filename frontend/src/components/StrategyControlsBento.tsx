@@ -47,7 +47,7 @@ export const StrategyControlsBento: React.FC<StrategyControlsBentoProps> = ({ bo
     }
   };
 
-  const handleControlBot = async (action: 'START' | 'STOP' | 'REFRESH') => {
+  const handleControlBot = async (action: 'START' | 'STOP' | 'REFRESH' | 'RESET_CIRCUIT_BREAKER') => {
     setIsControlling(true);
     try {
       const res = await fetch(getApiUrl('/bot/control'), {
@@ -155,9 +155,21 @@ export const StrategyControlsBento: React.FC<StrategyControlsBentoProps> = ({ bo
             <ShieldAlert className="w-3.5 h-3.5 text-amber-400" />
             서킷 브레이커
           </span>
-          <span className={`font-bold ${botStatus.circuit_breaker_open ? 'text-rose-400 animate-pulse' : 'text-slate-300'}`}>
-            {botStatus.circuit_breaker_open ? 'OPEN (차단)' : 'CLOSED (정상)'}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <span className={`font-bold ${botStatus.circuit_breaker_open ? 'text-rose-400 animate-pulse' : 'text-slate-300'}`}>
+              {botStatus.circuit_breaker_open ? 'OPEN (차단)' : 'CLOSED (정상)'}
+            </span>
+            {botStatus.circuit_breaker_open && (
+              <button
+                onClick={() => handleControlBot('RESET_CIRCUIT_BREAKER')}
+                disabled={isControlling}
+                className="px-1.5 py-0.5 text-[10px] font-bold bg-rose-600 hover:bg-rose-500 text-white rounded border border-rose-400 transition cursor-pointer"
+                title="서킷 브레이커 해제 및 계좌 기준점 재캘리브레이션"
+              >
+                해제
+              </button>
+            )}
+          </div>
         </div>
       </div>
 
