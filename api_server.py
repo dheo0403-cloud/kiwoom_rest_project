@@ -207,12 +207,15 @@ async def log_broadcast_loop():
         except Exception as e:
             await asyncio.sleep(1.0)
 
+_last_known_valid_positions: List[Dict[str, Any]] = []
+
 async def get_current_portfolio_snapshot() -> Dict[str, Any]:
     """
     단일 진실 소스(Single Source of Truth) 기반 최신 포트폴리오 스냅샷 생성
     - REST(/portfolio) 및 WebSocket(PORTFOLIO_UPDATE)이 100% 동일한 함수를 사용하여 플리커링/상태 불일치 원천 차단
     - DB에 저장된 실제 포지션/잔고를 최우선 반영하여 독립 프로세스 봇 데몬의 실시간 데이터와 동기화
     """
+    global _last_known_valid_positions
     snapshot = {
         "total_asset": 0.0,
         "current_capital": 0.0,
@@ -280,6 +283,20 @@ async def get_current_portfolio_snapshot() -> Dict[str, Any]:
                 snapshot["quant_performance"] = await ctx.db.get_quant_performance_metrics()
         except Exception as e:
             print(f"Portfolio DB sync error: {e}")
+
+    # 🛡️ [플리커링 방어 캐시] 유효 포지션 캐싱 및 일시적 0건 수신 방어
+    tot_a = float(snapshot.get("total_asset", 0))
+    cur_c = float(snapshot.get("current_capital", 0))
+    if snapshot.get("positions"):
+        _last_known_valid_positions = snapshot["positions"]
+    elif _last_known_valid_positions:
+        # 계좌 총자산이 예수금보다 큰 경우(보유주식 가치 존재), 일시적 DB/TR 쿼리 갭으로 판정하여 마지막 유효 포지션 보존
+        if tot_a > (cur_c + 1000):
+            snapshot["positions"] = _last_known_valid_positions
+            snapshot["stock_count"] = len(_last_known_valid_positions)
+        elif tot_a <= (cur_c + 1000) and tot_a > 0:
+            # 전량 매도 완료(순수 현금 상태) 확인 시 캐시 안전 초기화
+            _last_known_valid_positions = []
 
     # Macro Regime 및 실시간 시장 상태 첨부
     regime_val = "BULL_TREND"

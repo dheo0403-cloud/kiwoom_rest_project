@@ -584,12 +584,12 @@ class AsyncPortfolioManager:
 
                 pos_list.append({
                     'code': code,
-                    'name': pos['name'],
-                    'qty': pos['qty'],
-                    'buy_price': pos['buy_price'],
-                    'current_price': pos['current_price'],
-                    'highest_price': pos['highest_price'],
-                    'sell_stage': pos['sell_stage'],
+                    'name': pos.get('name', code),
+                    'qty': pos.get('qty', 0),
+                    'buy_price': pos.get('buy_price', 0),
+                    'current_price': pos.get('current_price', pos.get('buy_price', 0)),
+                    'highest_price': pos.get('highest_price', pos.get('current_price', pos.get('buy_price', 0))),
+                    'sell_stage': pos.get('sell_stage', 0),
                     'eval_amt': eval_amt,
                     'pnl': pnl,
                     'yield_rate': yield_rate

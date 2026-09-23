@@ -170,7 +170,7 @@ export function App() {
             {/* Bento B: Active Positions Cards */}
             <div className="h-[380px] lg:h-[420px]">
               <ActivePositionsBento
-                positions={portfolio.positions}
+                positions={displayPortfolio.positions}
                 colorMode={colorMode}
                 onSelectStock={handleSelectStock}
                 selectedStockCode={selectedStockCode}

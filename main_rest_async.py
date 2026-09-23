@@ -577,11 +577,9 @@ class AsyncTradingBot:
 
         self.unclosed_orders_count = unclosed_cnt
 
-        # 2. 보유 종목 동기화 선행 (balance_data 및 deposit_data 양방향 스캔)
+        # 2. 보유 종목 동기화 선행 (balance_data 정규 잔고 TR 스캔)
         if balance_data:
             await self.portfolio.sync_positions(balance_data)
-        if deposit_data and len(self.portfolio.positions) == 0:
-            await self.portfolio.sync_positions(deposit_data)
 
         # 보유 주식 평가액 계산
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())

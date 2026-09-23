@@ -76,12 +76,26 @@ export function useTradingWebSocket() {
 
   const isConnectedRef = useRef<boolean>(false);
   isConnectedRef.current = isConnected;
+  const emptyPositionsGraceCountRef = useRef<number>(0);
 
-  // 지능형 포지션 병합 (In-Place Smart Merge: 기존 객체 참조 보존 및 깜빡임 방지)
+  // 지능형 포지션 병합 (In-Place Smart Merge + 낙관적 보존 Optimistic Retention)
   const smartMergePositions = (prevPositions: Position[], nextPositions: Position[]): Position[] => {
+    // 1. 새 데이터가 비어있는 경우
     if (!nextPositions || nextPositions.length === 0) {
+      if (!prevPositions || prevPositions.length === 0) {
+        return [];
+      }
+      // 순간적인 네트워크/TR 폴링 1틱 튐으로 인한 깜빡임 방지: 3회 연속 빈 데이터 수신 시에만 0건으로 확정
+      emptyPositionsGraceCountRef.current += 1;
+      if (emptyPositionsGraceCountRef.current < 3) {
+        return prevPositions; // 기존 포지션 낙관적 유지 (깜빡임 100% 방어)
+      }
       return [];
     }
+
+    // 새 데이터가 유효하게 존재하면 카운터 즉시 리셋
+    emptyPositionsGraceCountRef.current = 0;
+
     if (!prevPositions || prevPositions.length === 0) {
       return nextPositions;
     }
@@ -104,11 +118,11 @@ export function useTradingWebSocket() {
         hasAnyChanges = true;
       } else {
         // 기존 종목 속성 비교
-        const isPriceSame = prevPos.current_price === nextPos.current_price;
+        const isPriceSame = Math.abs(prevPos.current_price - nextPos.current_price) < 0.01;
         const isQtySame = prevPos.qty === nextPos.qty;
-        const isBuyPriceSame = prevPos.buy_price === nextPos.buy_price;
-        const isPnlSame = prevPos.pnl === nextPos.pnl;
-        const isYieldSame = prevPos.yield_rate === nextPos.yield_rate;
+        const isBuyPriceSame = Math.abs(prevPos.buy_price - nextPos.buy_price) < 0.01;
+        const isPnlSame = Math.abs((prevPos.pnl || 0) - (nextPos.pnl || 0)) < 0.01;
+        const isYieldSame = Math.abs((prevPos.yield_rate || 0) - (nextPos.yield_rate || 0)) < 0.01;
         const isStageSame = prevPos.sell_stage === nextPos.sell_stage;
 
         if (isPriceSame && isQtySame && isBuyPriceSame && isPnlSame && isYieldSame && isStageSame) {
