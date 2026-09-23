@@ -96,6 +96,7 @@ class ServerContext:
         self.bot_task: Optional[asyncio.Task] = None
         self.ws_broadcast_task: Optional[asyncio.Task] = None
         self.log_broadcast_task: Optional[asyncio.Task] = None
+        self.account_sync_task: Optional[asyncio.Task] = None
         self.daily_scheduler_task: Optional[asyncio.Task] = None
 
 ctx = ServerContext()
@@ -333,6 +334,19 @@ async def portfolio_broadcast_loop():
             print(f"WS Broadcast Error: {e}")
         await asyncio.sleep(1.0)
 
+async def account_sync_background_loop():
+    """5초 주기로 키움 OpenAPI 4대 TR을 스캔하여 MTS 앱의 5대 보유 종목을 실시간 동기화"""
+    while True:
+        try:
+            await asyncio.sleep(5.0)
+            if ctx.bot:
+                await ctx.bot._sync_account_balance()
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            print(f"⚠️ [API Server] 실시간 계좌 자동 동기화 예외: {e}")
+            await asyncio.sleep(5.0)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """서버 기동 및 종료 생명주기 관리"""
@@ -373,14 +387,22 @@ async def lifespan(app: FastAPI):
         db=ctx.db
     )
 
-    # 2. 포트폴리오, 실시간 로그 및 일일 자동 웨이크업 스케줄러 태스크 시작
+    # 2. 서버 기동 직후 즉시 1회 키움 실시간 잔고 동기화 (MTS 앱의 5대 보유종목 즉시 로드)
+    try:
+        await ctx.bot._sync_account_balance()
+        print(f"✅ [API Server Startup] 키움 실시간 잔고 동기화 완료: {len(ctx.portfolio.positions)}개 종목 로드됨")
+    except Exception as e:
+        print(f"⚠️ [API Server Startup] 키움 실시간 잔고 동기화 예외: {e}")
+
+    # 3. 포트폴리오, 실시간 로그 및 일일 자동 웨이크업 스케줄러 태스크 시작
     ctx.ws_broadcast_task = asyncio.create_task(portfolio_broadcast_loop())
     ctx.log_broadcast_task = asyncio.create_task(log_broadcast_loop())
+    ctx.account_sync_task = asyncio.create_task(account_sync_background_loop())
     ctx.daily_scheduler_task = asyncio.create_task(daily_market_scheduler_loop())
 
     yield
 
-    # 3. 종료 정리
+    # 4. 종료 정리
     if ctx.bot_task and not ctx.bot_task.done():
         ctx.bot.running = False
         ctx.bot_task.cancel()
@@ -389,6 +411,8 @@ async def lifespan(app: FastAPI):
         except asyncio.CancelledError:
             pass
 
+    if ctx.account_sync_task:
+        ctx.account_sync_task.cancel()
     if ctx.daily_scheduler_task:
         ctx.daily_scheduler_task.cancel()
     if ctx.ws_broadcast_task:
