@@ -225,10 +225,24 @@ class AsyncPortfolioManager:
                 return candidates
 
             candidate_lists = extract_candidate_lists(account_data)
+            # 모든 후보 리스트의 종목들을 종목코드 기준으로 스마트 합집합(Union Merge)하여 1개도 누락 없이 수집
+            unique_raw_items_map: Dict[str, Dict[str, Any]] = {}
             if candidate_lists:
-                # 유효한 보유종목 개수가 가장 많은 리스트를 최우선 선택
-                candidate_lists.sort(key=lambda lst: sum(1 for x in lst if is_holding_item(x)), reverse=True)
-                raw_list = candidate_lists[0]
+                for lst in candidate_lists:
+                    for item in lst:
+                        if isinstance(item, dict):
+                            c = extract_valid_code(item)
+                            if c:
+                                if c not in unique_raw_items_map:
+                                    unique_raw_items_map[c] = item.copy()
+                                else:
+                                    # 기존 아이템에 누락된 수량, 매수가, 현재가 필드가 있으면 스마트 보강
+                                    prev_i = unique_raw_items_map[c]
+                                    for k, v in item.items():
+                                        if k not in prev_i or prev_i[k] is None or prev_i[k] == "" or prev_i[k] == 0:
+                                            prev_i[k] = v
+
+            raw_list = list(unique_raw_items_map.values())
 
             prev_positions = self.positions.copy()
             new_positions = {}

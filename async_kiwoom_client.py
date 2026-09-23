@@ -453,10 +453,10 @@ class AsyncKiwoomClient:
         return best_data
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
-        """계좌 잔고 및 보유 포지션 조회 (전체 보유종목 kt00018 합산 최우선 4대 TR 다중 스캐너)"""
+        """계좌 잔고 및 보유 포지션 조회 (전체 보유종목 kt00018 + kt00004 + kt00005 다중 TR 전수 스캔 및 종목코드 기반 100% 합집합 병합)"""
         url = f"{self.base_url}/api/dostk/acnt"
         merged_data: Dict[str, Any] = {}
-        has_pos = False
+        combined_holdings_map: Dict[str, Dict[str, Any]] = {}
 
         pos_list_keys = [
             'output2', 'Output2', 'output_2', 'acnt_dtl_list', 'holdings',
@@ -471,21 +471,57 @@ class AsyncKiwoomClient:
             '종목코드', '종목번호', '단축코드', '상품번호', '종목'
         ]
 
-        def check_has_positions(d: Dict[str, Any]) -> bool:
-            if not isinstance(d, dict) or d.get('http_status'):
-                return False
+        def extract_code(item: Dict[str, Any]) -> str:
+            for ck in pos_code_keys:
+                val = item.get(ck)
+                if val is not None and str(val).strip():
+                    raw_c = str(val).strip()
+                    if raw_c.startswith('KR7') and len(raw_c) >= 9:
+                        cand = raw_c[3:9]
+                        if cand.isdigit():
+                            return cand
+                    c = raw_c.replace('A', '').split('_')[0].strip()
+                    if len(c) == 6 and c.isdigit():
+                        return c
+                    elif len(c) > 6 and c[-6:].isdigit():
+                        return c[-6:]
+                    elif 1 <= len(c) < 6 and c.isdigit():
+                        return c.zfill(6)
+                    elif len(c) >= 3 and not c.startswith('KR'):
+                        return c
+            return ""
+
+        def merge_tr_response(tr_resp: Optional[Dict[str, Any]]):
+            if not isinstance(tr_resp, dict) or tr_resp.get('http_status'):
+                return
+
+            # 1. 요약 필드 및 스칼라 값 병합
+            for k, v in tr_resp.items():
+                if k not in pos_list_keys and not isinstance(v, list):
+                    if k not in merged_data or (v is not None and str(v).strip()):
+                        merged_data[k] = v
+                elif k == 'output1' and isinstance(v, list) and v:
+                    if 'output1' not in merged_data:
+                        merged_data['output1'] = v
+
+            # 2. 종목 리스트 전수 추출 및 종목코드별 고유 병합 (덮어쓰기 방지)
             for k in pos_list_keys:
-                lst = d.get(k)
-                if isinstance(lst, list) and len(lst) > 0:
+                lst = tr_resp.get(k)
+                if isinstance(lst, list) and lst:
                     for item in lst:
                         if isinstance(item, dict):
-                            for ck in pos_code_keys:
-                                if item.get(ck) and str(item[ck]).strip():
-                                    return True
-            return False
+                            code = extract_code(item)
+                            if code:
+                                if code not in combined_holdings_map:
+                                    combined_holdings_map[code] = item.copy()
+                                else:
+                                    # 기존 항목에 누락된 필드 스마트 보강
+                                    prev_item = combined_holdings_map[code]
+                                    for ik, iv in item.items():
+                                        if ik not in prev_item or prev_item[ik] is None or prev_item[ik] == "" or prev_item[ik] == 0:
+                                            prev_item[ik] = iv
 
-        # 1차 시도: kt00018 (계좌평가잔고개별합산 / OPW00018 - qry_tp="1" 합산 전체 보유종목 최우선)
-        # 키움 실전 REST 표준: qry_tp="1"(합산)이 전일 포함 모든 보유종목 output2를 반환
+        # 1. kt00018 (계좌평가잔고개별합산 - qry_tp="1" 합산 및 "2" 개별 전수 스캔)
         for q_tp in ["1", "2"]:
             payload_kt00018 = {
                 "dmst_stex_tp": "KRX",
@@ -494,61 +530,43 @@ class AsyncKiwoomClient:
                 "qry_tp": q_tp
             }
             data18, _ = await self.request("kt00018", url, payload_kt00018, priority=priority)
-            if data18 and isinstance(data18, dict) and not data18.get('http_status'):
-                for k, v in data18.items():
-                    if k not in merged_data or (isinstance(v, list) and v):
-                        merged_data[k] = v
-                if check_has_positions(data18):
-                    has_pos = True
-                    break
+            merge_tr_response(data18)
 
-        # 2차 시도: kt00018 순수 페이로드 (qry_tp 없는 기본 요청)
-        if not has_pos:
-            payload_kt00018_pure = {
+        # 2. kt00018 순수 페이로드 (qry_tp 없는 기본 요청)
+        payload_kt00018_pure = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password
+        }
+        data18_pure, _ = await self.request("kt00018", url, payload_kt00018_pure, priority=priority)
+        merge_tr_response(data18_pure)
+
+        # 3. kt00004 (계좌평가잔고내역 - 당일매매/체결 잔고 전수 스캔)
+        for q_tp in ["1", "2"]:
+            payload_kt00004 = {
                 "dmst_stex_tp": "KRX",
                 "accNo": self.account,
-                "accPwd": self.password
+                "accPwd": self.password,
+                "qry_tp": q_tp
             }
-            data18_pure, _ = await self.request("kt00018", url, payload_kt00018_pure, priority=priority)
-            if data18_pure and isinstance(data18_pure, dict) and not data18_pure.get('http_status'):
-                for k, v in data18_pure.items():
-                    if k not in merged_data or (isinstance(v, list) and v):
-                        merged_data[k] = v
-                if check_has_positions(data18_pure):
-                    has_pos = True
+            data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
+            merge_tr_response(data4)
 
-        # 3차 시도: kt00004 (계좌평가잔고내역 - qry_tp="1" 당일매매, "2" 당일체결)
-        if not has_pos:
-            for q_tp in ["1", "2"]:
-                payload_kt00004 = {
-                    "dmst_stex_tp": "KRX",
-                    "accNo": self.account,
-                    "accPwd": self.password,
-                    "qry_tp": q_tp
-                }
-                data4, _ = await self.request("kt00004", url, payload_kt00004, priority=priority)
-                if data4 and isinstance(data4, dict) and not data4.get('http_status'):
-                    for k, v in data4.items():
-                        if k not in merged_data or (isinstance(v, list) and v):
-                            merged_data[k] = v
-                    if check_has_positions(data4):
-                        has_pos = True
-                        break
+        # 4. kt00005 (체결잔고 - 실시간 체결 잔고 전수 스캔)
+        payload_kt00005 = {
+            "dmst_stex_tp": "KRX",
+            "accNo": self.account,
+            "accPwd": self.password
+        }
+        data5, _ = await self.request("kt00005", url, payload_kt00005, priority=priority)
+        merge_tr_response(data5)
 
-        # 4차 시도: kt00005 (체결잔고 - 순수 페이로드)
-        if not has_pos:
-            payload_kt00005 = {
-                "dmst_stex_tp": "KRX",
-                "accNo": self.account,
-                "accPwd": self.password
-            }
-            data5, _ = await self.request("kt00005", url, payload_kt00005, priority=priority)
-            if data5 and isinstance(data5, dict) and not data5.get('http_status'):
-                for k, v in data5.items():
-                    if k not in merged_data or (isinstance(v, list) and v):
-                        merged_data[k] = v
-                if check_has_positions(data5):
-                    has_pos = True
+        # 5. 최종 5대 전 종목 output2에 스마트 합집합 탑재
+        if combined_holdings_map:
+            merged_data['output2'] = list(combined_holdings_map.values())
+            merged_data['tot_hldg_qty'] = str(len(combined_holdings_map))
+        elif 'output2' not in merged_data:
+            merged_data['output2'] = []
 
         return merged_data if merged_data else None
 
