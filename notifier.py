@@ -16,6 +16,8 @@ from typing import Dict, Any, Optional
 import aiohttp
 from dotenv import load_dotenv
 
+from database import get_kst_now
+
 load_dotenv(override=False)
 
 
@@ -108,7 +110,7 @@ class KakaoNotifier:
                             reason: str = "", pnl: Optional[float] = None, yield_rate: Optional[float] = None):
         """주문 체결 알림 포맷팅"""
         icon = "🔥 [매수 체결]" if side.upper() == "BUY" else "🎯 [매도 체결]"
-        now_str = datetime.now().strftime('%H:%M:%S')
+        now_str = get_kst_now().strftime('%H:%M:%S')
 
         msg = [
             f"{icon} {name}({code})",
@@ -127,7 +129,7 @@ class KakaoNotifier:
         """계좌 서킷 브레이커 발동 경보"""
         msg = (
             f"🚨🚨🚨 [EMERGENCY: 계좌 서킷 브레이커 발동] 🚨🚨🚨\n"
-            f"• 발동시간: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"• 발동시간: {get_kst_now().strftime('%Y-%m-%d %H:%M:%S')}\n"
             f"• 계좌 낙폭: {mdd:.2f}% (최고점 대비 -5% 도달)\n"
             f"• 현재 자산: {total_asset:,.0f}원\n"
             f"• 조치사항: 당일 신규 매수 전면 차단 및 비상 관제 모드 전환"
@@ -145,7 +147,7 @@ class KakaoNotifier:
 
         msg = (
             f"📊 [일일 장 마감 퀀트 정산 리포트]\n"
-            f"• 정산일시: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n"
+            f"• 정산일시: {get_kst_now().strftime('%Y-%m-%d %H:%M')}\n"
             f"• 기초자산: {initial:,.0f}원\n"
             f"• 기말자산: {current:,.0f}원 (총 평가자산)\n"
             f"• D+2예수금: {available:,.0f}원 (주문가능 현금)\n"

@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import Dict, Any, List
 from unittest.mock import AsyncMock, MagicMock
 
+from database import get_kst_now
+
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 if hasattr(sys.stderr, 'reconfigure'):
@@ -47,7 +49,7 @@ class PipelineMockClient:
             "order_type": order_type,
             "side": side,
             "priority": priority,
-            "timestamp": datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            "timestamp": get_kst_now().strftime('%H:%M:%S.%f')[:-3]
         }
         self.sent_orders.append(order_record)
         print(f"  📡 [Mock Kiwoom Server] SendOrder 호출 수신: {side} {code} {qty}주 @ {price:,}원 (호가유형: {order_type}, 우선순위: {priority.name})")

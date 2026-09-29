@@ -14,6 +14,8 @@ import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 
+from database import get_kst_now
+
 # Windows 콘솔 UTF-8 출력 보장
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
@@ -61,7 +63,7 @@ class UnexecutedMockKiwoomClient:
             "orig_ord_no": order_no,
             "qty": qty,
             "priority": priority.name,
-            "time": datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            "time": get_kst_now().strftime('%H:%M:%S.%f')[:-3]
         }
         self.sent_orders.append(record)
         # 미체결 목록에서 해당 주문 제거 (락 해제)
@@ -88,7 +90,7 @@ class UnexecutedMockKiwoomClient:
             "price": price,
             "order_type": order_type,
             "priority": priority.name,
-            "time": datetime.now().strftime('%H:%M:%S.%f')[:-3]
+            "time": get_kst_now().strftime('%H:%M:%S.%f')[:-3]
         }
         self.sent_orders.append(order_record)
         ord_no = f"NEW_ORD_{len(self.sent_orders)}"

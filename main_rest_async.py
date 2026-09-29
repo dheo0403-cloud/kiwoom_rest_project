@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 
 from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
-from database import AsyncDatabase
+from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
 from strategy import AdaptiveVolatilityBreakoutStrategy
 from indicators import TechnicalIndicators
@@ -761,7 +761,7 @@ class AsyncTradingBot:
                 print(f"  ⚠️ [Watchlist Debug] 거래대금 상위 응답이 비어있습니다. (Raw keys: {raw_keys})")
                 return
 
-        today_str = datetime.now().strftime('%Y%m%d')
+        today_str = get_kst_now().strftime('%Y%m%d')
         new_watchlist = {}
 
         # 필터링 단계별 탈락 카운터 (디버깅 관제용)
@@ -895,7 +895,7 @@ class AsyncTradingBot:
                     'fib_500': fib_500,
                     'fib_618': fib_618,
                     'avg_volume': avg_vol,
-                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    'updated_at': get_kst_now().strftime('%Y-%m-%d %H:%M:%S')
                 }
             except Exception as e:
                 drop_reasons['analysis_error'] += 1
@@ -1346,7 +1346,7 @@ class AsyncTradingBot:
         if not self.market_filter_passed:
             return
 
-        now = datetime.now()
+        now = get_kst_now()
         skip_time_filter = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
 
         info = self.watchlist.get(code)
@@ -1615,7 +1615,7 @@ class AsyncTradingBot:
         장 마감 또는 수동 일시정지 후 다음 영업일 아침(기본 08:50 KST)까지 비동기 휴면 대기
         - 08:50 도달 시 수동 일시정지(is_paused) 상태를 자동으로 해제하고 봇을 '실행(RUNNING)' 상태로 복구
         """
-        now = datetime.now()
+        now = get_kst_now()
         next_open = now.replace(hour=wake_up_hour, minute=wake_up_minute, second=0, microsecond=0)
         if now >= next_open:
             next_open += timedelta(days=1)
@@ -1629,17 +1629,17 @@ class AsyncTradingBot:
         minutes, _ = divmod(remainder, 60)
         print(f"💤 [휴면 모드] 다음 거래일({next_open.strftime('%Y-%m-%d %H:%M')})까지 약 {hours}시간 {minutes}분 대기합니다...")
 
-        while not self.is_shutdown and datetime.now() < next_open:
+        while not self.is_shutdown and get_kst_now() < next_open:
             # 대기 도중 사용자가 수동으로 봇 시작(Resume)을 누른 경우 (정규장 시간 내)
             if self.is_running and not self.is_paused:
-                now_curr = datetime.now()
+                now_curr = get_kst_now()
                 if (9 <= now_curr.hour < 15) or (now_curr.hour == 15 and now_curr.minute < 30):
                     print("⚡ [수동 재개] 사용자에 의한 봇 시작 감지 -> 휴면 루프 즉시 탈출")
                     break
-            await asyncio.sleep(min(30.0, max(1.0, (next_open - datetime.now()).total_seconds())))
+            await asyncio.sleep(min(30.0, max(1.0, (next_open - get_kst_now()).total_seconds())))
 
         # 익일 아침 08:50 도달 시: 수동 일시정지 자동 해제 및 봇 RUNNING 상태 자동 전환
-        if not self.is_shutdown and datetime.now() >= next_open:
+        if not self.is_shutdown and get_kst_now() >= next_open:
             if self.is_paused or not self.is_running:
                 self.is_paused = False
                 self.is_running = True
@@ -1658,7 +1658,7 @@ class AsyncTradingBot:
     async def trading_loop(self):
         """정규 거래 시간(09:00 ~ 15:30) 내의 실시간 트레이딩 비동기 주기 루프"""
         loop_count = 0
-        print(f"🔥 [TradingLoop] 정규장 실시간 매매 루프 가동 시작 ({datetime.now().strftime('%H:%M:%S')})")
+        print(f"🔥 [TradingLoop] 정규장 실시간 매매 루프 가동 시작 ({get_kst_now().strftime('%H:%M:%S')})")
 
         # 실시간 틱 데이터 비동기 스트림 워커 시작
         if not self.realtime_stream_task or self.realtime_stream_task.done():
@@ -1675,7 +1675,7 @@ class AsyncTradingBot:
 
                 try:
                     loop_count += 1
-                    now = datetime.now()
+                    now = get_kst_now()
                     now_time = now.time()
 
                     # 1. 수동 주문 큐 처리 (매 루프마다)
@@ -1733,7 +1733,7 @@ class AsyncTradingBot:
 
         while not self.is_shutdown:
             try:
-                now = datetime.now()
+                now = get_kst_now()
                 now_time = now.time()
 
                 # 1. 주말 또는 공휴일/휴장일인 경우 다음 영업일 08:50까지 휴면
@@ -1753,10 +1753,10 @@ class AsyncTradingBot:
                     target_0850 = now.replace(hour=8, minute=50, second=0, microsecond=0)
                     wait_sec = (target_0850 - now).total_seconds()
                     print(f"⏳ [개장 전 대기] 아침 08:50까지 대기합니다 ({int(wait_sec//60)}분 남음)...")
-                    while not self.is_shutdown and datetime.now() < target_0850:
+                    while not self.is_shutdown and get_kst_now() < target_0850:
                         if self.is_paused:
                             break
-                        await asyncio.sleep(min(30.0, max(1.0, (target_0850 - datetime.now()).total_seconds())))
+                        await asyncio.sleep(min(30.0, max(1.0, (target_0850 - get_kst_now()).total_seconds())))
                     continue
 
                 # 4. 장 시작 준비(08:50 ~ 09:00): 계좌 잔고 동기화 및 당일 감시 유니버스 스캔
@@ -1767,7 +1767,7 @@ class AsyncTradingBot:
                     await self._sync_account_balance()
                     await self.update_watchlist()
                     target_0900 = now.replace(hour=9, minute=0, second=0, microsecond=0)
-                    while not self.is_shutdown and not self.is_paused and datetime.now() < target_0900:
+                    while not self.is_shutdown and not self.is_paused and get_kst_now() < target_0900:
                         await asyncio.sleep(1.0)
                     continue
 

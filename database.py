@@ -8,15 +8,16 @@ Gate Info:
 import aiomysql
 import os
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv(override=False)
 
-# 한국 표준시 (KST, Asia/Seoul, UTC+9) 고정
-KST = timezone(timedelta(hours=9))
+# 한국 표준시 (KST, Asia/Seoul, UTC+9) 동적 타임존 객체
+KST = ZoneInfo("Asia/Seoul")
 
 def get_kst_now() -> datetime:
-    """한국 표준시 (Asia/Seoul, UTC+9) 현재 일시 반환"""
+    """한국 표준시 (Asia/Seoul) 현재 일시 반환"""
     return datetime.now(KST)
 
 def format_kst_time_str(dt=None) -> str:
@@ -25,20 +26,11 @@ def format_kst_time_str(dt=None) -> str:
         return get_kst_now().strftime('%H:%M:%S')
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
-            # DB가 UTC로 저장된 naive datetime일 경우 (00~08시 등) KST(+9시간)로 보정
-            now_utc_hour = datetime.now(timezone.utc).hour
-            if abs(dt.hour - now_utc_hour) <= 1:
-                return (dt + timedelta(hours=9)).strftime('%H:%M:%S')
-            return dt.strftime('%H:%M:%S')
+            dt = dt.replace(tzinfo=KST)
         return dt.astimezone(KST).strftime('%H:%M:%S')
     if isinstance(dt, str):
         try:
             if len(dt) == 8 and ':' in dt:
-                h, m, s = map(int, dt.split(':'))
-                now_utc_hour = datetime.now(timezone.utc).hour
-                if abs(h - now_utc_hour) <= 1:
-                    h_kst = (h + 9) % 24
-                    return f"{h_kst:02d}:{m:02d}:{s:02d}"
                 return dt
             d = datetime.fromisoformat(dt.replace('Z', '+00:00'))
             return d.astimezone(KST).strftime('%H:%M:%S')
@@ -100,7 +92,7 @@ class DatabaseManager:
 
     async def update_balance(self, total_asset, deposit, profit_loss, yield_rate):
         if not self.pool: return
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = get_kst_now().strftime('%Y-%m-%d')
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:

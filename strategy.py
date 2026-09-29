@@ -18,6 +18,8 @@ from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 
+from database import get_kst_now
+
 
 class AdaptiveVolatilityBreakoutStrategy:
     """
@@ -64,7 +66,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         if ind is None:
             ind = {}
 
-        now = datetime.now()
+        now = get_kst_now()
         is_test = ind.get('is_test', False)
         skip_time_filter = ind.get('skip_time_filter', False) or is_test
 
@@ -221,7 +223,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         # 2. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 100% 회피, 15:15 이후)
         skip_time_filter = ind.get('skip_time_filter', False) if ind else False
         if not skip_time_filter:
-            now = datetime.now()
+            now = get_kst_now()
             if now.hour == 15 and now.minute >= 15:
                 return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.2%})"
 

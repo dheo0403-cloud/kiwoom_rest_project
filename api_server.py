@@ -111,7 +111,7 @@ async def daily_market_scheduler_loop():
     last_processed_date = ""
     while True:
         try:
-            now = datetime.now()
+            now = get_kst_now()
             today_str = now.strftime('%Y%m%d')
 
             # 매일 아침 08:50 ~ 08:55 구간 검사 (당일 1회 실행 보장)
@@ -705,7 +705,7 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
 
     # 4. 키움 API 실시간 조회 (DB/버퍼 모두 없을 때)
     if len(candles) < 5 and ctx.client:
-        today_str = datetime.now().strftime('%Y%m%d')
+        today_str = get_kst_now().strftime('%Y%m%d')
         if period == 'D':
             chart_res = await ctx.client.get_daily_chart(clean_code, base_dt=today_str, priority=RequestPriority.LOW)
             if chart_res and isinstance(chart_res, dict):
@@ -914,7 +914,7 @@ async def reset_circuit_breaker_endpoint():
             "id": str(int(time.time() * 1000)),
             "level": "SYSTEM",
             "message": log_msg,
-            "timestamp": format_kst_time_str(datetime.now())
+            "timestamp": format_kst_time_str(get_kst_now())
         }
     })
     return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}

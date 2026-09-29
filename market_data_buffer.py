@@ -11,6 +11,8 @@ from typing import Dict, List, Any, Optional, Tuple
 import pandas as pd
 import numpy as np
 
+from database import get_kst_now
+
 
 class CircularCandleBuffer:
     """
@@ -34,7 +36,7 @@ class CircularCandleBuffer:
         dt_str: 'YYYY-MM-DD HH:MM:SS' 또는 None(현재시간)
         반환: 완성되어 링버퍼에 추가된 직전 분봉 딕셔너리 (새 분봉 시작 시) 또는 None
         """
-        now = datetime.now()
+        now = get_kst_now()
         dt_minute_str = dt_str or now.strftime('%Y-%m-%d %H:%M:00')
         self.latest_tick_price = price
         self.latest_tick_volume = volume

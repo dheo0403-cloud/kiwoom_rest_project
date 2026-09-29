@@ -2,6 +2,8 @@ import asyncio
 import pandas as pd
 from datetime import datetime, timedelta
 
+from database import get_kst_now
+
 class DataCollector:
     def __init__(self, kiwoom_api, db_manager):
         self.kiwoom = kiwoom_api
@@ -112,7 +114,7 @@ class DataCollector:
 
     async def update_daily_data(self, codes):
         """대상 종목 일봉 데이터 순차 수집 — 부족 시 과거 데이터 추가 수집"""
-        today = datetime.now().strftime('%Y%m%d')
+        today = get_kst_now().strftime('%Y%m%d')
         sufficient_count = 0
 
         for i, code in enumerate(codes):
@@ -123,7 +125,7 @@ class DataCollector:
             count = await self._get_daily_data_count(code)
             if count < 20:
                 # 2차: 과거 90일 전 기준으로 추가 수집 시도
-                earlier_dt = (datetime.now() - timedelta(days=90)).strftime('%Y%m%d')
+                earlier_dt = (get_kst_now() - timedelta(days=90)).strftime('%Y%m%d')
                 await self._fetch_daily_single(code, earlier_dt)
                 count = await self._get_daily_data_count(code)
 
@@ -172,7 +174,7 @@ class DataCollector:
 
     async def update_minute_data(self, codes):
         """대상 종목 1분봉 데이터 순차 수집 (Rate Limit 안전)"""
-        today = datetime.now().strftime('%Y%m%d')
+        today = get_kst_now().strftime('%Y%m%d')
         for i, code in enumerate(codes):
             await self._fetch_minute_single(code, today)
             if (i + 1) % 10 == 0:

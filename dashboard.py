@@ -9,6 +9,8 @@ import time
 import requests
 from dotenv import load_dotenv
 
+from database import get_kst_now
+
 # 한국 표준시(KST) 강제 적용
 os.environ["TZ"] = "Asia/Seoul"
 if hasattr(time, "tzset"):
@@ -203,7 +205,7 @@ try:
         col2.metric("D+2 예수금 (주문가능)", "0원")
         col3.metric("누적 수익금", "0원")
 
-    today_orders = orders[orders['timestamp'].astype(str).str.startswith(datetime.now().strftime('%Y-%m-%d'))] if not orders.empty else pd.DataFrame()
+    today_orders = orders[orders['timestamp'].astype(str).str.startswith(get_kst_now().strftime('%Y-%m-%d'))] if not orders.empty else pd.DataFrame()
     today_buy = len(today_orders[today_orders['side'] == 'BUY']) if not today_orders.empty else 0
     today_sell = len(today_orders[today_orders['side'] == 'SELL']) if not today_orders.empty else 0
     col4.metric("당일 매매 체결", f"매수 {today_buy} / 매도 {today_sell}")

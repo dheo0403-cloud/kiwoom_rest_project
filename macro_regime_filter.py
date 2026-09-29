@@ -10,6 +10,8 @@ from enum import Enum
 from typing import Dict, Any, Optional, Tuple
 from datetime import datetime
 
+from database import get_kst_now
+
 
 class MarketRegime(Enum):
     BULL_TREND = "BULL_TREND"          # 상승 추세 (적극 매매)
@@ -45,7 +47,7 @@ class MacroRegimeFilter:
         self.last_kodex200_rate = kodex200_change_pct
         self.last_vix = vix_value if vix_value is not None else 18.0
         self.last_usdkrw_rate = usdkrw_change_pct if usdkrw_change_pct is not None else 0.0
-        self.last_evaluated_at = datetime.now()
+        self.last_evaluated_at = get_kst_now()
 
         # 1. 급락장 판정 (PANIC_CRASH)
         # KODEX 200이 -1.5% 이하로 급락하거나, VIX가 28 초과로 폭등할 때

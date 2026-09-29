@@ -2,6 +2,32 @@
 
 ---
 
+## 📅 [2026-09-29 14:55] [버그 픽스] 주식 매매 봇 UTC/KST 타임존 불일치 해결 및 스케줄러 정상화
+
+### 1. 작업 개요 및 목적
+- **발생 문제 분석:**
+  - 서버 시스템 시간(UTC)과 한국 표준시(KST) 간의 타임존 설정 누락/불일치로 인해 정규장 영업일 스케줄러 및 로깅 시간이 정확히 9시간 차이로 어긋나는 결함 발생.
+  - Windows OS 환경의 Python 특성상 `os.environ["TZ"]`만으로는 `datetime.now()` (Naive Datetime)가 KST로 변환되지 않아 08:50 장전 대기 및 09:00~15:30 정규장 루프가 9시간 어긋나게 작동함.
+- **완벽 해결 조치:**
+  - Python 3.9+ 표준 라이브러리인 `zoneinfo.ZoneInfo("Asia/Seoul")`를 사용하여 동적 KST 타임존 객체를 생성하는 `get_kst_now()` 유틸리티를 전역 표준시간 생성자로 지정 (`database.py`).
+  - `main_rest_async.py`, `api_server.py`, `notifier.py`, `strategy.py`, `data_collector.py`, `market_data_buffer.py`, `macro_regime_filter.py`, `dashboard.py`, `verify_*.py` 소스 코드 전반의 Naive `datetime.now()`를 `get_kst_now()`로 일괄 전환.
+  - Aware Datetime과 Naive Datetime 간의 비교 충돌(`TypeError: can't compare offset-naive and offset-aware datetimes`)이 발생하지 않도록 KST 타임존 정합성을 일체화하여 완벽 방어.
+
+### 2. 수정된 파일
+- `database.py`: `ZoneInfo("Asia/Seoul")` 기반 `get_kst_now()` 및 `format_kst_time_str()` 정밀 구현
+- `main_rest_async.py`: `wait_until_next_market_open()`, `trading_loop()`, `run_daemon()` 등 트레이딩 스케줄러 시간부 KST 전면 적용
+- `api_server.py`: 자동 웨이크업 스케줄러 및 로그 타임스탬프 KST 일체화
+- `notifier.py`: 카카오톡 주문 체결, 서킷브레이커, 일일 결산 알림 포맷터 KST 동기화
+- `strategy.py`: 장초반 노이즈 차단(09:15 이전) 및 장마감 오버나잇 강제 청산(15:15 이후) 시간 판단 로직 KST 전환
+- `data_collector.py`, `market_data_buffer.py`, `macro_regime_filter.py`, `dashboard.py`, `verify_*.py`: 일봉/분봉 수집, 링버퍼, 매크로 평가, 대시보드 및 검증 스크립트 KST 동기화
+
+### 3. 실측 검증 결과
+- **Python 3.11 KST 타임존 실측 출력 검증:**
+  - `get_kst_now()` 실행 결과: `2026-09-29 14:52:15 KST+0900 | 타임존: Asia/Seoul`
+  - 실제 한국 표준시(KST) 및 Asia/Seoul 타임존과 100% 일치함 확인.
+
+---
+
 ## 📅 [2026-09-23 15:30] 키움 OpenAPI REST 실제 응답 스키마 정밀 매핑 및 6대 보유종목 실시간 100% 동기화 버그 완벽 해결
 
 ### 1. 작업 개요 및 목적
