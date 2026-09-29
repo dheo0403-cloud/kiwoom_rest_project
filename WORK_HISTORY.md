@@ -2,6 +2,20 @@
 
 ---
 
+## 📅 [2026-09-29 15:20] [배포] KST 타임존 완벽 교정판 main 브랜치 병합 및 GitHub Actions -> AKS 무중단 자동 배포 트리거
+
+### 1. 작업 개요 및 목적
+- **작업 목적:** 백엔드 거래 루프/스케줄러 타임존 교정 및 UI/로거 표출부 KST 100% 동기화 수정사항을 `main` 브랜치에 정식 반영하여 AKS 클러스터로 자동 배포(Continuous Deployment).
+- **진행 내용:**
+  - `fix/rendering-optimization-and-safety-fixes` 브랜치의 최신 커밋들(`62c99bf`, `9574460`, `7679bc6`)을 `main` 브랜치로 Fast-forward 병합.
+  - 원격 `origin/main`으로 `git push`를 수행하여 `.github/workflows/deploy.yml` CI/CD 파이프라인 자동 실행.
+
+### 2. 대상 파일 및 커밋
+- **병합 커밋:** `62c99bf fix: 주식 매매 봇 UI/로거 표출부 UTC 시간(06시) 잔존 버그 해결 및 KST 완벽 동기화`
+- **배포 방식:** GitHub Actions ➔ Azure Container Registry (ACR) 이미지 빌드 ➔ Azure Kubernetes Service (AKS) 무중단 롤아웃
+
+---
+
 ## 📅 [2026-09-29 15:05] [버그 픽스] 주식 매매 봇 UI/로거 표출부 UTC 시간(06시) 잔존 버그 해결 및 KST 완벽 동기화
 
 ### 1. 작업 개요 및 목적
