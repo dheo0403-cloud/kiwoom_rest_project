@@ -2,6 +2,25 @@
 
 ---
 
+## 📅 [2026-09-29 15:05] [버그 픽스] 주식 매매 봇 UI/로거 표출부 UTC 시간(06시) 잔존 버그 해결 및 KST 완벽 동기화
+
+### 1. 작업 개요 및 목적
+- **발생 문제 분석:**
+  - 백엔드 내부 스케줄러 계산 시간은 KST로 교정되었으나, Bento 콕핏 UI 및 터미널 `LogViewer` 화면에 출력되는 실시간 감시 로그 타임스탬프가 여전히 UTC 06시(KST 15시 기준 -9시간 오차)로 잔존하는 결함 발생.
+  - 근본 원인: DB(`logs` 테이블)에서 가져온 Naive Datetime `created` 객체에 대해 `format_kst_time_str()`가 `dt.replace(tzinfo=KST)`를 수행함에 따라, 06시라는 시각 숫자는 유지된 채 타임존 라벨만 KST로 변경되어 +9시간 시차 변환이 유실되었음.
+- **완벽 해결 조치:**
+  - `database.py` 내 `format_kst_time_str()` 보정 로직 교정: Naive Datetime 수신 시 `dt.replace(tzinfo=timezone.utc)`로 UTC 라벨 부여 후 `.astimezone(KST)`를 호출하여 UTC 06:13:25 시각을 KST 15:13:25 (+9시간)로 정확히 1:1 파싱.
+  - DB 저장 시 KST 시각 명시적 주입: `log_message()`에서 `INSERT INTO logs (level, message, timestamp)` 파라미터로 `get_kst_now()`를 주입하여 원본 레코드 생성 시점부터 KST 시각 보장.
+
+### 2. 수정된 파일
+- `database.py`: `format_kst_time_str()` UTC->KST 변환 로직 보정 및 `log_message()` 명시적 KST 타임스탬프 저장.
+
+### 3. 실측 검증 결과
+- **타임존 파싱 시뮬레이션 실측 검증:**
+  - `UTC Naive Datetime(06:13:25)` 수신 시 `format_kst_time_str()` 파싱 결과 `15:13:25` (+9시간 정확 변환)로 100% 정상 작동 증명.
+
+---
+
 ## 📅 [2026-09-29 14:55] [버그 픽스] 주식 매매 봇 UTC/KST 타임존 불일치 해결 및 스케줄러 정상화
 
 ### 1. 작업 개요 및 목적

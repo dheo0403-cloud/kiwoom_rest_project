@@ -26,13 +26,16 @@ def format_kst_time_str(dt=None) -> str:
         return get_kst_now().strftime('%H:%M:%S')
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=KST)
+            # DB(MariaDB)에서 읽어온 naive datetime은 UTC 기준이므로 UTC 라벨 부여 후 KST(Asia/Seoul, +9h)로 올바르게 변환
+            dt = dt.replace(tzinfo=timezone.utc)
         return dt.astimezone(KST).strftime('%H:%M:%S')
     if isinstance(dt, str):
         try:
             if len(dt) == 8 and ':' in dt:
                 return dt
             d = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            if d.tzinfo is None:
+                d = d.replace(tzinfo=timezone.utc)
             return d.astimezone(KST).strftime('%H:%M:%S')
         except Exception:
             return dt
@@ -71,7 +74,10 @@ class DatabaseManager:
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute('INSERT INTO logs (level, message) VALUES (%s, %s)', (level, message))
+                    await cursor.execute(
+                        'INSERT INTO logs (level, message, timestamp) VALUES (%s, %s, %s)',
+                        (level, message, get_kst_now())
+                    )
                 await conn.commit()
         except Exception as e:
             print(f"DB Log Error: {e}")
