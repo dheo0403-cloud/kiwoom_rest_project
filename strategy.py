@@ -2,9 +2,9 @@
 적응형 퀀트 매매 전략 모듈 (Adaptive Quant Strategy Engine)
 - ATR 기반 동적 변동성 돌파 진입 (Adaptive Volatility Breakout)
 - 승률 70%+ 타겟팅 5대 고승률 퀀트 알파 필터:
-  1) ADX(14) 추세 강도 필터: ADX >= 20 및 +DI > -DI (무추세 횡보장 휩소 100% 기각)
+  1) ADX(14) 추세 강도 필터: ADX >= 18 및 +DI > -DI (무추세 횡보장 휩소 100% 기각)
   2) VWAP 스마트 밴드 지지 & 건전 이격도(+0.2% ~ +2.0%) 가드
-  3) 체결강도(Volume Power >= 115%) 및 호가 불균형(Orderbook Imbalance) 필터
+  3) 체결강도(Volume Power >= 110%) 및 호가 불균형(Orderbook Imbalance) 필터
   4) 대량 매물대(Volume Profile POC) 저항선 돌파 안착 필터
   5) 볼린저 밴드 + 켈트너 채널 스퀴즈 모멘텀(Squeeze Momentum) 상방 발산
 - 엄격한 리스크 관리 & 출구 전략:
@@ -102,6 +102,10 @@ class AdaptiveVolatilityBreakoutStrategy:
         adx = float(ind.get('adx', ind.get('adx14', 0)))                   # ADX 추세 강도
         plus_di = float(ind.get('plus_di', 0))
         minus_di = float(ind.get('minus_di', 0))
+
+        # [필터 2-1] 핵심 지표(ADX/VWAP) 미산출 시 진입 보류 (데이터 부족 상태에서 필터가 통째로 우회되는 것을 방지)
+        if (adx <= 0 or vwap <= 0) and not skip_time_filter:
+            return False, "지표_미산출_진입보류(ADX/VWAP)"
 
         # [필터 3] RSI(14) 극단적 초과열 구간(80+) 추격 매수 차단 (상투 잡기 방지)
         if rsi14 >= 80.0 and not is_test:

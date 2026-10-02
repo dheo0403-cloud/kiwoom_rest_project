@@ -2,6 +2,39 @@
 
 ---
 
+## 📅 [2026-10-03] [보안/주문 안전] 코드 분석 지적 사항 중 코드로 처리 가능한 항목 수정
+
+### 1. 작업 개요 및 목적
+- 코드 분석에서 발견된 위험 중 코드 수정으로 막을 수 있는 항목 처리. (키 재발급, git 이력 삭제는 코드 밖 조치로 별도 필요)
+- 변경 내용:
+  - `.env` git 추적 해제(`git rm --cached`) 및 `.gitignore` 추가 (이력 속 값은 그대로이므로 키 재발급 필요)
+  - HTTP 오류 로그의 payload에서 `accPwd`/`appkey`/`secretkey` 마스킹
+  - 변경성 API 5개에 `API_AUTH_TOKEN` 설정 시 `X-API-Token` 검증 (미설정이면 기존 동작), `CORS_ORIGINS` 지정 시 해당 도메인만 허용 및 credentials 활성
+  - 종목별 `_buy_inflight`로 동시 중복 매수 차단
+  - 주문(kt10000/kt10001) 재시도 5→1회
+  - ADX/VWAP 미산출 시 매수 보류 (시간필터 skip 모드는 기존 동작)
+  - 접수 시점 로그 문구를 "체결"→"접수"로 정정, 실전 모드 시작 경고, 중복 호출 제거, 주석 불일치 수정
+
+### 2. 수정/생성된 파일
+- `.gitignore`, `api_server.py`, `async_kiwoom_client.py`, `main_rest_async.py`, `strategy.py`, `test_safety_guards.py`(신규), `.env`(추적 해제만, 로컬 파일 유지)
+
+### 3. 🔍 코드 리뷰 요약
+- 한계: 인증은 opt-in이라 `API_AUTH_TOKEN`을 설정하기 전까지 API는 무방비이며, 프론트엔드는 아직 `X-API-Token`을 보내지 않음(토큰 설정 시 프론트 수정 필요).
+- 미해결: 포지션이 "접수" 시점에 편입되는 구조는 유지(미체결 취소 시 싱크 전까지 불일치 가능). 모의 폴백 종목 주입, 휴장일 달력, API 호출 중복(스트림 워커와 감시 루프)은 이번 범위 제외.
+- 영향: 재시작 직후 캔들이 쌓이기 전(약 수 분)에는 신규 매수가 보류됨.
+
+### 4. 검증 결과
+- `python -m py_compile` → exit 0
+- 수정 전 `pytest -q`: 65 passed / 수정 후: 70 passed (신규 5건 포함, exit 0)
+- 동시 호출 단위 테스트는 목(Mock) 기반이며 실제 키움 API/AKS 실행은 미실행
+
+### 5. 후속 할 일
+- 코드 밖: 실전 APP_KEY/SECRET·계좌 비밀번호·DB 비밀번호 재발급, 저장소 공개 여부 확인, 필요 시 git 이력 정리
+- `API_AUTH_TOKEN`, `CORS_ORIGINS` 운영 환경변수 설정 및 프론트엔드에 토큰 헤더 반영
+- CI에 pytest 단계 추가 검토
+
+---
+
 ## 📅 [2026-09-29 15:20] [배포] KST 타임존 완벽 교정판 main 브랜치 병합 및 GitHub Actions -> AKS 무중단 자동 배포 트리거
 
 ### 1. 작업 개요 및 목적

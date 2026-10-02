@@ -8,11 +8,12 @@ Gate Info:
 import asyncio
 import json
 import os
+import secrets
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter, Depends, Header
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -434,13 +435,23 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS 허용 도메인: CORS_ORIGINS(쉼표 구분)로 제한. 미설정 시 기존처럼 전체 허용하되 쿠키 자격증명은 끈다.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+async def require_api_token(x_api_token: Optional[str] = Header(default=None)):
+    """변경성(주문/제어) API 인증: API_AUTH_TOKEN이 설정된 경우 X-API-Token 헤더가 일치해야 한다."""
+    expected = os.getenv("API_AUTH_TOKEN", "")
+    if not expected:
+        return
+    if not x_api_token or not secrets.compare_digest(x_api_token, expected):
+        raise HTTPException(status_code=401, detail="인증 토큰이 유효하지 않습니다.")
 
 # ================= REST 엔드포인트 라우터 정의 =================
 api_router = APIRouter()
@@ -784,7 +795,7 @@ async def get_recent_logs_endpoint(limit: int = 100):
     return {"logs": [], "count": 0}
 
 
-@api_router.post("/order/manual")
+@api_router.post("/order/manual", dependencies=[Depends(require_api_token)])
 async def create_manual_order(req: ManualOrderRequest):
     """대시보드 수동 주문 접수 (HIGH 우선순위 발주)"""
     if not ctx.bot or not ctx.client:
@@ -850,7 +861,7 @@ async def create_manual_order(req: ManualOrderRequest):
         "response": res
     }
 
-@api_router.post("/bot/control")
+@api_router.post("/bot/control", dependencies=[Depends(require_api_token)])
 async def control_bot(req: BotControlRequest):
     """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)"""
     if not ctx.bot:
@@ -891,7 +902,7 @@ async def control_bot(req: BotControlRequest):
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
 
-@api_router.post("/bot/reset-circuit-breaker")
+@api_router.post("/bot/reset-circuit-breaker", dependencies=[Depends(require_api_token)])
 async def reset_circuit_breaker_endpoint():
     """
     🔓 서킷 브레이커 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션
@@ -919,7 +930,7 @@ async def reset_circuit_breaker_endpoint():
     })
     return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}
 
-@api_router.post("/bot/emergency-stop")
+@api_router.post("/bot/emergency-stop", dependencies=[Depends(require_api_token)])
 async def emergency_kill_switch():
     """
     🚨 긴급 비상 킬스위치 (Emergency Kill-Switch)
@@ -975,7 +986,7 @@ async def emergency_kill_switch():
         "orders": executed_orders
     }
 
-@api_router.post("/bot/params")
+@api_router.post("/bot/params", dependencies=[Depends(require_api_token)])
 async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fraction: Optional[float] = None):
     """런타임 무중단 매매 파라미터 동적 조정"""
     if not ctx.bot:

@@ -173,9 +173,6 @@ class OrderTimeoutManager:
             if self.bot and hasattr(self.bot, '_sync_account_balance'):
                 await self.bot._sync_account_balance()
 
-            if self.bot and hasattr(self.bot, '_sync_account_balance'):
-                await self.bot._sync_account_balance()
-
 class AsyncTradingBot:
     """
     완전 비동기(asyncio/aiohttp) 키움증권 퀀트 트레이딩 봇 데몬
@@ -243,6 +240,7 @@ class AsyncTradingBot:
         timeout_sec = float(os.getenv("ORDER_TIMEOUT_SECONDS", "30.0"))
         self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
         self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
+        self._buy_inflight: set = set()  # 매수 판단/발주 진행 중인 종목 (동시 중복 진입 차단)
 
     @property
     def running(self) -> bool:
@@ -380,6 +378,8 @@ class AsyncTradingBot:
     async def initialize(self):
         """클라이언트, DB 풀, 인메모리 버퍼, 텔레그램 알림, 계좌 상태 초기화"""
         print(f"🚀 [AsyncTradingBot] 엔진 초기화 시작 (모드: {'모의투자' if self.is_demo else '실전투자'})...")
+        if not self.is_demo:
+            print("⚠️ [실전투자 모드] 실제 계좌로 주문이 발송됩니다. 모의 테스트는 --mock 또는 IS_REAL=false 로 실행하세요.")
         await self.db.init_pool()
         await self.buffer.start()
         await self.notifier.start()
@@ -982,7 +982,7 @@ class AsyncTradingBot:
                 elif hasattr(self.db, 'update_manual_order_status'):
                     await self.db.update_manual_order_status(order_id, "COMPLETED")
                 await self.db.log_order(code, name, side, qty, price)
-                await self.db.log_message("INFO", f"수동 주문 체결 완료: {side} {name}({code}) {qty}주")
+                await self.db.log_message("INFO", f"수동 주문 접수 완료: {side} {name}({code}) {qty}주")
                 await self._sync_account_balance()
             else:
                 msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 실패'
@@ -1276,7 +1276,7 @@ class AsyncTradingBot:
             pos = await self.portfolio.remove_position(code, cur_price if sell_price == 0 else sell_price)
             actual_exit_price = cur_price if sell_price == 0 else sell_price
             await self.db.log_order(code, name, "SELL", qty, int(actual_exit_price))
-            await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {int(actual_exit_price):,}원 ({reason})")
+            await self.db.log_message("WARNING", f"🚨 [긴급 매도 주문 접수] {name}({code}) {qty}주 @ {int(actual_exit_price):,}원 ({reason})")
             pnl = (actual_exit_price - pos['buy_price']) * qty if pos else None
             yield_rt = (actual_exit_price - pos['buy_price']) / pos['buy_price'] * 100.0 if pos and pos['buy_price'] > 0 else None
             self.notifier.notify_order_filled("SELL", name, code, qty, actual_exit_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
@@ -1324,7 +1324,7 @@ class AsyncTradingBot:
             buy_p = snap_pos.get('buy_price', sell_price)
             await self.portfolio.update_partial_sell(code, qty, sell_price, next_stage)
             await self.db.log_order(code, name, "SELL", qty, sell_price)
-            await self.db.log_message("INFO", f"🎯 [분할 익절 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
+            await self.db.log_message("INFO", f"🎯 [분할 익절 주문 접수] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
             pnl = (sell_price - buy_p) * qty
             yield_rt = (sell_price - buy_p) / buy_p * 100.0 if buy_p > 0 else 0.0
             self.notifier.notify_order_filled("SELL", name, code, qty, sell_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
@@ -1334,6 +1334,16 @@ class AsyncTradingBot:
             await self.db.log_message("ERROR", f"분할 익절 실패: {name}({code}) - {msg}")
 
     async def _evaluate_buy_condition(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
+        """종목별 동시 진입 차단 래퍼: 스트림 워커와 감시 루프가 같은 종목을 동시에 평가해도 주문은 한 번만 나간다."""
+        if code in self._buy_inflight:
+            return
+        self._buy_inflight.add(code)
+        try:
+            await self._evaluate_buy_condition_impl(code, cur_price, cur_volume, raw_data)
+        finally:
+            self._buy_inflight.discard(code)
+
+    async def _evaluate_buy_condition_impl(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
         """
         실시간 피보나치 눌림목 및 ATR 변동성 돌파 매수 조건 평가 함수
         - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
@@ -1603,7 +1613,7 @@ class AsyncTradingBot:
                 await self.order_timeout_mgr.track_order(ord_no, code, name, "BUY", qty, buy_price, order_type="00")
             await self.portfolio.add_position(code, name, qty, buy_price)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
-            await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
+            await self.db.log_message("INFO", f"🔥 [매수 주문 접수] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
             self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason=reason)
             await self._sync_account_balance()
         else:
@@ -1803,9 +1813,6 @@ class AsyncTradingBot:
             await self.notifier.stop()
         except Exception as e:
             print(f"⚠️ [Shutdown] 알림 워커 정지 오류: {e}")
-        await self.client.stop()
-        await self.db.close_pool()
-        print("✅ [AsyncTradingBot] 정상 종료 완료")
         await self.client.stop()
         await self.db.close_pool()
         print("✅ [AsyncTradingBot] 정상 종료 완료")

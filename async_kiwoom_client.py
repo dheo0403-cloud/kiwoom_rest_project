@@ -113,6 +113,8 @@ class AsyncKiwoomClient:
     - 서킷 브레이커 및 자동 재시도
     - 비동기 워커 디스패처
     """
+    _SECRET_KEYS = {"accpwd", "appkey", "secretkey"}  # 로그 출력 시 마스킹할 payload 키(소문자)
+
     def __init__(self, is_demo: Optional[bool] = None, max_tps: float = None):
         if is_demo is None:
             # 환경변수 IS_REAL 또는 KIWOOM_MODE 기반 결정 (기본값: 실전투자 REAL)
@@ -257,7 +259,8 @@ class AsyncKiwoomClient:
 
                     if response.status != 200:
                         msg = data.get('msg1') or data.get('return_msg') or data.get('raw_text') or 'HTTP Error'
-                        print(f"❌ [API_HTTP_{response.status}] {req.api_id} 호출 실패: {msg} (Payload: {req.payload})")
+                        safe_payload = {k: ("***" if k.lower() in self._SECRET_KEYS else v) for k, v in req.payload.items()}  # 계좌 비밀번호/키 로그 노출 방지
+                        print(f"❌ [API_HTTP_{response.status}] {req.api_id} 호출 실패: {msg} (Payload: {safe_payload})")
                         if attempt == req.retries - 1:
                             if not req.future.done():
                                 req.future.set_result((data, response.headers))
@@ -334,7 +337,8 @@ class AsyncKiwoomClient:
             "trde_tp": str(order_type),   # "00": 보통(지정가), "03": 시장가
             "cond_uv": "0"
         }
-        data, _ = await self.request(api_id, url, payload, priority=priority, retries=5)
+        # 주문은 재시도 시 중복 접수 위험이 있으므로 1회만 시도 (실패 시 다음 루프에서 재판단)
+        data, _ = await self.request(api_id, url, payload, priority=priority, retries=1)
         if not data:
             print(f"❌ [ORDER_FAIL] 주문 응답 없음 ({side} {clean_code} {qty}주 @ {price}원)")
             return None
