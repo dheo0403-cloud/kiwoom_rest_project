@@ -76,3 +76,15 @@ async def test_order_request_does_not_retry(monkeypatch):
     await client.send_order("005930", 1, 70000, side="BUY")
     await client.send_order("005930", 1, 70000, order_type="03", side="SELL")
     assert seen == {"kt10000": 1, "kt10001": 1}
+
+
+def test_krx_holiday_calendar():
+    """달력 파일 연도는 KRX 목록을 따르고(추석·대체공휴일 포함), 없는 연도는 고정 휴일 로직으로 폴백"""
+    from datetime import datetime
+    h = AsyncTradingBot.is_korean_market_holiday
+    assert h(datetime(2026, 9, 25)) is True    # 추석 (음력, 고정 로직으로는 못 잡음)
+    assert h(datetime(2026, 10, 5)) is True    # 개천절 대체공휴일 (월요일)
+    assert h(datetime(2026, 10, 6)) is False   # 평일
+    assert h(datetime(2026, 12, 31)) is True   # 연말 휴장
+    assert h(datetime(2027, 1, 1)) is True     # 달력에 없는 연도: 고정 휴일 폴백
+    assert h(datetime(2027, 2, 9)) is False    # 폴백 한계(설날 미반영)를 명시

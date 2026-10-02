@@ -6,6 +6,7 @@ Gate Info:
 - User's verbatim instruction: "파일 전체를 읽지 말고 최근 로그 50줄만 읽으면서 계속 진행해줘"
 """
 import asyncio
+import json
 import os
 import sys
 import time
@@ -26,6 +27,19 @@ from macro_regime_filter import MacroRegimeFilter, MarketRegime
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path, override=False)
+
+def _load_krx_holidays() -> Dict[int, set]:
+    """krx_holidays.json에서 연도별 휴장일 집합 로드 (파일 없음/파싱 오류 시 빈 값 -> 고정 휴일 로직 폴백)"""
+    try:
+        with open(os.path.join(current_dir, 'krx_holidays.json'), encoding='utf-8') as f:
+            raw = json.load(f)
+        return {int(y): set(days) for y, days in raw.items() if y.isdigit()}
+    except Exception as e:
+        print(f"⚠️ [휴장일 달력] krx_holidays.json 로드 실패 -> 양력 고정 휴일 로직 사용: {e}")
+        return {}
+
+KRX_HOLIDAYS = _load_krx_holidays()
+_warned_holiday_years: set = set()
 
 class OrderTimeoutManager:
     """
@@ -284,6 +298,13 @@ class AsyncTradingBot:
         # 주말 (토=5, 일=6)
         if dt.weekday() >= 5:
             return True
+        # 달력 파일에 해당 연도가 있으면 KRX 휴장일 목록을 그대로 따른다
+        year_days = KRX_HOLIDAYS.get(dt.year)
+        if year_days is not None:
+            return dt.strftime('%Y-%m-%d') in year_days
+        if dt.year not in _warned_holiday_years:
+            _warned_holiday_years.add(dt.year)
+            print(f"⚠️ [휴장일 달력] {dt.year}년 데이터 없음 -> 양력 고정 휴일만 적용 (음력/대체공휴일 누락 가능, krx_holidays.json 갱신 필요)")
         # 양력 고정 공휴일 및 증시 폐장일 (월, 일)
         fixed_holidays = {
             (1, 1),   # 신정
