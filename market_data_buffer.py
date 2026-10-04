@@ -28,11 +28,15 @@ class CircularCandleBuffer:
         self.current_candle: Optional[Dict[str, Any]] = None
         self.latest_tick_price: float = 0.0
         self.latest_tick_volume: float = 0.0
+        self._last_cum: Optional[float] = None  # 직전 틱의 당일 누적 거래량
+        self._cum_base: float = 0.0             # 현재 분봉 시작 시점의 당일 누적 거래량
         self._lock = asyncio.Lock()
 
     def update_tick(self, price: float, volume: float, dt_str: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         실시간 틱 유입 시 현재 분봉 갱신 또는 분봉 완성 시 링버퍼에 push
+        volume: 당일 누적 거래량(ka10001 trde_qty). 분봉 거래량은 누적값 차분으로 산출
+                (기동 후 첫 분봉은 첫 관측값부터 집계, 누적 감소(날 바뀜) 시 기준 리셋, 0 이하는 무시)
         dt_str: 'YYYY-MM-DD HH:MM:SS' 또는 None(현재시간)
         반환: 완성되어 링버퍼에 추가된 직전 분봉 딕셔너리 (새 분봉 시작 시) 또는 None
         """
@@ -41,10 +45,19 @@ class CircularCandleBuffer:
         self.latest_tick_price = price
         self.latest_tick_volume = volume
 
+        cum = float(volume) if volume and volume > 0 else None
+        reset = cum is not None and (self._last_cum is None or cum < self._last_cum)
         completed_candle = None
 
-        if self.current_candle is None:
-            # 최초 분봉 생성
+        if self.current_candle is None or self.current_candle['datetime'] != dt_minute_str:
+            # 새로운 분봉 시작 -> 이전 분봉 링버퍼에 커밋
+            if self.current_candle is not None:
+                completed_candle = dict(self.current_candle)
+                self.candles.append(completed_candle)
+            if self._last_cum is not None and not reset:
+                self._cum_base = self._last_cum
+            elif cum is not None:
+                self._cum_base = cum
             self.current_candle = {
                 'code': self.code,
                 'datetime': dt_minute_str,
@@ -52,28 +65,20 @@ class CircularCandleBuffer:
                 'high': price,
                 'low': price,
                 'close': price,
-                'volume': volume
+                'volume': max(0.0, cum - self._cum_base) if cum is not None else 0.0
             }
-        elif self.current_candle['datetime'] == dt_minute_str:
+        else:
             # 동일 분봉 내 업데이트
             self.current_candle['high'] = max(self.current_candle['high'], price)
             self.current_candle['low'] = min(self.current_candle['low'], price)
             self.current_candle['close'] = price
-            self.current_candle['volume'] = max(self.current_candle['volume'], volume)
-        else:
-            # 새로운 분봉 시작 -> 이전 분봉 링버퍼에 커밋
-            completed_candle = dict(self.current_candle)
-            self.candles.append(completed_candle)
-            self.current_candle = {
-                'code': self.code,
-                'datetime': dt_minute_str,
-                'open': price,
-                'high': price,
-                'low': price,
-                'close': price,
-                'volume': volume
-            }
+            if reset:
+                self._cum_base = cum - self.current_candle['volume']
+            if cum is not None:
+                self.current_candle['volume'] = max(self.current_candle['volume'], cum - self._cum_base)
 
+        if cum is not None:
+            self._last_cum = cum
         return completed_candle
 
     def append_candle(self, open_p: float, high_p: float, low_p: float, close_p: float,

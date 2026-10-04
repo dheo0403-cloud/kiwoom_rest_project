@@ -340,7 +340,7 @@ class AsyncTradingBot:
         - 피보나치 매수 조건 평가 함수(_evaluate_buy_condition) 즉시 호출
         """
         raw_p = real_data.get('current_price') or real_data.get('prpr') or real_data.get('stck_prpr') or real_data.get('cur_prc') or 0
-        raw_v = real_data.get('volume') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
+        raw_v = real_data.get('volume') or real_data.get('trde_qty') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
         raw_open = real_data.get('open_price') or real_data.get('oprn') or real_data.get('stck_oprc') or real_data.get('open_pric') or 0
 
         try:
@@ -860,7 +860,7 @@ class AsyncTradingBot:
                         continue
                     h_val = c.get('high_pric') or c.get('hgpr') or c.get('stck_hgpr') or c.get('high_price') or c.get('high') or 0
                     l_val = c.get('low_pric') or c.get('lwpr') or c.get('stck_lwpr') or c.get('low_price') or c.get('low') or 0
-                    v_val = c.get('acml_vol') or c.get('vol') or c.get('volume') or c.get('stck_cntg_hour') or 0
+                    v_val = c.get('trde_qty') or c.get('acml_vol') or c.get('vol') or c.get('volume') or c.get('stck_cntg_hour') or 0  # 일봉 거래량 키는 trde_qty
                     h = abs(float(str(h_val).replace(',', '').strip()))
                     l = abs(float(str(l_val).replace(',', '').strip()))
                     v = abs(float(str(v_val).replace(',', '').strip()))
@@ -1052,7 +1052,7 @@ class AsyncTradingBot:
             if cur_price <= 0:
                 continue
 
-            cur_volume_raw = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            cur_volume_raw = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
             try:
                 cur_volume = abs(float(str(cur_volume_raw).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
             except (ValueError, TypeError):
@@ -1532,7 +1532,7 @@ class AsyncTradingBot:
                         out = {}
 
                     raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
-                    raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+                    raw_v = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
                     raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
                     try:
@@ -1585,7 +1585,7 @@ class AsyncTradingBot:
                 out = {}
 
             raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
-            raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            raw_v = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
             raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
             try:

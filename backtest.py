@@ -331,7 +331,8 @@ class HighFidelityBacktester:
             'in_sample_best_sharpe': last['in_sample_best_sharpe'],
             'in_sample_results': last['in_sample_results'],
             'out_of_sample_metrics': oos_summary,
-            'folds': fold_results
+            'folds': fold_results,
+            'trades': oos_trades  # 전 폴드 OOS 거래 (청산 사유 분석용)
         }
 
 
@@ -368,6 +369,7 @@ def load_minute_bars_from_db(code: str) -> pd.DataFrame:
 if __name__ == "__main__":
     import argparse
     import collections
+    import re
     parser = argparse.ArgumentParser(description="DB 분봉 기반 실거래 전략 롤링 WFO 백테스트 (조회 전용)")
     parser.add_argument("code")
     parser.add_argument("--train-days", type=int, default=20)
@@ -386,3 +388,10 @@ if __name__ == "__main__":
         print(f"{f['train'][0]}~{f['train'][1]}  {f['test'][0]}~{f['test'][1]}  {f['best_k']:>6} "
               f"{f['in_sample_best_sharpe']:>7.2f} {o.get('total_return_pct', 0):>8.2f} {o.get('total_trades', 0):>6} {o.get('win_rate_pct', 0):>7.1f}")
     print("[OOS 합산]", {k: round(v, 3) if isinstance(v, float) else v for k, v in res['out_of_sample_metrics'].items()})
+    # 청산 사유별 손익 분해 (사유 문자열의 괄호 앞 부분 기준)
+    by_reason = collections.defaultdict(list)
+    for t in res['trades']:
+        by_reason[re.split(r'\(|_최고', t.exit_reason or "미청산")[0]].append(t)
+    print(f"{'청산 사유':<28} {'건수':>4} {'평균수익%':>9} {'총손익(원)':>12}")
+    for reason, ts in sorted(by_reason.items(), key=lambda kv: sum(t.pnl for t in kv[1])):
+        print(f"{reason:<28} {len(ts):>4} {np.mean([t.return_pct for t in ts]) * 100:>9.2f} {sum(t.pnl for t in ts):>12,.0f}")
