@@ -7,42 +7,66 @@ import pandas as pd
 from backtest import HighFidelityBacktester
 
 
+def make_minute_bars(n_days: int = 2, bars_per_day: int = 60, seed: int = 42) -> pd.DataFrame:
+    """09:00부터 장중 1분봉 합성 데이터 (단위 테스트 전용, 지표 계산이 봉당 수십 ms라 봉 수를 줄임)"""
+    rng = np.random.default_rng(seed)
+    times = []
+    for d in pd.bdate_range(start="2025-01-06", periods=n_days):
+        times.extend(pd.date_range(start=d + pd.Timedelta(hours=9), periods=bars_per_day, freq="min"))
+    n = len(times)
+    close_p = 50000.0 * np.cumprod(1 + rng.normal(0.0002, 0.002, n))
+    open_p = np.concatenate([[close_p[0]], close_p[:-1]])
+    high_p = np.maximum(open_p, close_p) * (1 + rng.uniform(0, 0.002, n))
+    low_p = np.minimum(open_p, close_p) * (1 - rng.uniform(0, 0.002, n))
+    return pd.DataFrame({'datetime': times, 'open': open_p, 'high': high_p, 'low': low_p,
+                         'close': close_p, 'volume': rng.integers(10000, 500000, n)})
+
+
+class StubStrategy:
+    """지정 봉에서 매수/매도하고 전달받은 봉 시각을 기록하는 스텁 전략"""
+    k_breakout = 0.5
+
+    def __init__(self, buy_at, sell_at):
+        self.buy_at, self.sell_at = buy_at, sell_at
+        self.buy_times, self.sell_times = [], []
+
+    async def check_buy_signal(self, code, current_price, current_volume, ind=None):
+        self.buy_times.append(ind['now'])
+        return ind['now'] == self.buy_at, "stub_buy"
+
+    async def check_sell_signal(self, code, buy_price, current_price, ind=None, sell_stage=0, highest_price=None):
+        self.sell_times.append(ind['now'])
+        return ("SELL_ALL", "stub_sell") if ind['now'] == self.sell_at else ("WAIT", "")
+
+
 class TestHighFidelityBacktester(unittest.TestCase):
     def setUp(self):
-        np.random.seed(42)
-        n = 100
-        dates = pd.date_range(start="2025-01-01", periods=n, freq="B")
-        returns = np.random.normal(0.002, 0.02, n)
-        close_p = 50000.0 * np.cumprod(1 + returns)
-        high_p = close_p * (1 + np.random.uniform(0.005, 0.03, n))
-        low_p = close_p * (1 - np.random.uniform(0.005, 0.03, n))
-        open_p = low_p + (high_p - low_p) * np.random.uniform(0.2, 0.8, n)
-        vols = np.random.randint(10000, 500000, n)
-
-        self.df = pd.DataFrame({
-            'date': dates,
-            'open': open_p,
-            'high': high_p,
-            'low': low_p,
-            'close': close_p,
-            'volume': vols
-        })
+        self.df = make_minute_bars()
         self.backtester = HighFidelityBacktester(initial_capital=10_000_000, k_breakout=0.5)
 
     def test_backtest_execution_and_metrics(self):
-        """백테스트 실행 및 현실적 마찰비용/성과 지표 검증"""
+        """실거래 전략으로 백테스트 실행 및 현실적 마찰비용/성과 지표 검증"""
         metrics = self.backtester.run_backtest(self.df, code="005930")
 
-        self.assertIn('initial_capital', metrics)
-        self.assertIn('final_equity', metrics)
-        self.assertIn('total_return_pct', metrics)
-        self.assertIn('sharpe_ratio', metrics)
-        self.assertIn('mdd_pct', metrics)
-        self.assertIn('total_fee_tax_paid', metrics)
-
-        # 수수료/세금 지출 확인
+        for key in ('initial_capital', 'final_equity', 'total_return_pct', 'sharpe_ratio', 'mdd_pct', 'total_fee_tax_paid'):
+            self.assertIn(key, metrics)
         if metrics['total_trades'] > 0:
             self.assertGreater(metrics['total_fee_tax_paid'], 0.0)
+
+    def test_delegates_to_strategy_with_bar_time(self):
+        """백테스트가 주입된 전략을 호출하고 봉 시각을 넘기며, 종가 진입·저가 청산 비용을 반영하는지 검증"""
+        times = pd.to_datetime(self.df['datetime'])
+        buy_i, sell_i = 20, 40
+        stub = StubStrategy(buy_at=times[buy_i].to_pydatetime(), sell_at=times[sell_i].to_pydatetime())
+        bt = HighFidelityBacktester(initial_capital=10_000_000, strategy=stub)
+        metrics = bt.run_backtest(self.df)
+
+        self.assertEqual(metrics['total_trades'], 1)
+        trade = bt.closed_trades[0]
+        self.assertAlmostEqual(trade.entry_price, self.df['close'][buy_i] * (1 + bt.slippage_rate))
+        self.assertAlmostEqual(trade.exit_price, self.df['low'][sell_i] * (1 - bt.slippage_rate))
+        self.assertEqual(stub.sell_times[0], times[buy_i + 1].to_pydatetime())  # 진입 다음 봉부터 청산 판정
+        self.assertLess(trade.pnl, trade.realized)  # 매수 원가·수수료 차감 확인
 
     def test_walk_forward_optimization(self):
         """Walk-Forward Optimization (WFO) 롤링 검증"""

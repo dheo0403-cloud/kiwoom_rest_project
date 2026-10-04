@@ -2,6 +2,20 @@
 
 ---
 
+## 📅 [2026-10-05 03:05] [백테스트] backtest.py가 실거래 strategy.py 판정을 그대로 호출하도록 통일
+
+* **목적:** PDF 분석 2순위. 백테스트가 별도 로직(2.0ATR/−5% 스탑, 2.5ATR 트레일링, R1/R2 분할익절, ADX·VWAP 등 필터 없음)을 써서 실거래 전략 성과를 대변하지 못하던 문제 해소.
+* **내용:**
+  - `strategy.py`: `now = ind.get('now') or get_kst_now()` (매수/매도 2곳). 실거래는 `now`를 넣지 않으므로 동작 불변.
+  - `backtest.py`: 분봉 입력(datetime 필수). 봉마다 최근 20봉 `get_latest_indicators` + 당일 시가 + 전일까지 20일 피보나치/평균거래량 + 당일 누적거래량 + 봉 시각을 `ind`로 구성해 `check_buy_signal`(종가 진입)/`check_sell_signal`(저가 판정·체결, 비관적) 호출. 수량은 `AsyncPortfolioManager.get_order_qty`. 부분매도 50%(실거래와 동일). 분할매도 수령액을 거래 PnL에 포함(기존엔 누락). 샤프/CAGR은 일별 자산 기준. 자체 켈리·스탑 파라미터 제거, `strategy` 주입 지원.
+  - `test_backtest.py`: 합성 분봉으로 재작성, 스텁 전략 주입으로 위임·봉 시각 전달·체결가/비용 검증 추가.
+* **수정/생성 파일:** `backtest.py`, `strategy.py`, `test_backtest.py`
+* **리뷰:** 실거래와 남은 차이 — 체결강도·호가잔량·시장 레짐 미반영(데이터 없음), 관심종목 기준값은 전일까지 20일(실거래는 당일 포함 가능), 단일종목·1포지션. WFO는 행 비율로 분할해 일중 분할 가능하고, OOS 첫날은 일봉 기준값이 없음. 성능: `get_latest_indicators`가 호출당 약 54ms(프로파일 결과 `_standardize_columns` 11회 반복이 약 40%) — 1일(390봉) 약 20초, 실거래 틱 평가도 같은 비용.
+* **검증:** `py_compile` exit 0. `pytest -q` 73 passed(exit 0, 78초). 실제 전략 1일 합성 분봉 실행: 거래 0건, 매수 거절 사유 집계 ADX 무추세 215·14:30 이후 60·DMI 43·돌파 미달 25·RSI 19·장초반 15·MA20 12·POC 1 → 봉 시각 기반 시간 필터 정상 작동 확인. 실데이터 백테스트는 미실행(분봉 데이터 미준비).
+* **후속:** `indicators.compute_all_indicators` 중복 표준화 제거로 속도 개선(실거래에도 이득). DB `minute_ohlcv` 실데이터로 백테스트 실행. WFO를 일 단위·다구간 롤링으로 개선.
+
+---
+
 ## 📅 [2026-10-05 02:40] [리스크] 시장 레짐 승수를 실제 주문 수량에 반영
 
 * **목적:** "클로드를 펀드매니저로 만들기"(quantframe.io 번역) PDF 분석 결과 반영. 확신도(시장 상태)가 낮으면 비중을 줄인다는 원칙에 비춰 보니, `MacroRegimeFilter.get_regime_kelly_multiplier()`(강세 1.0/횡보 0.6/급락 0.0)가 API 표시용으로만 쓰이고 주문 수량에는 미반영이었음.
