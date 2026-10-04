@@ -11,9 +11,37 @@ import pandas as pd
 class TechnicalIndicators:
     """Alpha Vantage 표준 수식 기반 고성능 기술적 지표 벡터 연산 클래스"""
 
+    _ALIASES = {'opn_prc', 'stck_oprc', '시가', 'hg_prc', 'stck_hgpr', '고가', 'lw_prc', 'stck_lwpr', '저가',
+                'cl_prc', 'stck_clpr', '현재가', '종가', 'vol', 'acml_vol', '거래량'}
+
+    _STD_COLS = ('open', 'high', 'low', 'close', 'volume')
+
+    @staticmethod
+    def _is_standardized(df: pd.DataFrame) -> bool:
+        """표준화가 결과를 바꾸지 않는 입력인지 판정 (이름 변경·수치 변환·결측 보정이 모두 불필요)"""
+        if df.columns.duplicated().any():
+            return False
+        for col in df.columns:
+            c = str(col)
+            if c.lower() in TechnicalIndicators._ALIASES or (c != c.lower() and c.lower() in TechnicalIndicators._STD_COLS):
+                return False
+        dtypes = df.dtypes
+        for req in TechnicalIndicators._STD_COLS:
+            if req not in dtypes.index:
+                continue
+            dt = dtypes[req]
+            # numpy 정수·실수형만 허용 (bool/object/확장형은 기존 변환 경로 사용), 실수형은 NaN 없어야 함
+            if not isinstance(dt, np.dtype) or dt.kind not in 'iuf':
+                return False
+            if dt.kind == 'f' and np.isnan(df[req].to_numpy()).any():
+                return False
+        return True
+
     @staticmethod
     def _standardize_columns(df: pd.DataFrame) -> pd.DataFrame:
         """컬럼명을 표준 소문자(open, high, low, close, volume)로 정규화"""
+        if TechnicalIndicators._is_standardized(df):
+            return df  # 이미 표준 컬럼·수치형·결측 없음 → 복사 생략 (내부 지표 함수 반복 호출 비용 절감)
         df_copy = df.copy()
         col_map = {}
         for col in df_copy.columns:
@@ -288,60 +316,66 @@ class TechnicalIndicators:
             return df
 
         df_res = cls._standardize_columns(df)
+        if df_res is df:
+            df_res = df.copy()  # 원본 입력 df 변형 방지
         close = df_res['close']
 
+        new = {}  # 지표 컬럼을 모아 한 번에 병합 (컬럼별 삽입 반복 비용 절감)
         # 1. 이동평균선 (MA5, MA20, MA60, MA120)
-        df_res['ma5'] = close.rolling(window=5, min_periods=1).mean()
-        df_res['ma20'] = close.rolling(window=20, min_periods=1).mean()
-        df_res['ma60'] = close.rolling(window=60, min_periods=1).mean()
-        df_res['ma120'] = close.rolling(window=120, min_periods=1).mean()
+        new['ma5'] = close.rolling(window=5, min_periods=1).mean()
+        new['ma20'] = close.rolling(window=20, min_periods=1).mean()
+        new['ma60'] = close.rolling(window=60, min_periods=1).mean()
+        new['ma120'] = close.rolling(window=120, min_periods=1).mean()
 
         # 2. 거래량 이동평균
         if 'volume' in df_res.columns:
-            df_res['vol_ma5'] = df_res['volume'].rolling(window=5, min_periods=1).mean()
-            df_res['vol_ma20'] = df_res['volume'].rolling(window=20, min_periods=1).mean()
+            new['vol_ma5'] = df_res['volume'].rolling(window=5, min_periods=1).mean()
+            new['vol_ma20'] = df_res['volume'].rolling(window=20, min_periods=1).mean()
 
         # 3. RSI(14)
-        df_res['rsi14'] = cls.calculate_rsi(close, period=14)
+        new['rsi14'] = cls.calculate_rsi(close, period=14)
 
         # 4. MACD(12, 26, 9)
         macd_df = cls.calculate_macd(close, fast=12, slow=26, signal=9)
-        df_res['macd'] = macd_df['macd']
-        df_res['macd_signal'] = macd_df['macd_signal']
-        df_res['macd_hist'] = macd_df['macd_hist']
+        new['macd'] = macd_df['macd']
+        new['macd_signal'] = macd_df['macd_signal']
+        new['macd_hist'] = macd_df['macd_hist']
 
         # 5. Bollinger Bands(20, 2)
         bb_df = cls.calculate_bollinger_bands(close, period=20, nbdev=2.0)
-        df_res['bb_upper'] = bb_df['bb_upper']
-        df_res['bb_middle'] = bb_df['bb_middle']
-        df_res['bb_lower'] = bb_df['bb_lower']
-        df_res['bb_bandwidth'] = bb_df['bb_bandwidth']
-        df_res['bb_percent_b'] = bb_df['bb_percent_b']
+        new['bb_upper'] = bb_df['bb_upper']
+        new['bb_middle'] = bb_df['bb_middle']
+        new['bb_lower'] = bb_df['bb_lower']
+        new['bb_bandwidth'] = bb_df['bb_bandwidth']
+        new['bb_percent_b'] = bb_df['bb_percent_b']
 
         # 6. ATR(14)
-        df_res['atr14'] = cls.calculate_atr(df_res, period=14)
+        new['atr14'] = cls.calculate_atr(df_res, period=14)
 
         # 7. VWAP
-        df_res['vwap'] = cls.calculate_vwap(df_res)
+        new['vwap'] = cls.calculate_vwap(df_res)
 
         # 8. ADX(14)
         adx_df = cls.calculate_adx(df_res, period=14)
-        df_res['plus_di'] = adx_df['plus_di']
-        df_res['minus_di'] = adx_df['minus_di']
-        df_res['adx14'] = adx_df['adx']
+        new['plus_di'] = adx_df['plus_di']
+        new['minus_di'] = adx_df['minus_di']
+        new['adx14'] = adx_df['adx']
 
         # 9. Chandelier Exit (14, 2.5)
         ch_df = cls.calculate_chandelier_exit(df_res, period=14, multiplier=2.5)
-        df_res['chandelier_long'] = ch_df['chandelier_long']
-        df_res['chandelier_short'] = ch_df['chandelier_short']
+        new['chandelier_long'] = ch_df['chandelier_long']
+        new['chandelier_short'] = ch_df['chandelier_short']
 
         # 10. Squeeze Momentum
         sq_df = cls.calculate_squeeze_momentum(df_res)
-        df_res['squeeze_on'] = sq_df['squeeze_on']
-        df_res['squeeze_off'] = sq_df['squeeze_off']
-        df_res['squeeze_momentum'] = sq_df['momentum']
+        new['squeeze_on'] = sq_df['squeeze_on']
+        new['squeeze_off'] = sq_df['squeeze_off']
+        new['squeeze_momentum'] = sq_df['momentum']
 
-        return df_res
+        # 입력에 이미 있던 동일 이름 컬럼은 기존 위치에 덮어쓰기 (기존 동작 유지)
+        for col in [c for c in new if c in df_res.columns]:
+            df_res[col] = new.pop(col)
+        return pd.concat([df_res, pd.DataFrame(new, index=df_res.index)], axis=1)
 
     @staticmethod
     def calculate_volume_profile(df: pd.DataFrame, num_bins: int = 10) -> Dict[str, Any]:

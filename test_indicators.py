@@ -154,6 +154,20 @@ def test_compute_all_and_latest_indicators(sample_ohlcv_df):
     assert latest['close'] > 0
 
 
+def test_compute_all_fast_path_matches_standardized_path(sample_ohlcv_df):
+    """표준 입력(복사 생략 경로)과 별칭 입력(표준화 경로)의 지표 결과가 같고, 입력 df는 변형되지 않음"""
+    std_df = sample_ohlcv_df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    original = std_df.copy()
+    alias_df = std_df.rename(columns={'close': '종가', 'volume': 'acml_vol'})
+
+    fast = TechnicalIndicators.compute_all_indicators(std_df)
+    slow = TechnicalIndicators.compute_all_indicators(alias_df)
+
+    pd.testing.assert_frame_equal(fast, slow)
+    pd.testing.assert_frame_equal(std_df, original)
+    assert TechnicalIndicators._standardize_columns(std_df) is std_df
+
+
 def test_orderbook_imbalance_and_volume_power():
     """호가창 불균형(Imbalance Ratio) 및 체결강도(Volume Power) 검증"""
     mock_orderbook = {
