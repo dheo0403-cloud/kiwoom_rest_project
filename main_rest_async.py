@@ -1449,8 +1449,10 @@ class AsyncTradingBot:
 
         if buy_signal:
             atr14 = ind.get('atr14', 0)
-            # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
-            order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14, available_cash=real_available_cash)
+            # 프랙셔널 켈리 공식 × 시장 레짐 승수 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
+            order_qty = await self.portfolio.get_order_qty(
+                cur_price, atr=atr14, available_cash=real_available_cash,
+                regime_multiplier=self.macro_filter.get_regime_kelly_multiplier())
 
             if order_qty <= 0:
                 if real_available_cash >= cur_price:

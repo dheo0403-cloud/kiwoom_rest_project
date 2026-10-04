@@ -21,6 +21,15 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         )
         self.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5, kelly_fraction=0.4)
 
+    async def test_regime_multiplier_scales_order_qty(self):
+        """시장 레짐 승수가 주문 수량에 반영되는지 검증 (강세 > 횡보, 급락 = 0)"""
+        bull = await self.portfolio.get_order_qty(current_price=50000, regime_multiplier=1.0)
+        neutral = await self.portfolio.get_order_qty(current_price=50000, regime_multiplier=0.6)
+        panic = await self.portfolio.get_order_qty(current_price=50000, regime_multiplier=0.0)
+        self.assertGreater(neutral, 0)
+        self.assertLess(neutral, bull)
+        self.assertEqual(panic, 0)
+
     async def test_fractional_kelly_sizing(self):
         """프랙셔널 켈리 자산 배분 산출 및 승률 연동 검증"""
         # 1. 초기 10회 미만 거래 시 기본 비중(20%) 유지

@@ -2,6 +2,17 @@
 
 ---
 
+## 📅 [2026-10-05 02:40] [리스크] 시장 레짐 승수를 실제 주문 수량에 반영
+
+* **목적:** "클로드를 펀드매니저로 만들기"(quantframe.io 번역) PDF 분석 결과 반영. 확신도(시장 상태)가 낮으면 비중을 줄인다는 원칙에 비춰 보니, `MacroRegimeFilter.get_regime_kelly_multiplier()`(강세 1.0/횡보 0.6/급락 0.0)가 API 표시용으로만 쓰이고 주문 수량에는 미반영이었음.
+* **내용:** `get_order_qty()`에 `regime_multiplier`(기본 1.0) 인자 추가, 켈리 비중에 곱함. 0 이하이면 0주. 매수 호출부(`_evaluate_buy_condition_impl`)에서 현재 레짐 승수 전달.
+* **수정/생성 파일:** `async_portfolio.py`, `main_rest_async.py`, `test_strategy_quant.py`(테스트 1건 추가)
+* **리뷰:** 기본값 1.0이라 기존 호출부/테스트 동작 불변. 급락장은 기존대로 `market_filter_passed`(main_rest_async.py:1377)에서 먼저 차단되므로 호출부의 "0주→1주 보정" 경로를 타지 않음. 소액 계좌 최소 1주 보정은 유지되어 횡보장에도 1주 매수는 가능. 레짐 평가는 KODEX200 등락률만 입력(VIX/환율 미연동)이라 횡보 판정은 사실상 KODEX200 −0.5% 미만일 때만 발생.
+* **검증:** `python -m py_compile` exit 0, `python -m pytest -q` 72 passed(신규 1건 포함, exit 0). 실제 키움 API 실행은 미실행(장외 시간).
+* **후속:** PDF 분석 2순위 — `backtest.py`가 `strategy.py` 판정 로직을 그대로 쓰도록 통일(현재 스탑·트레일링·필터 파라미터 불일치). WFO 롤링 다구간화. 재시작 시 `trade_returns` 복원 여부 확인.
+
+---
+
 ## 📅 [2026-10-03] [기능] KRX 휴장일 달력(krx_holidays.json) 도입
 
 * **목적:** 양력 고정 휴일만 판별하던 `is_korean_market_holiday()`가 설날·추석·대체공휴일·선거일을 놓치던 문제 보완.
