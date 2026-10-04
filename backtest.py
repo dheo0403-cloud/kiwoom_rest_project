@@ -112,20 +112,30 @@ class HighFidelityBacktester:
             pos.return_pct = pos.pnl / pos.cost_basis
         return net
 
-    def run_backtest(self, df: pd.DataFrame, code: str = "005930") -> Dict[str, Any]:
-        """
-        분봉 OHLCV 시계열 백테스트 실행 (datetime 또는 date 컬럼에 봉 시각 필요)
-        """
-        return asyncio.run(self._run(df, code))
-
-    async def _run(self, df: pd.DataFrame, code: str) -> Dict[str, Any]:
+    def prepare(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """분봉 정렬·일봉 집계·봉별 지표(최근 20봉) 사전 계산 — 지표는 k와 무관하므로 WFO에서 재사용"""
         bars = TechnicalIndicators._standardize_columns(df).reset_index(drop=True)
         time_col = 'datetime' if 'datetime' in bars.columns else 'date'
         times = pd.to_datetime(bars[time_col])
         days = times.dt.date
         daily = bars.groupby(days).agg(open=('open', 'first'), high=('high', 'max'),
                                        low=('low', 'min'), volume=('volume', 'sum'))
-        day_index = {d: i for i, d in enumerate(daily.index)}
+        inds = [TechnicalIndicators.get_latest_indicators(bars.iloc[max(0, i - BUFFER_BARS + 1):i + 1])
+                for i in range(len(bars))]
+        day_starts = [int(i) for i in np.flatnonzero(days.ne(days.shift()).to_numpy())] + [len(bars)]
+        return {'bars': bars, 'times': times, 'days': days, 'daily': daily, 'inds': inds,
+                'day_index': {d: i for i, d in enumerate(daily.index)}, 'day_starts': day_starts}
+
+    def run_backtest(self, df: pd.DataFrame, code: str = "005930") -> Dict[str, Any]:
+        """
+        분봉 OHLCV 시계열 백테스트 실행 (datetime 또는 date 컬럼에 봉 시각 필요)
+        """
+        return asyncio.run(self._run(self.prepare(df), code))
+
+    async def _run(self, data: Dict[str, Any], code: str, start: int = 0, end: Optional[int] = None) -> Dict[str, Any]:
+        """[start, end) 봉 구간만 거래 — 앞 구간은 지표·일봉 기준값 웜업으로만 쓰임"""
+        bars, times, days, daily, day_index = data['bars'], data['times'], data['days'], data['daily'], data['day_index']
+        end = len(bars) if end is None else end
 
         portfolio = AsyncPortfolioManager(initial_capital=self.initial_capital,
                                           max_stocks=self.max_stocks, kelly_fraction=self.kelly_fraction)
@@ -135,7 +145,7 @@ class HighFidelityBacktester:
         self.equity_curve = []
         cur_day, context, acml_vol = None, {}, 0.0
 
-        for i in range(len(bars)):
+        for i in range(start, end):
             row = bars.iloc[i]
             now = times.iloc[i].to_pydatetime()
             high_p, low_p, close_p = float(row['high']), float(row['low']), float(row['close'])
@@ -146,9 +156,8 @@ class HighFidelityBacktester:
                 acml_vol = 0.0
             acml_vol += float(row['volume'])
 
-            # 실거래와 동일하게 최근 20개 분봉으로 지표 산출
-            window = bars.iloc[max(0, i - BUFFER_BARS + 1):i + 1]
-            ind = TechnicalIndicators.get_latest_indicators(window)
+            # 실거래와 동일하게 최근 20개 분봉으로 산출한 지표 (사전 계산본 복사 사용)
+            ind = dict(data['inds'][i])
             ind['now'] = now
 
             # 1. 보유 포지션 청산 판정 (봉 저가 기준 비관적 체결)
@@ -256,45 +265,124 @@ class HighFidelityBacktester:
 
     def run_walk_forward_optimization(self, df: pd.DataFrame,
                                       k_values: List[float] = [0.4, 0.5, 0.6, 0.7],
-                                      in_sample_ratio: float = 0.7) -> Dict[str, Any]:
+                                      in_sample_ratio: float = 0.7,
+                                      train_days: Optional[int] = None,
+                                      test_days: Optional[int] = None) -> Dict[str, Any]:
         """
-        Walk-Forward Optimization (WFO) 롤링 검증
-        - 70% In-Sample 데이터로 최적 k 도출 후 30% Out-of-Sample 데이터로 과최적화 검증
+        일 단위 Walk-Forward Optimization (WFO)
+        - train_days/test_days 지정 시: train_days일로 최적 k 도출 → 다음 test_days일 OOS 검증, test_days씩 롤링
+        - 미지정 시: 일 경계 기준 in_sample_ratio 1회 분할
+        - 각 구간 앞의 데이터는 지표·일봉 기준값 웜업으로만 쓰이고 거래는 구간 안에서만 발생
         """
-        n = len(df)
-        split_idx = int(n * in_sample_ratio)
-        df_in = df.iloc[:split_idx].reset_index(drop=True)
-        df_out = df.iloc[split_idx:].reset_index(drop=True)
+        data = self.prepare(df)
+        starts = data['day_starts']
+        n_days = len(starts) - 1
+        if train_days is None:
+            split = min(max(1, int(n_days * in_sample_ratio)), n_days - 1)
+            folds = [(0, split, n_days)]
+        else:
+            step = test_days or train_days
+            folds = [(d, d + train_days, min(d + train_days + step, n_days))
+                     for d in range(0, n_days - train_days, step)]
+        if not folds or n_days < 2:
+            raise ValueError(f"WFO 분할 불가: 거래일 {n_days}일 (train_days={train_days}, test_days={test_days})")
 
-        best_k = self.k_breakout
-        best_sharpe = -999.0
-        optimization_results = []
+        original_k = self.k_breakout
+        fold_results, oos_trades, oos_returns = [], [], []
+        try:
+            for train_from, train_to, test_to in folds:
+                best_k, best_sharpe, in_sample = original_k, -999.0, []
+                for k in k_values:
+                    self.k_breakout = k
+                    m = asyncio.run(self._run(data, "WFO", starts[train_from], starts[train_to]))
+                    in_sample.append({'k': k, 'sharpe': m.get('sharpe_ratio', 0),
+                                      'return_pct': m.get('total_return_pct', 0), 'mdd_pct': m.get('mdd_pct', 0)})
+                    if m.get('sharpe_ratio', -999) > best_sharpe:
+                        best_sharpe, best_k = m['sharpe_ratio'], k
+                self.k_breakout = best_k
+                oos = asyncio.run(self._run(data, "WFO", starts[train_to], starts[test_to]))
+                oos_trades.extend(self.closed_trades)
+                oos_returns.append(oos.get('total_return_pct', 0.0))
+                fold_results.append({
+                    'train': (str(data['days'].iloc[starts[train_from]]), str(data['days'].iloc[starts[train_to] - 1])),
+                    'test': (str(data['days'].iloc[starts[train_to]]), str(data['days'].iloc[starts[test_to] - 1])),
+                    'best_k': best_k, 'in_sample_best_sharpe': best_sharpe,
+                    'in_sample_results': in_sample, 'out_of_sample_metrics': oos
+                })
+        finally:
+            self.k_breakout = original_k
 
-        # 1. In-Sample 최적화
-        for k in k_values:
-            self.k_breakout = k
-            metrics = self.run_backtest(df_in)
-            optimization_results.append({
-                'k': k,
-                'sharpe': metrics.get('sharpe_ratio', 0),
-                'return_pct': metrics.get('total_return_pct', 0),
-                'mdd_pct': metrics.get('mdd_pct', 0)
-            })
-            if metrics.get('sharpe_ratio', -999) > best_sharpe:
-                best_sharpe = metrics['sharpe_ratio']
-                best_k = k
-
-        # 2. Out-of-Sample 검증
-        self.k_breakout = best_k
-        oos_metrics = self.run_backtest(df_out)
-
+        last = fold_results[-1]
+        if len(fold_results) == 1:
+            oos_summary = last['out_of_sample_metrics']
+        else:
+            rets = [t.return_pct for t in oos_trades if t.return_pct is not None]
+            profit = sum(t.pnl for t in oos_trades if t.pnl and t.pnl > 0)
+            loss = abs(sum(t.pnl for t in oos_trades if t.pnl and t.pnl < 0))
+            oos_summary = {
+                'total_return_pct': (float(np.prod([1 + r / 100.0 for r in oos_returns])) - 1.0) * 100.0,  # 폴드 복리
+                'total_trades': len(oos_trades),
+                'win_rate_pct': (sum(r > 0 for r in rets) / len(rets) * 100.0) if rets else 0.0,
+                'profit_factor': (profit / loss) if loss > 0 else (99.0 if profit > 0 else 0.0),
+                'n_folds': len(fold_results)
+            }
         return {
-            'best_k': best_k,
-            'in_sample_best_sharpe': best_sharpe,
-            'in_sample_results': optimization_results,
-            'out_of_sample_metrics': oos_metrics
+            'best_k': last['best_k'],
+            'in_sample_best_sharpe': last['in_sample_best_sharpe'],
+            'in_sample_results': last['in_sample_results'],
+            'out_of_sample_metrics': oos_summary,
+            'folds': fold_results
         }
 
 
 # 하위 호환성을 위한 엔트리 클래스
 BacktestEngine = HighFidelityBacktester
+
+
+def load_minute_bars_from_db(code: str) -> pd.DataFrame:
+    """DB minute_ohlcv 분봉 조회 (조회 전용). datetime은 14자리/19자 두 형식이 섞여 있어 숫자만 추출해 파싱하고,
+    거래량 0인 봉(실시간 저장분)은 지표를 왜곡하므로 보정 없이 제외한다."""
+    import os
+    import pymysql
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    con = pymysql.connect(host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "3306")),
+                          user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
+                          database=os.getenv("DB_NAME"), connect_timeout=10)
+    try:
+        with con.cursor() as cur:
+            cur.execute("SELECT datetime, open, high, low, close, volume FROM minute_ohlcv WHERE code = %s", (code,))
+            rows = cur.fetchall()
+    finally:
+        con.close()
+    df = pd.DataFrame(rows, columns=['raw_dt', 'open', 'high', 'low', 'close', 'volume'])
+    df['datetime'] = pd.to_datetime(df['raw_dt'].astype(str).str.replace(r'\D', '', regex=True),
+                                    format='%Y%m%d%H%M%S', errors='coerce')
+    zero_vol, bad_dt = int((df['volume'] <= 0).sum()), int(df['datetime'].isna().sum())
+    df = df[(df['volume'] > 0) & df['datetime'].notna()]
+    df = df.drop_duplicates('datetime', keep='last').sort_values('datetime').reset_index(drop=True)
+    print(f"[데이터] {code}: 조회 {len(rows):,}행 → 사용 {len(df):,}행 (거래량0 제외 {zero_vol:,}, 시각 파싱 실패 제외 {bad_dt:,})")
+    return df.drop(columns=['raw_dt'])
+
+
+if __name__ == "__main__":
+    import argparse
+    import collections
+    parser = argparse.ArgumentParser(description="DB 분봉 기반 실거래 전략 롤링 WFO 백테스트 (조회 전용)")
+    parser.add_argument("code")
+    parser.add_argument("--train-days", type=int, default=20)
+    parser.add_argument("--test-days", type=int, default=5)
+    parser.add_argument("--k-values", type=float, nargs="+", default=[0.4, 0.5, 0.6, 0.7])
+    args = parser.parse_args()
+
+    bars_df = load_minute_bars_from_db(args.code)
+    print(f"[기간] {bars_df['datetime'].min()} ~ {bars_df['datetime'].max()}, 거래일 {bars_df['datetime'].dt.date.nunique()}일")
+    bt = HighFidelityBacktester()
+    res = bt.run_walk_forward_optimization(bars_df, k_values=args.k_values,
+                                           train_days=args.train_days, test_days=args.test_days)
+    print(f"{'train':^25} {'test':^25} {'best_k':>6} {'IS샤프':>7} {'OOS수익%':>8} {'OOS거래':>6} {'OOS승률%':>7}")
+    for f in res['folds']:
+        o = f['out_of_sample_metrics']
+        print(f"{f['train'][0]}~{f['train'][1]}  {f['test'][0]}~{f['test'][1]}  {f['best_k']:>6} "
+              f"{f['in_sample_best_sharpe']:>7.2f} {o.get('total_return_pct', 0):>8.2f} {o.get('total_trades', 0):>6} {o.get('win_rate_pct', 0):>7.1f}")
+    print("[OOS 합산]", {k: round(v, 3) if isinstance(v, float) else v for k, v in res['out_of_sample_metrics'].items()})

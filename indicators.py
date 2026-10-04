@@ -179,7 +179,7 @@ class TechnicalIndicators:
         return vwap.fillna(typical_price)
 
     @staticmethod
-    def calculate_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    def calculate_adx(df: pd.DataFrame, period: int = 14, atr: Optional[pd.Series] = None) -> pd.DataFrame:
         """
         ADX (Average Directional Movement Index - 추세 강도 지표)
         - +DI, -DI, ADX 산출 (Wilder's Smoothing)
@@ -200,7 +200,9 @@ class TechnicalIndicators:
         plus_dm_smoothed = plus_dm_series.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
         minus_dm_smoothed = minus_dm_series.ewm(alpha=1.0 / period, min_periods=period, adjust=False).mean()
 
-        atr = TechnicalIndicators.calculate_atr(df_std, period=period).replace(0.0, np.nan)
+        if atr is None:  # 호출자가 같은 기간 ATR을 넘기면 재계산 생략
+            atr = TechnicalIndicators.calculate_atr(df_std, period=period)
+        atr = atr.replace(0.0, np.nan)
 
         plus_di = (plus_dm_smoothed / atr) * 100.0
         minus_di = (minus_dm_smoothed / atr) * 100.0
@@ -223,7 +225,8 @@ class TechnicalIndicators:
         }, index=df_std.index)
 
     @staticmethod
-    def calculate_chandelier_exit(df: pd.DataFrame, period: int = 14, multiplier: float = 2.5) -> pd.DataFrame:
+    def calculate_chandelier_exit(df: pd.DataFrame, period: int = 14, multiplier: float = 2.5,
+                                  atr: Optional[pd.Series] = None) -> pd.DataFrame:
         """
         Chandelier Exit (샹들리에 출구 - 변동성 기반 동적 트레일링 스탑)
         - Long Stop = Highest High(period) - (multiplier * ATR(period))
@@ -232,7 +235,8 @@ class TechnicalIndicators:
         df_std = TechnicalIndicators._standardize_columns(df)
         high = df_std['high']
         low = df_std['low']
-        atr = TechnicalIndicators.calculate_atr(df_std, period=period)
+        if atr is None:  # 호출자가 같은 기간 ATR을 넘기면 재계산 생략
+            atr = TechnicalIndicators.calculate_atr(df_std, period=period)
 
         highest_high = high.rolling(window=period, min_periods=1).max()
         lowest_low = low.rolling(window=period, min_periods=1).min()
@@ -356,13 +360,13 @@ class TechnicalIndicators:
         new['vwap'] = cls.calculate_vwap(df_res)
 
         # 8. ADX(14)
-        adx_df = cls.calculate_adx(df_res, period=14)
+        adx_df = cls.calculate_adx(df_res, period=14, atr=new['atr14'])
         new['plus_di'] = adx_df['plus_di']
         new['minus_di'] = adx_df['minus_di']
         new['adx14'] = adx_df['adx']
 
         # 9. Chandelier Exit (14, 2.5)
-        ch_df = cls.calculate_chandelier_exit(df_res, period=14, multiplier=2.5)
+        ch_df = cls.calculate_chandelier_exit(df_res, period=14, multiplier=2.5, atr=new['atr14'])
         new['chandelier_long'] = ch_df['chandelier_long']
         new['chandelier_short'] = ch_df['chandelier_short']
 

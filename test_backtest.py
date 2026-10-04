@@ -78,6 +78,35 @@ class TestHighFidelityBacktester(unittest.TestCase):
         self.assertIn(wfo_res['best_k'], [0.4, 0.5, 0.6])
         self.assertIn('out_of_sample_metrics', wfo_res)
         self.assertIn('total_return_pct', wfo_res['out_of_sample_metrics'])
+        # 일 경계 분할: 2일 데이터 → 1일 학습 / 1일 검증
+        self.assertEqual(wfo_res['folds'][0]['train'], ('2025-01-06', '2025-01-06'))
+        self.assertEqual(wfo_res['folds'][0]['test'], ('2025-01-07', '2025-01-07'))
+
+    def test_rolling_wfo_folds_trade_only_inside_test_window(self):
+        """일 단위 롤링 폴드 구성, OOS 거래는 검증 구간 안에서만 발생, k 원복 검증"""
+        df = make_minute_bars(n_days=4, bars_per_day=30)
+        times = pd.to_datetime(df['datetime'])
+        # 매일 20번째 봉 매수, 25번째 봉 매도하는 스텁
+        buy_set = {t.to_pydatetime() for t in times[19::30]}
+        sell_set = {t.to_pydatetime() for t in times[24::30]}
+
+        class DailyStub(StubStrategy):
+            async def check_buy_signal(self, code, current_price, current_volume, ind=None):
+                return ind['now'] in buy_set, "stub_buy"
+
+            async def check_sell_signal(self, code, buy_price, current_price, ind=None, sell_stage=0, highest_price=None):
+                return ("SELL_ALL", "stub_sell") if ind['now'] in sell_set else ("WAIT", "")
+
+        bt = HighFidelityBacktester(strategy=DailyStub(None, None))
+        res = bt.run_walk_forward_optimization(df, k_values=[0.4, 0.6], train_days=2, test_days=1)
+
+        self.assertEqual([f['test'] for f in res['folds']],
+                         [('2025-01-08', '2025-01-08'), ('2025-01-09', '2025-01-09')])
+        for f in res['folds']:
+            self.assertEqual(f['out_of_sample_metrics']['total_trades'], 1)  # 검증일 하루치 1건만
+        self.assertEqual(res['out_of_sample_metrics']['total_trades'], 2)
+        self.assertEqual(res['out_of_sample_metrics']['n_folds'], 2)
+        self.assertEqual(bt.k_breakout, 0.5)  # 최적화 후 원래 k 복원
 
 
 if __name__ == '__main__':

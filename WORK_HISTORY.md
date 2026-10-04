@@ -2,6 +2,24 @@
 
 ---
 
+## 📅 [2026-10-05 04:00] [백테스트] ATR 재사용 · 일 단위 롤링 WFO · DB 실데이터 백테스트
+
+* **목적:** 직전 작업 후속 3건 일괄 처리.
+* **내용:**
+  - `indicators.py`: `calculate_adx`/`calculate_chandelier_exit`에 `atr=None` 인자, `compute_all_indicators`가 atr14 전달(ATR(14) 3회→1회).
+  - `backtest.py`: `prepare()`로 봉별 지표(최근 20봉) 1회 사전 계산 후 k별 재사용, `_run(start, end)`로 구간만 거래(앞 구간은 지표·일봉 기준값 웜업). WFO를 일 경계 분할로 변경, `train_days`/`test_days` 지정 시 롤링 폴드 + OOS 합산(폴드 복리 수익·거래·승률·PF), 기존 반환 키 유지 + `folds` 추가, 최적화 후 k 원복. `load_minute_bars_from_db()`와 CLI(`python backtest.py <code> --train-days 20 --test-days 5`) 추가 — 조회 전용, datetime 14자리/19자 혼재를 숫자 추출로 파싱, 거래량 0 봉은 보정 없이 제외하고 건수 출력.
+  - `test_backtest.py`: 일 경계 분할 검증, 롤링 폴드 구성·OOS 거래가 검증 구간 안에서만 발생·k 원복 테스트 추가.
+* **수정/생성 파일:** `indicators.py`, `backtest.py`, `test_backtest.py`
+* **리뷰:** 사전 계산 지표는 각 봉까지의 20봉만 사용(look-ahead 없음), `_run`은 캐시 dict를 복사해 써 컨텍스트 주입이 캐시를 오염시키지 않음. 폴드 경계가 일 단위라 당일 누적거래량이 끊기지 않음. 한계: 단일 종목·1포지션, 체결강도·호가·레짐 미반영, 청산 체결가를 봉 저가로 둬 보수적 편향.
+* **검증:**
+  - ATR 변경 HEAD 대비 `assert_frame_equal` 9개 케이스 EQUAL, 속도 14.43ms → 12.91ms(15회 교차 최소값).
+  - `pytest -q` 75 passed(exit 0, 34초 → 17초).
+  - **실데이터 롤링 WFO** `python backtest.py 005930 --train-days 20 --test-days 5` → exit 0, 639초. 조회 24,225행 중 거래량0 678행 제외, 23,547행·69거래일(2026-05-07~08-27), 10폴드. **OOS 합산: 수익 −8.40%, 거래 75건, 승률 18.7%, PF 0.19.** 모든 폴드의 In-Sample 최고 샤프가 음수(−5.5 ~ −10.5) → k 조정으로 해결되지 않는 수준.
+* **별도 발견(미조치):** `minute_ohlcv`의 실시간 저장 분봉(19자 datetime) 98,764행 거래량이 전부 0. 실시간 버퍼 분봉 거래량이 0이면 실거래 VWAP는 봉 대표가로 대체되고 POC는 최하단 구간으로 고정되어 VWAP·POC 필터가 사실상 통과 상태일 가능성.
+* **후속:** ① 실시간 틱 거래량 필드 확인 및 버퍼 분봉 거래량 수정(실거래 필터 정상화). ② 005930 외 종목 실데이터 WFO, 청산 사유별 손익 분해로 손실 원인(하드스탑/본절/트레일링/15:15 청산) 파악. ③ 결과 기준 실전 투입 보류 검토.
+
+---
+
 ## 📅 [2026-10-05 03:20] [성능] indicators.py 지표 계산 속도 개선 (계산식 변경 없음)
 
 * **목적:** `get_latest_indicators`가 실거래 틱 평가·백테스트 봉마다 호출되는데 호출당 수십 ms 소요. 프로파일 결과 `_standardize_columns`의 반복 df 복사(지표 1회당 11번)와 컬럼별 `df[...] =` 삽입(25회)이 주원인.
