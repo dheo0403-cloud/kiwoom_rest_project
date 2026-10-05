@@ -158,3 +158,38 @@ class TestFilterAblation(unittest.TestCase):
         a = bt.run_walk_forward_optimization(df, k_values=[0.5], train_days=1, test_days=1)
         b = bt.run_walk_forward_optimization(None, k_values=[0.5], train_days=1, test_days=1, data=data)
         self.assertEqual(a['out_of_sample_metrics'], b['out_of_sample_metrics'])
+
+
+class TestDailyBacktest(unittest.TestCase):
+    """일봉 근사 백테스트: 평탄한 25일(ATR=200, 돌파선=시가+100) 뒤 마지막 날 한 봉으로 진입·청산 규칙 확인"""
+
+    @staticmethod
+    def _run(last):
+        from daily_backtest import simulate_daily
+        rows = [dict(date=f"2026{i:04d}", open=10000, high=10100, low=9900, close=10000, volume=1000) for i in range(101, 126)]
+        rows.append(dict(date="20260201", volume=1000, **last))
+        bt = HighFidelityBacktester()
+        cost = lambda e, x: x * (1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate) / (e * (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate)) - 1
+        return simulate_daily(pd.DataFrame(rows), bt).iloc[-1], cost
+
+    def test_close_exit(self):
+        t, cost = self._run(dict(open=10000, high=10200, low=10050, close=10150))
+        self.assertFalse(t['stopped'])
+        self.assertAlmostEqual(t['ret'], cost(10100, 10150))
+
+    def test_high_first_then_stop(self):
+        """시가가 고가 쪽에 가까우면 고가→저가 순서: 진입(10100) 뒤 저가가 손절가(10100 − 1.5×200 = 9800)에 닿아 손절"""
+        t, cost = self._run(dict(open=10000, high=10200, low=9700, close=10150))
+        self.assertTrue(t['stopped'])
+        self.assertAlmostEqual(t['ret'], cost(10100, 9800))
+
+    def test_low_first_no_stop(self):
+        """시가가 저가 쪽에 가까우면 저가는 진입 전 → 손절 없이 종가 청산"""
+        t, cost = self._run(dict(open=10000, high=10400, low=9750, close=10200))
+        self.assertFalse(t['stopped'])
+        self.assertAlmostEqual(t['ret'], cost(10100, 10200))
+
+    def test_gap_up_uses_today_open(self):
+        """돌파선은 당일 시가 기준: 시가 10300이면 돌파선 10400에 진입"""
+        t, cost = self._run(dict(open=10300, high=10400, low=10250, close=10350))
+        self.assertAlmostEqual(t['ret'], cost(10400, 10350))
