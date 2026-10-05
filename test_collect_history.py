@@ -109,6 +109,14 @@ class TestMinuteBackfill(unittest.TestCase):
         self.assertEqual(new, {"oldest_date": "20260409", "rows_saved": 102, "done": 1})
         self.assertEqual(db.progress["005930"][3], "no_more")               # 키움 보관 한도 도달
 
+    def test_after_hours_bars_dropped_but_not_treated_as_end(self):
+        """넥스트레이드 장후 봉만 있는 페이지도 '더 없음'으로 끝내지 않고, 정규장 봉만 저장"""
+        pages = [({"stk_min_pole_chart_qry": minute_items(["20260410195700", "20260410180000"])}, {"cont-yn": "Y", "next-key": "K"}),
+                 ({"stk_min_pole_chart_qry": minute_items(["20260410153000", "20260410085900"])}, {"cont-yn": "N"})]
+        _, db, new = self._step(pages)
+        self.assertEqual([r[1] for r in db.minute], ["20260410153000"])
+        self.assertEqual(new["oldest_date"], "20260410")
+
     def test_stops_at_target_period(self):
         pages = [({"stk_min_pole_chart_qry": minute_items(["20261005150000", "20251001090000"])}, {"cont-yn": "Y", "next-key": "K"})]
         _, db, new = self._step(pages, days=30)

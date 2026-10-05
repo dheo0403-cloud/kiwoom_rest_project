@@ -12,6 +12,7 @@
 """
 import argparse
 import asyncio
+import os
 from datetime import timedelta
 from typing import Any, Dict, List, Optional
 
@@ -61,11 +62,15 @@ def parse_daily(code: str, items: List[Dict[str, Any]]) -> List[tuple]:
     return out
 
 
+# 저장할 장 시간 (HHMM, 포함). 키움 분봉에는 넥스트레이드 장전·장후(08~20시) 봉도 섞여 와서 정규장만 남긴다.
+MINUTE_SESSION = tuple(os.getenv("MINUTE_SESSION", "0900-1530").split("-"))
+
+
 def parse_minute(code: str, items: List[Dict[str, Any]]) -> List[tuple]:
     out = []
     for it in items:
         tm = str(it.get('cntr_tm') or '').strip()
-        if len(tm) != 14 or not tm.isdigit():
+        if len(tm) != 14 or not tm.isdigit() or not (MINUTE_SESSION[0] <= tm[8:12] <= MINUTE_SESSION[1]):
             continue
         out.append((code, tm, _num(it.get('open_pric')), _num(it.get('high_pric')), _num(it.get('low_pric')),
                     _num(it.get('cur_prc')), _num(it.get('trde_qty'))))
@@ -112,17 +117,19 @@ async def backfill_minute_step(client, db, code: str, state: Optional[Dict[str, 
         data, resp_headers = await client.request("ka10080", f"{client.base_url}/api/dostk/chart",
                                                   {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": base_dt},
                                                   headers_override=headers)
-        page = parse_minute(code, (data or {}).get("stk_min_pole_chart_qry") or [])
+        raw = (data or {}).get("stk_min_pole_chart_qry") or []
+        page = parse_minute(code, raw)  # 정규장 봉만 (완료 판단은 원본 응답 기준)
+        raw_dates = [str(it.get("cntr_tm", ""))[:8] for it in raw if len(str(it.get("cntr_tm", ""))) == 14]
         if data is None or str(data.get("return_code", 0)) not in ("0", ""):
             reason = "error"  # 네트워크·업무 오류(요청 한도 등): 완료 처리하지 않고 다음에 재시도
             if data:
                 print(f"⚠️ [분봉 백필] {code} 업무 오류: {data.get('return_msg')}")
             break
-        if not page:
+        if not raw_dates:
             reason = "no_more"
             break
         rows.extend(page)
-        if min(r[1][:8] for r in page) <= cutoff:
+        if min(raw_dates) <= cutoff:
             reason = "reached_target"
             break
         if not resp_headers or str(resp_headers.get('cont-yn', 'N')).upper() != 'Y' or not resp_headers.get('next-key'):
