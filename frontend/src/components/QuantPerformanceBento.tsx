@@ -30,12 +30,12 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
 }) => {
   const safePerf: QuantPerformanceMetrics = performance || {
     daily_return_pct: 0,
-    cumulative_return_pct: 0,
+    cumulative_realized_pnl: 0,
     win_rate_pct: 0,
     total_trades: 0,
     winning_trades: 0,
     losing_trades: 0,
-    mdd_pct: 0,
+    realized_mdd_amount: 0,
     profit_factor: 0,
     total_profit: 0,
     total_loss: 0,
@@ -58,7 +58,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   };
 
   const isDailyProfit = (safePerf.daily_return_pct ?? 0) >= 0;
-  const isCumProfit = (safePerf.cumulative_return_pct ?? 0) >= 0;
+  const isCumProfit = (safePerf.cumulative_realized_pnl ?? 0) >= 0;
 
   const dailyColor = isDailyProfit
     ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
@@ -98,7 +98,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
 
   const volumePower = safeMacro.volume_power ?? null;
   const isStrongVolume = volumePower !== null && volumePower >= 120.0;
-  const netRealizedPnl = (safePerf.total_profit || 0) - (safePerf.total_loss || 0);
+  const netRealizedPnl = safePerf.cumulative_realized_pnl ?? 0;
 
   const recentTrades: ClosedTrade[] = safePerf.recent_closed_trades || [];
 
@@ -146,7 +146,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               {isDailyProfit ? '+' : ''}{(safePerf.daily_return_pct ?? 0).toFixed(2)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              실현손익 반영
+              전일 대비 총자산
             </div>
           </div>
         </div>
@@ -156,16 +156,16 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1">
               <TrendingUp className="w-3.5 h-3.5 text-indigo-400" />
-              누적 수익률
+              누적 실현손익
             </span>
             <span className="text-[9px] text-slate-500">전체</span>
           </div>
           <div className="mt-1.5">
             <div className={`text-lg sm:text-xl font-black font-mono tabular-nums ${cumColor}`}>
-              {isCumProfit ? '+' : ''}{(safePerf.cumulative_return_pct ?? 0).toFixed(2)}%
+              {isCumProfit ? '+' : ''}{Math.round(safePerf.cumulative_realized_pnl ?? 0).toLocaleString()}원
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              기초원금 대비
+              청산 순손익 (수수료·세금 차감)
             </div>
           </div>
         </div>
@@ -186,7 +186,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               {(safePerf.win_rate_pct ?? 0).toFixed(1)}%
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              총 {safePerf.total_trades ?? 0}회 청산
+              총 {safePerf.total_trades ?? 0}회 청산 · 주문 기록 기준
             </div>
           </div>
         </div>
@@ -196,16 +196,15 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           <div className="flex items-center justify-between text-slate-400 text-xs">
             <span className="flex items-center gap-1">
               <ShieldAlert className="w-3.5 h-3.5 text-rose-400" />
-              최대 낙폭(MDD)
+              실현손익 최대 낙폭
             </span>
-            <span className="text-[9px] text-slate-500">한도 -5%</span>
           </div>
           <div className="mt-1.5">
             <div className="text-lg sm:text-xl font-black font-mono tabular-nums text-rose-400">
-              {(safePerf.mdd_pct ?? 0).toFixed(2)}%
+              {Math.round(safePerf.realized_mdd_amount ?? 0).toLocaleString()}원
             </div>
             <div className="text-[10px] text-slate-400 mt-0.5">
-              최고점 대비 하락
+              누적 실현손익 고점 대비
             </div>
           </div>
         </div>

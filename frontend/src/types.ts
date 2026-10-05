@@ -31,12 +31,12 @@ export interface EquityHistoryPoint {
 
 export interface QuantPerformanceMetrics {
   daily_return_pct: number;
-  cumulative_return_pct: number;
+  cumulative_realized_pnl: number;
   win_rate_pct: number;
   total_trades: number;
   winning_trades: number;
   losing_trades: number;
-  mdd_pct: number;
+  realized_mdd_amount: number;
   profit_factor: number;
   total_profit: number;
   total_loss: number;

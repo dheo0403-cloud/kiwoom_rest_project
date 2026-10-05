@@ -436,26 +436,32 @@ class DatabaseManager:
             return []
 
 
+    @staticmethod
+    def _empty_quant_metrics() -> dict:
+        return {
+            "daily_return_pct": 0.0,
+            "cumulative_realized_pnl": 0.0,
+            "realized_mdd_amount": 0.0,
+            "win_rate_pct": 0.0,
+            "total_trades": 0,
+            "winning_trades": 0,
+            "losing_trades": 0,
+            "profit_factor": 0.0,
+            "total_profit": 0.0,
+            "total_loss": 0.0,
+            "recent_closed_trades": [],
+            "equity_history": []
+        }
+
     async def get_quant_performance_metrics(self) -> dict:
         """
-        DB 체결 내역(order_history) 및 일별 잔고(balance) 기반 퀀트 핵심 성과 지표(KPI) 산출
-        - 일일 수익률, 누적 수익률, 승률(Win Rate), 최대 낙폭(MDD), 손익비(Profit Factor), 최근 완료 매매 내역
+        퀀트 핵심 성과 지표(KPI)
+        - 승률·손익비·누적 실현손익·실현손익 최대 낙폭: order_history(주문 접수 기록, 취소분 차감) FIFO 매칭
+          (입출금 기록이 없어 총자산 변화로는 전략 성과를 분리할 수 없으므로 실현손익 기준)
+        - 일일 수익률: balance 최근 2일 총자산 비교
         """
         if not self.pool:
-            return {
-                "daily_return_pct": 0.0,
-                "cumulative_return_pct": 0.0,
-                "win_rate_pct": 0.0,
-                "total_trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "mdd_pct": 0.0,
-                "profit_factor": 0.0,
-                "total_profit": 0.0,
-                "total_loss": 0.0,
-                "recent_closed_trades": [],
-                "equity_history": []
-            }
+            return self._empty_quant_metrics()
 
         try:
             async with self.pool.acquire() as conn:
@@ -466,132 +472,28 @@ class DatabaseManager:
                     await cursor.execute("SELECT * FROM balance ORDER BY date ASC")
                     balances = await cursor.fetchall()
 
-            # 1. FIFO 포지션 매칭 기반 실현 손익 및 승률/손익비 계산
-            closed_trades = []
-            positions_inv = {}
+            metrics = compute_trade_metrics(orders)
 
-            for r in orders:
-                code = str(r.get('code', ''))
-                name = str(r.get('name') or code)
-                side = str(r.get('side', '')).upper()
-                qty = int(r.get('qty', 0))
-                price = float(r.get('price', 0))
-                created = r.get('timestamp') or r.get('created_at') or r.get('time')
-                ts = format_kst_time_str(created)
-
-                if side == 'BUY':
-                    if code not in positions_inv:
-                        positions_inv[code] = []
-                    positions_inv[code].append({'qty': qty, 'price': price, 'name': name})
-                elif side == 'SELL':
-                    if code in positions_inv and positions_inv[code]:
-                        rem_sell = qty
-                        matched_cost = 0.0
-                        matched_qty = 0
-                        while rem_sell > 0 and positions_inv[code]:
-                            first = positions_inv[code][0]
-                            take = min(rem_sell, first['qty'])
-                            matched_cost += take * first['price']
-                            matched_qty += take
-                            first['qty'] -= take
-                            rem_sell -= take
-                            if first['qty'] <= 0:
-                                positions_inv[code].pop(0)
-
-                        if matched_qty > 0:
-                            avg_buy_p = matched_cost / matched_qty
-                            sell_val = matched_qty * price
-                            fee_tax = (matched_cost * 0.00015) + (sell_val * 0.00195)
-                            net_pnl = (sell_val - matched_cost) - fee_tax
-                            ret_pct = ((price / avg_buy_p) - 1.0) * 100.0 if avg_buy_p > 0 else 0.0
-                            closed_trades.append({
-                                'code': code,
-                                'name': name,
-                                'buy_price': round(avg_buy_p, 0),
-                                'sell_price': price,
-                                'qty': matched_qty,
-                                'pnl': round(net_pnl, 0),
-                                'return_pct': round(ret_pct, 2),
-                                'timestamp': ts
-                            })
-
-            wins = [t for t in closed_trades if t['pnl'] > 0]
-            losses = [t for t in closed_trades if t['pnl'] < 0]
-            win_rate = (len(wins) / len(closed_trades) * 100.0) if closed_trades else 0.0
-            tot_profit = sum(t['pnl'] for t in wins)
-            tot_loss = abs(sum(t['pnl'] for t in losses))
-            profit_factor = (tot_profit / tot_loss) if tot_loss > 0 else (99.0 if tot_profit > 0 else 0.0)
-
-            # 2. Balance 시계열 기반 일일/누적 수익률 및 MDD 계산
             daily_return = 0.0
-            cum_return = 0.0
-            mdd = 0.0
             equity_history = []
-
             if balances:
                 asset_series = [float(b.get('total_asset', 0)) for b in balances]
-                for b in balances:
-                    equity_history.append({
-                        'date': str(b.get('date', '')),
-                        'total_asset': float(b.get('total_asset', 0)),
-                        'deposit': float(b.get('deposit', 0)),
-                        'profit_loss': float(b.get('profit_loss', 0)),
-                        'yield': float(b.get('yield', 0))
-                    })
+                equity_history = [{
+                    'date': str(b.get('date', '')),
+                    'total_asset': float(b.get('total_asset', 0)),
+                    'deposit': float(b.get('deposit', 0)),
+                    'profit_loss': float(b.get('profit_loss', 0)),
+                    'yield': float(b.get('yield', 0))
+                } for b in balances]
+                if len(asset_series) >= 2 and asset_series[-2] > 0:
+                    daily_return = (asset_series[-1] - asset_series[-2]) / asset_series[-2] * 100.0
 
-                if len(asset_series) >= 2:
-                    prev_a = asset_series[-2]
-                    curr_a = asset_series[-1]
-                    daily_return = ((curr_a - prev_a) / prev_a * 100.0) if prev_a > 0 else 0.0
-                elif len(asset_series) == 1:
-                    daily_return = float(balances[-1].get('yield', 0.0))
-
-                first_a = asset_series[0]
-                last_a = asset_series[-1]
-                cum_return = ((last_a - first_a) / first_a * 100.0) if first_a > 0 else 0.0
-
-                # MDD 계산 (최고점 대비 최대 하락률)
-                peak = 0.0
-                max_dd = 0.0
-                for a in asset_series:
-                    if a > peak:
-                        peak = a
-                    elif peak > 0:
-                        dd = (a - peak) / peak * 100.0
-                        if dd < max_dd:
-                            max_dd = dd
-                mdd = max_dd
-
-            return {
-                "daily_return_pct": round(daily_return, 2),
-                "cumulative_return_pct": round(cum_return, 2),
-                "win_rate_pct": round(win_rate, 2),
-                "total_trades": len(closed_trades),
-                "winning_trades": len(wins),
-                "losing_trades": len(losses),
-                "mdd_pct": round(mdd, 2),
-                "profit_factor": round(profit_factor, 2),
-                "total_profit": round(tot_profit, 0),
-                "total_loss": round(tot_loss, 0),
-                "recent_closed_trades": list(reversed(closed_trades[-10:])),
-                "equity_history": equity_history[-30:]
-            }
+            metrics["daily_return_pct"] = round(daily_return, 2)
+            metrics["equity_history"] = equity_history[-30:]
+            return metrics
         except Exception as e:
             print(f"DB Quant Metrics 조회 에러: {e}")
-            return {
-                "daily_return_pct": 0.0,
-                "cumulative_return_pct": 0.0,
-                "win_rate_pct": 0.0,
-                "total_trades": 0,
-                "winning_trades": 0,
-                "losing_trades": 0,
-                "mdd_pct": 0.0,
-                "profit_factor": 0.0,
-                "total_profit": 0.0,
-                "total_loss": 0.0,
-                "recent_closed_trades": [],
-                "equity_history": []
-            }
+            return self._empty_quant_metrics()
 
     async def get_recent_logs(self, limit: int = 100):
         """최근 시스템/매매/감시 로그 조회 (최신순 정렬)"""
@@ -669,3 +571,86 @@ class DatabaseManager:
 # AsyncDatabase 별칭 지원 (main_rest_async.py 호환)
 AsyncDatabase = DatabaseManager
 
+
+def compute_trade_metrics(orders) -> dict:
+    """order_history 행(id 오름차순) → 청산 거래·승률·손익비·누적 실현손익·실현손익 최대 낙폭
+    - CANCEL_BUY/CANCEL_SELL 행은 같은 종목의 직전 BUY/SELL 접수 수량에서 차감한 뒤 FIFO 매칭
+    - 수수료·세금: 매수 0.015%, 매도 0.195%(수수료+거래세) 근사"""
+    rows = []
+    for r in orders:
+        side = str(r.get('side', '')).upper()
+        row = {
+            'code': str(r.get('code', '')),
+            'name': str(r.get('name') or r.get('code', '')),
+            'side': side,
+            'qty': int(r.get('qty', 0) or 0),
+            'price': float(r.get('price', 0) or 0),
+            'timestamp': format_kst_time_str(r.get('timestamp') or r.get('created_at') or r.get('time')),
+        }
+        if side.startswith('CANCEL_'):
+            target, remain = side[len('CANCEL_'):], row['qty']
+            for prev in reversed(rows):
+                if remain <= 0:
+                    break
+                if prev['code'] == row['code'] and prev['side'] == target and prev['qty'] > 0:
+                    take = min(remain, prev['qty'])
+                    prev['qty'] -= take
+                    remain -= take
+            continue
+        rows.append(row)
+
+    closed_trades, lots = [], {}
+    for r in rows:
+        if r['qty'] <= 0:
+            continue
+        if r['side'] == 'BUY':
+            lots.setdefault(r['code'], []).append({'qty': r['qty'], 'price': r['price']})
+        elif r['side'] == 'SELL' and lots.get(r['code']):
+            rem, cost, matched = r['qty'], 0.0, 0
+            while rem > 0 and lots[r['code']]:
+                lot = lots[r['code']][0]
+                take = min(rem, lot['qty'])
+                cost += take * lot['price']
+                matched += take
+                lot['qty'] -= take
+                rem -= take
+                if lot['qty'] <= 0:
+                    lots[r['code']].pop(0)
+            if matched > 0:
+                avg_buy = cost / matched
+                sell_val = matched * r['price']
+                net_pnl = (sell_val - cost) - (cost * 0.00015 + sell_val * 0.00195)
+                closed_trades.append({
+                    'code': r['code'], 'name': r['name'],
+                    'buy_price': round(avg_buy, 0), 'sell_price': r['price'], 'qty': matched,
+                    'pnl': round(net_pnl, 0),
+                    'return_pct': round(((r['price'] / avg_buy) - 1.0) * 100.0, 2) if avg_buy > 0 else 0.0,
+                    'timestamp': r['timestamp'],
+                })
+
+    wins = [t for t in closed_trades if t['pnl'] > 0]
+    losses = [t for t in closed_trades if t['pnl'] < 0]
+    tot_profit = sum(t['pnl'] for t in wins)
+    tot_loss = abs(sum(t['pnl'] for t in losses))
+
+    # 누적 실현손익 곡선의 고점 대비 최대 하락액(원)
+    cum, peak, mdd_amount = 0.0, 0.0, 0.0
+    for t in closed_trades:
+        cum += t['pnl']
+        peak = max(peak, cum)
+        mdd_amount = min(mdd_amount, cum - peak)
+
+    return {
+        "daily_return_pct": 0.0,
+        "cumulative_realized_pnl": round(cum, 0),
+        "realized_mdd_amount": round(mdd_amount, 0),
+        "win_rate_pct": round(len(wins) / len(closed_trades) * 100.0, 2) if closed_trades else 0.0,
+        "total_trades": len(closed_trades),
+        "winning_trades": len(wins),
+        "losing_trades": len(losses),
+        "profit_factor": round(tot_profit / tot_loss, 2) if tot_loss > 0 else (99.0 if tot_profit > 0 else 0.0),
+        "total_profit": round(tot_profit, 0),
+        "total_loss": round(tot_loss, 0),
+        "recent_closed_trades": list(reversed(closed_trades[-10:])),
+        "equity_history": [],
+    }

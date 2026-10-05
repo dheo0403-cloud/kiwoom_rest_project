@@ -88,3 +88,54 @@ def test_krx_holiday_calendar():
     assert h(datetime(2026, 12, 31)) is True   # 연말 휴장
     assert h(datetime(2027, 1, 1)) is True     # 달력에 없는 연도: 고정 휴일 폴백
     assert h(datetime(2027, 2, 9)) is False    # 폴백 한계(설날 미반영)를 명시
+
+
+async def test_account_balance_error_responses_keep_positions(monkeypatch):
+    """잔고 TR이 모두 업무 오류(HTTP 200 + return_code≠0)면 None을 반환하고, 포지션은 비워지지 않음"""
+    client = AsyncKiwoomClient(is_demo=True)
+
+    async def fake_request(api_id, url, payload, priority=None, headers_override=None, retries=3):
+        return {"return_code": 5, "return_msg": "허용된 요청 개수를 초과하였습니다"}, {}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    assert await client.get_account_balance() is None
+
+    pm = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    await pm.add_position("018880", "한온시스템", 2, 3575.0)
+    await pm.sync_positions({"return_code": 5, "return_msg": "오류", "output2": []})
+    assert "018880" in pm.positions
+
+
+async def test_account_balance_merges_only_ok_responses(monkeypatch):
+    """정상 TR이 하나라도 있으면 그 응답만 병합 (오류 TR의 return_code가 섞이지 않음)"""
+    client = AsyncKiwoomClient(is_demo=True)
+
+    async def fake_request(api_id, url, payload, priority=None, headers_override=None, retries=3):
+        if api_id == "kt00005":
+            return {"return_code": 0, "stk_cntr_remn": [{"stk_cd": "018880", "stk_nm": "한온시스템", "cur_qty": "2"}]}, {}
+        return {"return_code": 5, "return_msg": "오류"}, {}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    data = await client.get_account_balance()
+    assert data["return_code"] == 0
+    assert [h["stk_cd"] for h in data["output2"]] == ["018880"]
+
+
+def test_trade_metrics_subtract_cancelled_orders_and_realized_mdd():
+    """취소된 매수 접수분은 FIFO에서 빠지고, 누적 실현손익 곡선 낙폭을 원 단위로 산출"""
+    from database import compute_trade_metrics
+    orders = [
+        {"code": "A", "side": "BUY", "qty": 2, "price": 1000},
+        {"code": "A", "side": "BUY", "qty": 3, "price": 9999},   # 미체결 후 취소된 접수
+        {"code": "A", "side": "CANCEL_BUY", "qty": 3, "price": 0},
+        {"code": "A", "side": "SELL", "qty": 2, "price": 1100},  # 1000원 매수분과 매칭되어야 함
+        {"code": "B", "side": "BUY", "qty": 1, "price": 1000},
+        {"code": "B", "side": "SELL", "qty": 1, "price": 800},
+    ]
+    m = compute_trade_metrics(orders)
+    assert m["total_trades"] == 2
+    a, b = m["recent_closed_trades"][1], m["recent_closed_trades"][0]
+    assert a["buy_price"] == 1000 and a["pnl"] > 0
+    assert b["pnl"] < 0
+    assert m["cumulative_realized_pnl"] == a["pnl"] + b["pnl"]
+    assert m["realized_mdd_amount"] == b["pnl"]  # 고점(A 청산 후) 대비 B 손실만큼 하락

@@ -41,6 +41,16 @@ def _load_krx_holidays() -> Dict[int, set]:
 KRX_HOLIDAYS = _load_krx_holidays()
 _warned_holiday_years: set = set()
 
+async def cancel_and_record(client, db, order_no: str, code: str, name: str, side: str, qty: int, priority):
+    """주문 취소 후 성공(rt_cd 0)일 때만 order_history에 CANCEL_<side> 기록
+    - 주문은 '접수' 시점에 order_history에 남으므로, 취소된 수량을 성과(승률/PF) 계산에서 차감하기 위함"""
+    res = await client.cancel_order(order_no=order_no, code=code, qty=qty, priority=priority)
+    rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+    if res and str(rt_cd) == '0' and db and side in ("BUY", "SELL"):
+        await db.log_order(code, name, f"CANCEL_{side}", qty, 0)
+    return res
+
+
 class OrderTimeoutManager:
     """
     미체결 주문(Unfilled Orders) 실시간 추적 및 N초(기본 30초) 타임아웃 자동 취소/대체(Cancel & Replace) 안전장치
@@ -157,14 +167,14 @@ class OrderTimeoutManager:
                 # 미체결 매수 -> 취소하여 예수금 반환 및 30초 쿨다운 적용
                 self.cancelled_cooldowns[code] = time.time() + 30.0
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    await cancel_and_record(self.client, self.db, ord_no, code, name, "BUY", uncl_qty, RequestPriority.HIGH)
                     if self.db:
                         await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환 (30초 쿨다운)")
                     print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환, 30초 쿨다운)")
             elif side == "SELL":
                 # 미체결 매도 -> 지정가 취소 후 KRX 락 해제 대기 및 즉시 긴급 시장가(03) CRITICAL 전량 재발주
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    await cancel_and_record(self.client, self.db, ord_no, code, name, "SELL", uncl_qty, RequestPriority.HIGH)
                     await asyncio.sleep(0.2)  # KRX 매도가능수량 락 해제 비동기 대기
 
                 print(f"🚨 [미체결 매도 타임아웃] {name}({code}) 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주!")
@@ -1193,12 +1203,8 @@ class AsyncTradingBot:
                         if ord_no not in cancelled_order_nos:
                             print(f"🛡️ [미체결 사전 취소/Tracker] {info['name']}({clean_code}) 주문번호 {ord_no} ({info['side']} {info['unfilled_qty']}주) 취소 발송...")
                             if self.client and hasattr(self.client, 'cancel_order'):
-                                await self.client.cancel_order(
-                                    order_no=ord_no,
-                                    code=clean_code,
-                                    qty=info['unfilled_qty'],
-                                    priority=RequestPriority.CRITICAL
-                                )
+                                await cancel_and_record(self.client, self.db, ord_no, clean_code, info['name'],
+                                                        info['side'], info['unfilled_qty'], RequestPriority.CRITICAL)
                             cancelled_order_nos.add(ord_no)
                             cancelled_count += 1
                             del self.order_timeout_mgr.tracked_orders[ord_no]

@@ -545,20 +545,7 @@ async def get_quant_performance():
     """퀀트 핵심 성과 지표(KPI) 조회 (일일/누적 수익률, 승률, MDD, 손익비 등)"""
     if ctx.db and hasattr(ctx.db, 'get_quant_performance_metrics'):
         return await ctx.db.get_quant_performance_metrics()
-    return {
-        "daily_return_pct": 0.0,
-        "cumulative_return_pct": 0.0,
-        "win_rate_pct": 0.0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "mdd_pct": 0.0,
-        "profit_factor": 0.0,
-        "total_profit": 0.0,
-        "total_loss": 0.0,
-        "recent_closed_trades": [],
-        "equity_history": []
-    }
+    return DatabaseManager._empty_quant_metrics()
 
 
 @api_router.get("/quant/status")

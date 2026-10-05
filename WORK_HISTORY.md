@@ -2,6 +2,19 @@
 
 ---
 
+## 📅 [2026-10-05 12:30] [버그/지표] 잔고 스냅샷 보유주 누락(D1) · 성과 지표 실현손익 기준(D2) · 취소 주문 보정(D3)
+
+* **D1 원인(코드 확인, Pod 로그는 az 미로그인으로 미확인):** 계좌 동기화 5초 주기, 잔고 TR 7회(kt00018×3, kt00004×3, kt00005). 키움은 업무 오류도 HTTP 200 + `return_code`≠0 → `get_account_balance`가 오류 응답의 스칼라(return_code 등)를 병합해 비어 있지 않은 dict 반환 → `sync_positions`가 '보유 0건'으로 포지션 비움 → 총자산=예수금으로 `balance` 기록. 근거: 최근 40일 중 35일 total==deposit, 배포 직후(10/03·10/05)만 정상. (9월 중순 이전은 deposit에 총자산이 들어간 과거 버전 문제로 별개)
+* **D1 조치:** `async_kiwoom_client.is_tr_ok()` — return_code≠0·HTTP 오류 TR은 병합 제외, 정상 TR 0개면 None(기존 포지션 유지). `sync_positions`도 return_code≠0이면 포지션 유지(2중 방어). 과거 balance 행은 변경하지 않음.
+* **D2 조치:** 입출금 기록이 없어 총자산 변화로 전략 성과 분리 불가 → 누적 수익률(%)·MDD(%) 대신 누적 실현손익(원)·실현손익 최대 낙폭(원). 일일 수익률은 balance 기준 유지(D1 이후 정상화 기대). 가짜 "한도 −5%" 배지 제거.
+* **D3 조치:** 주문은 접수 시점에 order_history 기록 → 추적기 경로 취소 3곳(타임아웃 매수/매도, 사전 취소)에서 취소 성공(rt_cd 0) 시 `CANCEL_BUY/CANCEL_SELL` 행 기록, `compute_trade_metrics`가 직전 같은 종목·같은 방향 접수 수량에서 차감 후 FIFO. 스키마 변경 없음. 화면에 "주문 기록 기준" 표기. kt00007(API 경로) 취소는 응답의 매수/매도 구분 키를 확인 못 해 기록 안 함.
+* **수정/생성 파일:** `async_kiwoom_client.py`, `async_portfolio.py`, `main_rest_async.py`, `database.py`, `api_server.py`, `test_safety_guards.py`(3건 추가), `test_async_trading_loop.py`·`test_api_server.py`(모의 응답 필드 변경), `frontend/src/{types.ts, hooks/useWebSocket.ts, components/QuantPerformanceBento.tsx}`
+* **리뷰:** 과거 order_history에는 CANCEL 행이 없어 과거 승률·PF는 그대로(운영 데이터 사전 계산: 760회, 35.92%, PF 0.56, 누적 실현손익 −209,043원, 실현 MDD −217,103원). 잔고 TR을 5초마다 7회 호출하는 빈도 자체가 요청 한도 초과를 유발할 수 있음(미조치).
+* **검증:** `pytest -q` 80 passed(exit 0), `tsc --noEmit` exit 0. 배포·운영 실측은 아래 기록.
+* **후속:** 잔고 동기화 주기·TR 수 축소 검토, kt00007 매수/매도 구분 키 확인 후 API 경로 취소도 기록, 배포 후 며칠간 balance 행이 total≠deposit(보유 시)로 유지되는지 확인.
+
+---
+
 ## 📅 [2026-10-05 11:00] [대시보드] 중복 제거 · 고정/가짜 값 제거 · 차트·자산 추이·미체결 추가 · 차트 API 500 수정
 
 * **목적:** 운영 대시보드(`/kiwoom`)의 중복·누락 정리. 운영 화면을 Puppeteer로 캡처(1920px, 콘솔 오류 0)하고 화면 문구 605줄을 코드·API·DB와 대조.

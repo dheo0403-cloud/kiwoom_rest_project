@@ -28,12 +28,12 @@ export function useTradingWebSocket() {
   // 3. 퀀트 핵심 성과 지표(KPI) 및 시장 레짐 상태
   const [quantPerformance, setQuantPerformance] = useState<QuantPerformanceMetrics>({
     daily_return_pct: 0.0,
-    cumulative_return_pct: 0.0,
+    cumulative_realized_pnl: 0.0,
     win_rate_pct: 0.0,
     total_trades: 0,
     winning_trades: 0,
     losing_trades: 0,
-    mdd_pct: 0.0,
+    realized_mdd_amount: 0.0,
     profit_factor: 0.0,
     total_profit: 0.0,
     total_loss: 0.0,

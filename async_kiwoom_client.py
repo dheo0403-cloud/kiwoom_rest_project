@@ -105,6 +105,14 @@ class CircuitBreaker:
             return False
         return True  # HALF-OPEN
 
+def is_tr_ok(resp: Any) -> bool:
+    """키움 TR 응답 정상 여부: dict이고 HTTP 오류 표식이 없으며 return_code가 없거나 0"""
+    if not isinstance(resp, dict) or resp.get('http_status'):
+        return False
+    rc = resp.get('return_code')
+    return rc is None or str(rc).strip() in ('0', '')
+
+
 class AsyncKiwoomClient:
     """
     고도화된 비동기 키움증권 REST 클라이언트
@@ -496,9 +504,15 @@ class AsyncKiwoomClient:
                         return c
             return ""
 
+        ok_count = 0  # 정상 응답(return_code 0) TR 수 — 0이면 잔고를 알 수 없으므로 None 반환
+
         def merge_tr_response(tr_resp: Optional[Dict[str, Any]]):
-            if not isinstance(tr_resp, dict) or tr_resp.get('http_status'):
+            nonlocal ok_count
+            # 키움은 업무 오류(요청 한도 초과·점검 등)도 HTTP 200 + return_code≠0으로 응답 →
+            # 병합하면 '보유 0건'으로 오인되어 포지션이 비워지므로 제외
+            if not is_tr_ok(tr_resp):
                 return
+            ok_count += 1
 
             # 1. 요약 필드 및 스칼라 값 병합
             for k, v in tr_resp.items():
@@ -566,7 +580,7 @@ class AsyncKiwoomClient:
         elif 'output2' not in merged_data:
             merged_data['output2'] = []
 
-        return merged_data if merged_data else None
+        return merged_data if ok_count > 0 else None
 
     async def get_top_trading_value(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """거래대금 상위 종목 조회 (KRX/통합 다중 거래소 파라미터 방어 지원)"""

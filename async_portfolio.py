@@ -92,6 +92,11 @@ class AsyncPortfolioManager:
         async with self._lock:
             if not account_data:
                 return
+            # 업무 오류 응답(return_code≠0)은 '보유 0건'이 아니라 '알 수 없음' → 기존 포지션 유지
+            rc = account_data.get('return_code') if isinstance(account_data, dict) else None
+            if rc is not None and str(rc).strip() not in ('0', ''):
+                print(f"⚠️ [Portfolio sync_positions] 잔고 TR 오류 응답(return_code={rc}) → 기존 포지션 유지")
+                return
 
             # 1. 딕셔너리의 모든 리스트 키들을 검사하여 종목 리스트가 있는 키를 지능적으로 탐색
             raw_list = []
