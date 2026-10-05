@@ -6,7 +6,9 @@ Gate Info:
 - User's verbatim instruction: "진행해줘"
 """
 import asyncio
+import calendar
 import json
+import re
 import os
 import secrets
 import time
@@ -661,6 +663,18 @@ async def get_watchlist():
     }
 
 
+def _chart_time(dt_str: str, daily: bool = False):
+    """'YYYY-MM-DD HH:MM:SS' / 'YYYYMMDDHHMMSS' / 'YYYYMMDD' 모두 처리.
+    분봉은 KST 벽시계를 UTC로 간주한 초(차트가 KST 시각 그대로 표시), 일봉은 'YYYY-MM-DD'. 실패 시 None"""
+    digits = re.sub(r'\D', '', str(dt_str or ''))
+    try:
+        if daily:
+            return datetime.strptime(digits[:8], '%Y%m%d').strftime('%Y-%m-%d')
+        return calendar.timegm(datetime.strptime(digits[:12].ljust(14, '0'), '%Y%m%d%H%M%S').timetuple())
+    except ValueError:
+        return None
+
+
 @api_router.get("/chart/{code}")
 async def get_stock_chart_data(code: str, period: str = "1m"):
     """
@@ -699,14 +713,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
             df = ctx.bot.buffer.get_dataframe(clean_code, limit=60)
             if not df.empty:
                 for row in df.itertuples():
-                    dt_val = str(getattr(row, 'datetime', ''))
-                    try:
-                        t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:%S').timestamp())
-                    except Exception:
-                        try:
-                            t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:00').timestamp())
-                        except Exception:
-                            t_sec = int(time.time())
+                    t_sec = _chart_time(getattr(row, 'datetime', ''))
+                    if t_sec is None:
+                        continue  # 시각 해석 불가 봉은 제외 (현재 시각으로 채우지 않음)
                     candles.append({
                         "time": t_sec,
                         "open": float(getattr(row, 'open', 0)),
@@ -727,15 +736,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
             if db_candles:
                 candles = []
                 for c in db_candles:
-                    dt_str = str(c.get('datetime', ''))
-                    if period == 'D':
-                        t_val = dt_str[:10]
-                    else:
-                        try:
-                            t_sec = int(datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S').timestamp())
-                        except Exception:
-                            t_sec = int(time.time())
-                        t_val = t_sec
+                    t_val = _chart_time(c.get('datetime', ''), daily=(period == 'D'))
+                    if t_val is None:
+                        continue  # 시각 해석 불가 봉은 제외
                     candles.append({
                         "time": t_val,
                         "open": float(c.get('open', 0)),
@@ -792,6 +795,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
                         "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
                         "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
                     })
+
+    # 차트 라이브러리는 시간 오름차순·중복 없는 데이터만 허용 → 같은 시각은 마지막 값 사용
+    candles = sorted({c["time"]: c for c in candles}.values(), key=lambda c: c["time"])
 
     # 5. 캔들 기반 피보나치 및 가격 보정
     if candles:

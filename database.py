@@ -423,7 +423,9 @@ class DatabaseManager:
                     if period == 'D':
                         sql = "SELECT date as datetime, open, high, low, close, volume FROM daily_ohlcv WHERE code = %s ORDER BY date DESC LIMIT %s"
                     else:
-                        sql = "SELECT datetime, open, high, low, close, volume FROM minute_ohlcv WHERE code = %s ORDER BY datetime DESC LIMIT %s"
+                        # datetime 문자열이 14자리/19자 형식 혼재 → 숫자만 남겨 정렬해야 최신순이 맞음
+                        sql = ("SELECT datetime, open, high, low, close, volume FROM minute_ohlcv WHERE code = %s "
+                               "ORDER BY REPLACE(REPLACE(REPLACE(datetime, '-', ''), ' ', ''), ':', '') DESC LIMIT %s")
                     await cursor.execute(sql, (code, limit))
                     rows = await cursor.fetchall()
                     if not rows: return []

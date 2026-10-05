@@ -26,7 +26,10 @@ export const AccountSideBento: React.FC<AccountSideBentoProps> = ({ equityHistor
       width: chartRef.current.clientWidth,
       height: chartRef.current.clientHeight,
     });
-    const series = chart.addLineSeries({ color: '#60A5FA', lineWidth: 2, priceLineVisible: false });
+    const series = chart.addLineSeries({
+      color: '#60A5FA', lineWidth: 2, priceLineVisible: false,
+      priceFormat: { type: 'price', precision: 0, minMove: 1 },  // 원 단위 정수 표시
+    });
     // 같은 날짜가 중복되면 차트가 오류를 내므로 날짜별 마지막 값만 사용
     const byDate = new Map<string, number>();
     (equityHistory || []).forEach(p => { if (p.date) byDate.set(p.date.slice(0, 10), p.total_asset); });
