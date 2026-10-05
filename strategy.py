@@ -23,6 +23,10 @@ from database import get_kst_now
 
 MIN_STOCK_PRICE = 1000  # 동전주 기준가 (미만이면 매수 대상 제외) — 관심종목 선정에서도 사용
 
+# 매수 필터 이름 (백테스트 필터 제거 실험용 disabled_filters 키)
+BUY_FILTERS = ("time", "indicator_missing", "rsi", "ma20", "adx", "dmi", "vwap", "poc",
+               "volume_power", "orderbook", "trade_value", "volume_surge", "squeeze")
+
 
 class AdaptiveVolatilityBreakoutStrategy:
     """
@@ -41,7 +45,8 @@ class AdaptiveVolatilityBreakoutStrategy:
                  trailing_stop_drop_rate: float = -0.02,
                  trailing_activation_pct: float = 0.015,
                  use_trailing_stop_only: bool = True,
-                 breakeven_buffer_pct: float = 0.0025):
+                 breakeven_buffer_pct: float = 0.0025,
+                 disabled_filters=()):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
@@ -53,6 +58,10 @@ class AdaptiveVolatilityBreakoutStrategy:
         self.trailing_activation_pct = trailing_activation_pct  # +1.5% 이상 상승 시 트레일링 가동
         self.use_trailing_stop_only = use_trailing_stop_only    # 데이트레이딩 모드 (고정 분할익절 배제하고 추세 추종)
         self.breakeven_buffer_pct = breakeven_buffer_pct        # 본절선 = 매수가 × (1 + 보전폭), 기본 0.25%
+        unknown = set(disabled_filters) - set(BUY_FILTERS)
+        if unknown:
+            raise ValueError(f"알 수 없는 필터: {sorted(unknown)}")
+        self.disabled_filters = set(disabled_filters)            # 실험용으로 끈 매수 필터 (기본: 모두 사용)
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -74,9 +83,10 @@ class AdaptiveVolatilityBreakoutStrategy:
         now = ind.get('now') or get_kst_now()  # 백테스트는 봉 시각을 주입
         is_test = ind.get('is_test', False)
         skip_time_filter = ind.get('skip_time_filter', False) or is_test
+        on = lambda name: name not in self.disabled_filters  # 실험에서 끈 필터는 건너뜀
 
         # [필터 1] 거래 시간 필터 (09:15 이전 장초반 휩소 차단 & 14:30 이후 신규 진입 차단)
-        if not skip_time_filter:
+        if not skip_time_filter and on("time"):
             if now.hour < 9 or (now.hour == 9 and now.minute < 15):
                 return False, "장초반_노이즈_안정화대기(09:15이전)"
             if now.hour > 14 or (now.hour == 14 and now.minute >= 30):
@@ -109,42 +119,42 @@ class AdaptiveVolatilityBreakoutStrategy:
         minus_di = float(ind.get('minus_di', 0))
 
         # [필터 2-1] 핵심 지표(ADX/VWAP) 미산출 시 진입 보류 (데이터 부족 상태에서 필터가 통째로 우회되는 것을 방지)
-        if (adx <= 0 or vwap <= 0) and not skip_time_filter:
+        if (adx <= 0 or vwap <= 0) and not skip_time_filter and on("indicator_missing"):
             return False, "지표_미산출_진입보류(ADX/VWAP)"
 
         # [필터 3] RSI(14) 극단적 초과열 구간(80+) 추격 매수 차단 (상투 잡기 방지)
-        if rsi14 >= 80.0 and not is_test:
+        if rsi14 >= 80.0 and not is_test and on("rsi"):
             return False, f"RSI_초과열구간_추격매수차단({rsi14:.1f}>=80)"
 
         # [필터 4] 📈 20일선(MA20) 역배열 하락 추세 차단 (상승 추세 종목만 진입)
-        if ma20 > 0 and current_price < (ma20 * 0.99) and not is_test:
+        if ma20 > 0 and current_price < (ma20 * 0.99) and not is_test and on("ma20"):
             return False, f"MA20_하향역배열(현재가:{int(current_price):,}원<MA20:{int(ma20):,}원)"
 
         # [알파 필터 1] 📊 ADX 추세 강도 필터 (무추세 횡보장 톱니파동 Chop 기각 - 바이패스 없이 필수 검증)
         if adx > 0 and not is_test:
-            if adx < 18.0:
+            if adx < 18.0 and on("adx"):
                 return False, f"ADX_무추세_횡보장기각({adx:.1f}<18.0)"
-            if plus_di > 0 and minus_di > 0 and plus_di < minus_di:
+            if plus_di > 0 and minus_di > 0 and plus_di < minus_di and on("dmi"):
                 return False, f"DMI_하락추세_매수기각(+DI:{plus_di:.1f}<-DI:{minus_di:.1f})"
 
         # [알파 필터 2] 📊 VWAP 스마트 지지 & 건전 이격도 검증 (+0.0% ~ +3.0% - 바이패스 없이 필수 검증)
-        if vwap > 0 and not is_test:
+        if vwap > 0 and not is_test and on("vwap"):
             if current_price < vwap * 0.998:
                 return False, f"VWAP_하회_가짜돌파기각(현재가:{int(current_price):,}원<VWAP:{int(vwap):,}원)"
             if current_price > vwap * 1.030:
                 return False, f"VWAP_단기이격과다_추격차단(현재가:{int(current_price):,}원>VWAP+3.0%)"
 
         # [알파 필터 3] 📊 Volume Profile 매물대 저항 돌파 필터 (핵심 매물대 POC 저항 기각 - 바이패스 없이 필수 검증)
-        if poc_price > 0 and not is_test:
+        if poc_price > 0 and not is_test and on("poc"):
             if current_price < poc_price * 0.998:
                 return False, f"매물대_저항선_직전_돌파대기(현재가:{int(current_price):,}원<POC:{int(poc_price):,}원)"
 
         # [알파 필터 4] ⚡ 체결강도(Volume Power) 검증 (110% 이상 우수 매수세 유입 - 바이패스 없이 필수 검증)
-        if vol_power > 0 and vol_power < 110.0 and not is_test:
+        if vol_power > 0 and vol_power < 110.0 and not is_test and on("volume_power"):
             return False, f"체결강도부족({vol_power:.1f}%<110%)"
 
         # [알파 필터 5] 🎯 호가 불균형(Orderbook Imbalance) 검증
-        if bid_ask_ratio > 0 and bid_ask_ratio < 0.6 and not is_test:
+        if bid_ask_ratio > 0 and bid_ask_ratio < 0.6 and not is_test and on("orderbook"):
             return False, f"호가잔량비대칭불량(매도/매수비율:{bid_ask_ratio:.2f}<0.6)"
 
         # [핵심 타점 조건 1] ATR 동적 변동성 돌파 기준가 산출
@@ -167,11 +177,11 @@ class AdaptiveVolatilityBreakoutStrategy:
         if not is_test:
             # 1) 당일 누적 거래대금 10억 이상 검증
             accumulated_amount = current_price * acml_vol
-            if acml_vol > 0 and accumulated_amount < 1_000_000_000 and not skip_time_filter:
+            if acml_vol > 0 and accumulated_amount < 1_000_000_000 and not skip_time_filter and on("trade_value"):
                 return False, f"당일거래대금부족({int(accumulated_amount / 100_000_000):,}억<10억)"
 
             # 2) 전일 20일 평균 거래량 대비 당일 환산 거래량 1.2배 이상 급증 검증
-            if avg_vol > 0 and acml_vol > 0 and not skip_time_filter:
+            if avg_vol > 0 and acml_vol > 0 and not skip_time_filter and on("volume_surge"):
                 market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
                 market_close = now.replace(hour=15, minute=30, second=0, microsecond=0)
                 total_seconds = (market_close - market_open).total_seconds()
@@ -185,7 +195,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         # [알파 필터 6] 볼린저 밴드 스퀴즈 모멘텀 상방 발산 검증
         squeeze_off = ind.get('squeeze_off', True)
         squeeze_momentum = float(ind.get('squeeze_momentum', 0.0))
-        if not squeeze_off and squeeze_momentum < 0 and not is_test:
+        if not squeeze_off and squeeze_momentum < 0 and not is_test and on("squeeze"):
             return False, "스퀴즈모멘텀_음수_에너지수축중(진입보류)"
 
         # 피보나치 눌림목 반등 타점 성공

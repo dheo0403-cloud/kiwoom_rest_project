@@ -134,3 +134,27 @@ class TestHighFidelityBacktester(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestFilterAblation(unittest.TestCase):
+    def test_disabled_filter_changes_only_that_rule(self):
+        """disabled_filters로 끈 필터만 건너뛰고, 알 수 없는 이름은 거부"""
+        import asyncio
+        from datetime import datetime
+        from strategy import AdaptiveVolatilityBreakoutStrategy
+        ind = {'now': datetime(2026, 9, 1, 10, 0), 'adx': 25.0, 'vwap': 10000.0, 'rsi14': 85.0, 'open': 9900.0, 'atr14': 50.0}
+        base = asyncio.run(AdaptiveVolatilityBreakoutStrategy().check_buy_signal("A", 10000.0, 0, dict(ind)))
+        no_rsi = asyncio.run(AdaptiveVolatilityBreakoutStrategy(disabled_filters={"rsi"}).check_buy_signal("A", 10000.0, 0, dict(ind)))
+        self.assertTrue(base[1].startswith("RSI_"))
+        self.assertFalse(no_rsi[1].startswith("RSI_"))
+        with self.assertRaises(ValueError):
+            AdaptiveVolatilityBreakoutStrategy(disabled_filters={"nope"})
+
+    def test_wfo_reuses_prepared_data(self):
+        """prepare() 결과를 넘기면 df 없이도 같은 결과"""
+        df = make_minute_bars(n_days=3, bars_per_day=30)
+        bt = HighFidelityBacktester(atr_source="daily")
+        data = bt.prepare(df)
+        a = bt.run_walk_forward_optimization(df, k_values=[0.5], train_days=1, test_days=1)
+        b = bt.run_walk_forward_optimization(None, k_values=[0.5], train_days=1, test_days=1, data=data)
+        self.assertEqual(a['out_of_sample_metrics'], b['out_of_sample_metrics'])

@@ -275,14 +275,15 @@ class HighFidelityBacktester:
                                       k_values: List[float] = [0.4, 0.5, 0.6, 0.7],
                                       in_sample_ratio: float = 0.7,
                                       train_days: Optional[int] = None,
-                                      test_days: Optional[int] = None) -> Dict[str, Any]:
+                                      test_days: Optional[int] = None,
+                                      data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """
         일 단위 Walk-Forward Optimization (WFO)
         - train_days/test_days 지정 시: train_days일로 최적 k 도출 → 다음 test_days일 OOS 검증, test_days씩 롤링
         - 미지정 시: 일 경계 기준 in_sample_ratio 1회 분할
         - 각 구간 앞의 데이터는 지표·일봉 기준값 웜업으로만 쓰이고 거래는 구간 안에서만 발생
         """
-        data = self.prepare(df)
+        data = data or self.prepare(df)  # 같은 데이터로 여러 변형을 돌릴 때 prepare() 결과 재사용
         starts = data['day_starts']
         n_days = len(starts) - 1
         if train_days is None:
