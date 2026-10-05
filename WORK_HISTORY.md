@@ -13,7 +13,8 @@
   - `useWebSocket` 봇 상태가 running/circuit만 비교해 다른 필드 변경이 반영 안 되던 부분 → 전체 비교.
 * **수정/생성 파일:** `api_server.py`, `main_rest_async.py`, `frontend/src/App.tsx`, `frontend/src/types.ts`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/{KpiMetricsRow,ActivePositionsBento,LogViewer,QuantPerformanceBento}.tsx`, `frontend/src/components/AccountSideBento.tsx`(신규)
 * **리뷰:** 총자산 추이는 `balance` 원본 그대로라 현재는 보유주가 빠진 날(예수금만)과 정상일이 번갈아 톱니 모양으로 보임(D항목, 미조치). 호가 잔량은 ka10004 응답 해석이 안 돼 "데이터 없음"으로 표시될 것(해석 로직 수정은 별도). 로컬 api_server는 실전 키로 잔고 동기화·DB 기록·스케줄러가 돌아 미실행 → 운영 배포 후 실측.
-* **검증:** `tsc --noEmit` exit 0, `npm run build` exit 0, `pytest -q` 77 passed. 운영 Puppeteer 실측은 아래 배포 후 항목 참조.
+* **추가 수정(배포 후 실측에서 발견):** 차트가 오래된 1봉만 표시 — `minute_ohlcv` datetime 형식 혼재로 `ORDER BY datetime DESC`가 7/31 데이터를 최신으로 반환(조회로 확인: 기존 20260731153000 / 수정 2026-10-01 13:24:00), 14자리 시각 해석 실패 시 `time.time()`으로 채워 봉이 겹침 → `database.get_candles_by_code` 숫자 정렬, `api_server._chart_time()`으로 두 형식 해석·실패 봉 제외·시간 오름차순 중복 제거. 자산 추이 축 정수 표시. 커밋 850040e.
+* **검증:** `tsc --noEmit` exit 0, `npm run build` exit 0, `pytest -q` 77 passed. 배포 `gh run watch` 37246202383·37246690220 success. 운영 API: `/orders/pending` 200, `/status.strategy_params` 실제값, `/chart/018880` 500→200, 차트 3종목 각 60봉(10-01 12:25~13:24). 운영 Puppeteer(1920px): 차트·자산 추이 카드 높이 420/420·같은 행, 캔버스 렌더링, 리스크 카드 "하드 스탑: -3% / 1.5 ATR | 트레일링: 고점 -2% / 2 ATR | 일일 손실한도 -2.5%", 128.5%·"33% 익절"·로그 헤더 자산 표시 없음, 보유 종목 클릭 시 차트 종목 전환, 콘솔 오류 0.
 * **후속(D):** `balance`에 보유주 누락 스냅샷이 저장되는 원인 수정, 누적 수익률·MDD 기준(입출금·모의 구간 제외), 승률/PF를 접수가 아닌 체결 기준으로.
 
 ---
