@@ -15,11 +15,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
-from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
+from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
 from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
-from strategy import AdaptiveVolatilityBreakoutStrategy
+from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
@@ -600,9 +600,7 @@ class AsyncTradingBot:
             try:
                 uncl_data = await self.client.get_unexecuted_orders(priority=RequestPriority.LOW)
                 if uncl_data:
-                    u_list = uncl_data.get('output', uncl_data.get('output1', []))
-                    if isinstance(u_list, list):
-                        unclosed_cnt = max(unclosed_cnt, len(u_list))
+                    unclosed_cnt = max(unclosed_cnt, len(parse_unexecuted_orders(uncl_data)))
             except Exception:
                 pass
 
@@ -802,7 +800,8 @@ class AsyncTradingBot:
             'insufficient_candles': 0,
             'zero_price_diff': 0,
             'analysis_error': 0,
-            'price_over_cash': 0  # 예수금 초과 고가 종목 탈락
+            'price_over_cash': 0,  # 예수금 초과 고가 종목 탈락
+            'penny_stock': 0       # 동전주(전략 매수 대상 아님) 탈락
         }
 
         # D+2 주문가능 금액 기반 고가 종목 필터링에 사용할 현재 예수금 캐시
@@ -909,6 +908,11 @@ class AsyncTradingBot:
                 )
                 open_price = abs(float(str(open_price_raw).replace(',', '').strip())) if open_price_raw else cur_price
 
+                # 동전주는 전략이 항상 매수 기각하므로 감시 슬롯을 차지하지 않게 제외
+                if 0 < cur_price < MIN_STOCK_PRICE:
+                    drop_reasons['penny_stock'] += 1
+                    continue
+
                 # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist에서 즉시 제외
                 if available_cash > 0 and cur_price > available_cash:
                     drop_reasons['price_over_cash'] += 1
@@ -935,7 +939,7 @@ class AsyncTradingBot:
 
         # 단계별 필터링 디버그 리포트 출력
         total_dropped = sum(drop_reasons.values())
-        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']})")
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']}, 동전주 {drop_reasons['penny_stock']})")
         if drop_reasons['price_over_cash'] > 0:
             print(f"  💰 [Watchlist 필터] 예수금({int(available_cash):,}원) 초과로 {drop_reasons['price_over_cash']}개 고가 종목이 감시 대상에서 제외되었습니다.")
 
@@ -1155,24 +1159,9 @@ class AsyncTradingBot:
             if not uncl_data:
                 return
 
-            items = []
-            if isinstance(uncl_data, dict):
-                items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
-            elif isinstance(uncl_data, list):
-                items = uncl_data
-
-            if not items:
-                return
-
-            for order in items:
-                if not isinstance(order, dict):
-                    continue
-
-                order_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
-                code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').strip()
-                uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
-                side = str(order.get('side') or order.get('sll_buy_tp') or 'BUY').upper()
-                side_str = "SELL" if ("매도" in side or "SELL" in side or "01" in side) else "BUY"
+            for order in parse_unexecuted_orders(uncl_data):
+                order_no, code, uncl_qty = order['ord_no'], order['code'], order['qty']
+                side_str = order['side'] or "BUY"
 
                 if order_no and uncl_qty > 0:
                     if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and order_no not in self.order_timeout_mgr.tracked_orders:
@@ -1213,31 +1202,15 @@ class AsyncTradingBot:
         if self.client and hasattr(self.client, 'get_unexecuted_orders') and hasattr(self.client, 'cancel_order'):
             try:
                 uncl_data = await self.client.get_unexecuted_orders(code=clean_code, priority=RequestPriority.CRITICAL)
-                items = []
-                if isinstance(uncl_data, dict):
-                    items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
-                elif isinstance(uncl_data, list):
-                    items = uncl_data
-
-                if items:
-                    for order in items:
-                        if not isinstance(order, dict):
-                            continue
-                        ord_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
-                        ord_code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').replace('A', '').strip()
-                        uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
-
-                        if (not ord_code or ord_code == clean_code) and ord_no and uncl_qty > 0:
-                            if ord_no not in cancelled_order_nos:
-                                print(f"🛡️ [미체결 사전 취소/API] {clean_code} 주문번호 {ord_no} ({uncl_qty}주) kt10003 취소 발송...")
-                                await self.client.cancel_order(
-                                    order_no=ord_no,
-                                    code=clean_code,
-                                    qty=uncl_qty,
-                                    priority=RequestPriority.CRITICAL
-                                )
-                                cancelled_order_nos.add(ord_no)
-                                cancelled_count += 1
+                for order in parse_unexecuted_orders(uncl_data):
+                    ord_no, ord_code, uncl_qty = order['ord_no'], order['code'], order['qty']
+                    if (not ord_code or ord_code == clean_code) and ord_no not in cancelled_order_nos:
+                        print(f"🛡️ [미체결 사전 취소/API] {clean_code} 주문번호 {ord_no} ({order['side'] or '구분불명'} {uncl_qty}주) kt10003 취소 발송...")
+                        # 매수/매도 구분이 확인된 경우에만 CANCEL 기록 (cancel_and_record는 side가 BUY/SELL일 때만 기록)
+                        await cancel_and_record(self.client, self.db, ord_no, clean_code, order['name'],
+                                                order['side'] or "", uncl_qty, RequestPriority.CRITICAL)
+                        cancelled_order_nos.add(ord_no)
+                        cancelled_count += 1
             except Exception as e:
                 print(f"⚠️ [미체결 사전 취소 예외] {clean_code}: {e}")
 

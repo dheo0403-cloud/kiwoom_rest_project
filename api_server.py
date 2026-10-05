@@ -337,11 +337,22 @@ async def portfolio_broadcast_loop():
             print(f"WS Broadcast Error: {e}")
         await asyncio.sleep(1.0)
 
+def _account_sync_interval() -> float:
+    """장중(평일·휴장일 아님·09:00~15:30) ACCOUNT_SYNC_MARKET_SEC(기본 30초), 그 외 ACCOUNT_SYNC_IDLE_SEC(기본 300초)
+    - 동기화 1회에 잔고·예수금 TR이 최대 11회 호출되므로 5초 고정 주기는 요청 한도 초과를 유발
+    - 주문·청산 직후 동기화는 각 경로에서 즉시 호출되므로 주기를 늘려도 반영 지연 없음"""
+    now = get_kst_now()
+    in_session = (now.weekday() < 5 and not AsyncTradingBot.is_korean_market_holiday(now)
+                  and (9, 0) <= (now.hour, now.minute) <= (15, 30))
+    key, default = ("ACCOUNT_SYNC_MARKET_SEC", "30") if in_session else ("ACCOUNT_SYNC_IDLE_SEC", "300")
+    return float(os.getenv(key, default))
+
+
 async def account_sync_background_loop():
-    """5초 주기로 키움 OpenAPI 4대 TR을 스캔하여 MTS 앱의 5대 보유 종목을 실시간 동기화"""
+    """장중/장외 주기로 키움 계좌 잔고·보유 종목 동기화"""
     while True:
         try:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(_account_sync_interval())
             if ctx.bot:
                 await ctx.bot._sync_account_balance()
         except asyncio.CancelledError:
@@ -373,6 +384,12 @@ async def lifespan(app: FastAPI):
                 ctx.portfolio.initial_capital = float(db_bal.get('total_asset', 10_000_000))
                 ctx.portfolio.total_asset = float(db_bal.get('total_asset', 10_000_000))
                 ctx.portfolio.current_capital = float(db_bal.get('deposit', 10_000_000))
+
+            # 재시작해도 켈리 비중이 기본값(1/N)으로 돌아가지 않도록 청산 수익률 이력 복원
+            if hasattr(ctx.db, 'get_recent_trade_returns'):
+                restored_returns = await ctx.db.get_recent_trade_returns(limit=ctx.portfolio.trade_returns.maxlen)
+                ctx.portfolio.trade_returns.extend(restored_returns)
+                print(f"✅ [API Server] 켈리 계산용 청산 수익률 {len(restored_returns)}건 복원")
 
             if hasattr(ctx.db, 'get_portfolio_positions'):
                 db_pos = await ctx.db.get_portfolio_positions()
@@ -758,7 +775,7 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
                         "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
                         "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
                         "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
-                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                        "volume": abs(float(str(item.get('trde_qty') or item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
                     })
         else:
             minute_res, _ = await ctx.client.get_minute_chart(clean_code, base_dt=today_str, priority=RequestPriority.LOW)
@@ -780,7 +797,7 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
                         "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
                         "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
                         "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
-                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                        "volume": abs(float(str(item.get('trde_qty') or item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
                     })
 
     # 차트 라이브러리는 시간 오름차순·중복 없는 데이터만 허용 → 같은 시각은 마지막 값 사용

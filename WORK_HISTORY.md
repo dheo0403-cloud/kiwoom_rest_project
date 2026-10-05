@@ -2,6 +2,36 @@
 
 ---
 
+## 📅 [2026-10-05 14:30] [일괄] 잔고 동기화 주기 · 켈리 이력 복원 · 키움 파서 · 동전주 제외 · API 토큰 · CI 테스트 · 전략 실험
+
+* **내용:**
+  1. 잔고 동기화: 5초 고정 → 장중 30초/장외 300초(`ACCOUNT_SYNC_MARKET_SEC`/`ACCOUNT_SYNC_IDLE_SEC`). 1회 동기화에 잔고·예수금 TR 최대 11회라 요청 한도 초과 유발 가능. 주문·청산 직후 즉시 동기화는 유지.
+  2. 켈리 이력 복원: 기동 시 `get_recent_trade_returns()`(order_history, 취소 차감 FIFO) 최근 50건 → `trade_returns`. 재시작 후 기본 비중(1/N) 회귀 방지.
+  3. 차트 API 거래량 키에 `trde_qty` 추가(2곳).
+  4. 관심종목 선정에서 전략 기준(`strategy.MIN_STOCK_PRICE`=1,000원) 미만 제외(`drop_reasons['penny_stock']`).
+  5. 키움 파서(문서: AlgoLab ka10004/ka10075 정리): 호가 총잔량 `tot_buy_req/tot_sel_req`, 호가 부호 절댓값(스프레드 551,500 원인). 미체결 `ka10075` 요청을 문서대로(`all_stk_tp/trde_tp/stex_tp`), `parse_unexecuted_orders()`(oso·oso_qty·io_tp_nm)로 3곳 통일, kt00007 업무 오류·0건이면 ka10075 폴백. API 경로 사전 취소도 구분 확인 시 CANCEL 기록. 체결강도는 필드 미확인으로 제외.
+  8. CI: 빌드 전 `pytest -q`(테스트 의존성 pytest-asyncio 1.4.0, httpx 0.28.1), 실패 시 배포 중단.
+  9. 프론트 POST 5곳 → `postApi()`: `X-API-Token` 헤더, 401이면 토큰 입력받아 브라우저 저장 후 재시도(서버 `API_AUTH_TOKEN` 미설정이면 영향 없음).
+  10. 미사용 `LiveTerminalBento.tsx` 삭제.
+  11. KRX 2026 휴장일: KRX 공지 원문은 못 찾음, 증권사(토스증권)·언론 기준 17일이 현재 파일과 일치 → 변경 없음.
+  7. 실험(백테스트만): `breakeven_buffer_pct` 파라미터화(기본 0.25% 동일), CLI `--set key=value`.
+* **수정/생성/삭제 파일:** `api_server.py`, `main_rest_async.py`, `database.py`, `strategy.py`, `async_kiwoom_client.py`, `indicators.py`, `backtest.py`, `test_safety_guards.py`(파서 2건), `.github/workflows/deploy.yml`, `frontend/src/{utils/apiConfig.ts, App.tsx, components/ParamsModal.tsx, components/StrategyControlsBento.tsx, components/ActivePositionsBento.tsx}`, `frontend/src/components/LiveTerminalBento.tsx`(삭제)
+* **실험 결과(daily ATR, 5종목 롤링 WFO, 병렬 1,660초):**
+
+  | 종목 | 기준 | E1 본절 0.5% | E2 분할익절 | E3 E1+E2 |
+  |---|---|---|---|---|
+  | 005930 | −2.26% PF0.31 | −2.69% PF0.21 | 동일 | E1과 동일 |
+  | 000660 | −2.20% PF0.59 | −1.94% PF0.62 | 동일 | E1과 동일 |
+  | 009150 | −4.54% PF0.15 | −4.13% PF0.19 | 동일 | E1과 동일 |
+  | 402340 | −1.17% PF0.61 | −2.40% PF0.38 | 동일 | E1과 동일 |
+  | 011070 | −0.68% PF0.64 | −0.57% PF0.67 | 동일 | E1과 동일 |
+
+  평균 수익: 기준 −2.17%, E1 −2.35%. E2가 기준과 동일한 이유: 일봉 ATR 기준 R1(1.5 ATR≈4~5%)에 닿기 전 트레일링(고점 −2%)이 먼저 청산 → 분할익절 미발동. 결론: 세 안 모두 개선 없음, PF>1 종목 0.
+* **리뷰:** 미체결·호가 파서는 문서 기준이며 실제 응답 검증은 장중에 필요. 동기화 주기를 늘려 장중 외부(MTS) 거래 반영이 최대 30초 늦어짐. 토큰은 브라우저 localStorage 저장(공용 PC 주의).
+* **검증:** `pytest -q` 82 passed(저장소), `.env` 없는 사본에서도 82 passed(CI 조건 모사), `tsc --noEmit` exit 0, `npm run build` exit 0. 배포·운영 실측은 아래.
+
+---
+
 ## 📅 [2026-10-05 12:30] [버그/지표] 잔고 스냅샷 보유주 누락(D1) · 성과 지표 실현손익 기준(D2) · 취소 주문 보정(D3)
 
 * **D1 원인(코드 확인, Pod 로그는 az 미로그인으로 미확인):** 계좌 동기화 5초 주기, 잔고 TR 7회(kt00018×3, kt00004×3, kt00005). 키움은 업무 오류도 HTTP 200 + `return_code`≠0 → `get_account_balance`가 오류 응답의 스칼라(return_code 등)를 병합해 비어 있지 않은 dict 반환 → `sync_positions`가 '보유 0건'으로 포지션 비움 → 총자산=예수금으로 `balance` 기록. 근거: 최근 40일 중 35일 total==deposit, 배포 직후(10/03·10/05)만 정상. (9월 중순 이전은 deposit에 총자산이 들어간 과거 버전 문제로 별개)

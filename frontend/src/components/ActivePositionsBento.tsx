@@ -1,7 +1,7 @@
 import React, { useState, memo, useCallback } from 'react';
 import { Package, TrendingUp, TrendingDown, Layers, ArrowUpRight, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { Position, StrategyParams } from '../types';
-import { getApiUrl } from '../utils/apiConfig';
+import { postApi } from '../utils/apiConfig';
 
 interface PositionCardItemProps {
   pos: Position;
@@ -167,11 +167,7 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
     }
     setLoadingCode(code);
     try {
-      const res = await fetch(getApiUrl('/order/manual'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, side, qty, price: 0 })
-      });
+      const res = await postApi('/order/manual', { code, side, qty, price: 0 });
       if (res.ok) {
         alert(`✅ ${code} ${qty}주 시장가 매도 주문이 접수되었습니다.`);
         onRefresh();

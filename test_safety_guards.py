@@ -139,3 +139,29 @@ def test_trade_metrics_subtract_cancelled_orders_and_realized_mdd():
     assert b["pnl"] < 0
     assert m["cumulative_realized_pnl"] == a["pnl"] + b["pnl"]
     assert m["realized_mdd_amount"] == b["pnl"]  # 고점(A 청산 후) 대비 B 손실만큼 하락
+
+
+def test_parse_unexecuted_orders_ka10075_schema():
+    """ka10075 응답(oso 목록, oso_qty, io_tp_nm '+매수'/'-매도') 파싱, 구분 불명은 None"""
+    from async_kiwoom_client import parse_unexecuted_orders
+    data = {"return_code": 0, "oso": [
+        {"ord_no": "0001234", "stk_cd": "005930", "stk_nm": "삼성전자", "ord_qty": "10", "oso_qty": "7", "io_tp_nm": "+매수"},
+        {"ord_no": "0001235", "stk_cd": "A000660", "oso_qty": "2", "io_tp_nm": "-매도"},
+        {"ord_no": "0001236", "stk_cd": "035420", "oso_qty": "1"},
+        {"ord_no": "0001237", "stk_cd": "035720", "oso_qty": "0", "io_tp_nm": "+매수"},
+    ]}
+    assert parse_unexecuted_orders(data) == [
+        {"ord_no": "0001234", "code": "005930", "name": "삼성전자", "side": "BUY", "qty": 7},
+        {"ord_no": "0001235", "code": "000660", "name": "000660", "side": "SELL", "qty": 2},
+        {"ord_no": "0001236", "code": "035420", "name": "035420", "side": None, "qty": 1},
+    ]
+
+
+def test_orderbook_imbalance_ka10004_schema():
+    """ka10004 총잔량 키(tot_buy_req/tot_sel_req)와 부호 붙은 호가 처리"""
+    from indicators import TechnicalIndicators
+    ob = {"return_code": 0, "tot_buy_req": "300", "tot_sel_req": "100",
+          "sel_fpr_bid": "+275500", "buy_fpr_bid": "-275000"}
+    r = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+    assert (r["total_bid_qty"], r["total_ask_qty"], r["bid_ask_spread"]) == (300.0, 100.0, 500.0)
+    assert r["imbalance_ratio"] == 0.5

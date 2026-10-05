@@ -384,12 +384,20 @@ if __name__ == "__main__":
     parser.add_argument("--test-days", type=int, default=5)
     parser.add_argument("--k-values", type=float, nargs="+", default=[0.4, 0.5, 0.6, 0.7])
     parser.add_argument("--atr-source", choices=["minute", "daily"], default="minute")
+    parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
+                        help="전략 파라미터 덮어쓰기 (예: breakeven_buffer_pct=0.005, use_trailing_stop_only=false)")
     args = parser.parse_args()
 
     bars_df = load_minute_bars_from_db(args.code)
     print(f"[기간] {bars_df['datetime'].min()} ~ {bars_df['datetime'].max()}, 거래일 {bars_df['datetime'].dt.date.nunique()}일")
     bt = HighFidelityBacktester(atr_source=args.atr_source)
-    print(f"[설정] atr_source={args.atr_source}, train {args.train_days}일 / test {args.test_days}일, k={args.k_values}")
+    for kv in args.set:
+        key, _, raw = kv.partition('=')
+        if not hasattr(bt.strategy, key):
+            parser.error(f'알 수 없는 전략 파라미터: {key}')
+        cur = getattr(bt.strategy, key)
+        setattr(bt.strategy, key, raw.lower() in ('1', 'true', 'yes') if isinstance(cur, bool) else type(cur)(raw))
+    print(f"[설정] atr_source={args.atr_source}, train {args.train_days}일 / test {args.test_days}일, k={args.k_values}, set={args.set}")
     res = bt.run_walk_forward_optimization(bars_df, k_values=args.k_values,
                                            train_days=args.train_days, test_days=args.test_days)
     print(f"{'train':^25} {'test':^25} {'best_k':>6} {'IS샤프':>7} {'OOS수익%':>8} {'OOS거래':>6} {'OOS승률%':>7}")

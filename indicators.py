@@ -549,8 +549,9 @@ class TechnicalIndicators:
                 pass
 
         # 총 매수/매도 잔량 필드가 직접 제공되는 경우 우선 반영
-        tot_b = out.get('tot_buy_qty') or out.get('total_bid_qty') or out.get('tot_bid_rsqn')
-        tot_a = out.get('tot_sel_qty') or out.get('total_ask_qty') or out.get('tot_ask_rsqn')
+        # ka10004 총잔량 키는 tot_buy_req/tot_sel_req (그 외는 다른 스키마 호환)
+        tot_b = out.get('tot_buy_req') or out.get('tot_buy_qty') or out.get('total_bid_qty') or out.get('tot_bid_rsqn')
+        tot_a = out.get('tot_sel_req') or out.get('tot_sel_qty') or out.get('total_ask_qty') or out.get('tot_ask_rsqn')
         if tot_b and tot_a:
             try:
                 total_bid_qty = max(total_bid_qty, abs(float(str(tot_b).replace(',', '').strip() or 0)))
@@ -564,7 +565,8 @@ class TechnicalIndicators:
         ask1 = out.get('sel_fpr_bid') or out.get('ask_price1') or 0
         bid1 = out.get('buy_fpr_bid') or out.get('bid_price1') or 0
         try:
-            spread = max(0.0, float(str(ask1).replace(',', '').strip() or 0) - float(str(bid1).replace(',', '').strip() or 0))
+            # 키움 호가 값은 '+275500'/'-275000'처럼 부호가 붙어 오므로 절댓값으로 비교
+            spread = max(0.0, abs(float(str(ask1).replace(',', '').strip() or 0)) - abs(float(str(bid1).replace(',', '').strip() or 0)))
         except (ValueError, TypeError):
             spread = 0.0
 

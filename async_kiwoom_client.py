@@ -113,6 +113,32 @@ def is_tr_ok(resp: Any) -> bool:
     return rc is None or str(rc).strip() in ('0', '')
 
 
+def parse_unexecuted_orders(data: Any) -> List[Dict[str, Any]]:
+    """미체결 응답(ka10075 'oso' 목록 / kt00007 등) → [{ord_no, code, name, side('BUY'|'SELL'|None), qty}]
+    - 수량: oso_qty(ka10075 미체결수량) 우선, side: io_tp_nm('+매수'/'-매도') 등에서 판별, 판별 불가면 None"""
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get('oso') or data.get('output') or data.get('output1') or data.get('list') or []
+    else:
+        items = []
+    orders = []
+    for o in items if isinstance(items, list) else []:
+        if not isinstance(o, dict):
+            continue
+        ord_no = str(o.get('ord_no') or o.get('odno') or o.get('order_no') or '').strip()
+        code = str(o.get('stk_cd') or o.get('pdno') or o.get('code') or '').replace('A', '').split('_')[0].strip()
+        try:
+            qty = int(abs(float(str(o.get('oso_qty') or o.get('uncl_qty') or o.get('otst_qty') or o.get('qty') or 0).replace(',', ''))))
+        except ValueError:
+            qty = 0
+        side_raw = str(o.get('io_tp_nm') or o.get('side') or o.get('sll_buy_tp') or '').upper()
+        side = "SELL" if ("매도" in side_raw or "SELL" in side_raw) else ("BUY" if ("매수" in side_raw or "BUY" in side_raw) else None)
+        if ord_no and qty > 0:
+            orders.append({"ord_no": ord_no, "code": code, "name": str(o.get('stk_nm') or code), "side": side, "qty": qty})
+    return orders
+
+
 class AsyncKiwoomClient:
     """
     고도화된 비동기 키움증권 REST 클라이언트
@@ -409,18 +435,15 @@ class AsyncKiwoomClient:
             "qry_tp": "0"
         }
         data, _ = await self.request("kt00007", url, payload, priority=priority)
-        if not data or (isinstance(data, dict) and data.get('http_status')):
-            # ka10075 폴백 조회
-            payload_ka = {
-                "dmst_stex_tp": "KRX",
-                "accNo": self.account,
-                "accPwd": self.password,
-                "qry_tp": "1"
-            }
+        if not is_tr_ok(data) or not parse_unexecuted_orders(data):
+            # ka10075 미체결요청 (문서 기준: all_stk_tp 0=전체/1=종목, trde_tp 0=전체, stex_tp 0=통합, 응답 목록 키 oso)
+            payload_ka = {"all_stk_tp": "1" if clean_code else "0", "trde_tp": "0", "stex_tp": "0"}
+            if clean_code:
+                payload_ka["stk_cd"] = clean_code
             data_ka, _ = await self.request("ka10075", url, payload_ka, priority=priority)
-            if data_ka and not (isinstance(data_ka, dict) and data_ka.get('http_status')):
+            if is_tr_ok(data_ka):
                 return data_ka
-        return data
+        return data if is_tr_ok(data) else None
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """현재가 시세 조회"""

@@ -453,6 +453,21 @@ class DatabaseManager:
             "equity_history": []
         }
 
+    async def get_recent_trade_returns(self, limit: int = 50) -> list:
+        """order_history 청산 거래(취소 차감 FIFO) 최근 limit건의 수익률(소수, 예 0.012) — 켈리 비중 이력 복원용"""
+        if not self.pool:
+            return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT * FROM order_history ORDER BY id ASC")
+                    orders = await cursor.fetchall()
+            trades = list(reversed(compute_trade_metrics(orders, recent_limit=limit)["recent_closed_trades"]))
+            return [t['return_pct'] / 100.0 for t in trades]
+        except Exception as e:
+            print(f"DB 청산 수익률 이력 조회 에러: {e}")
+            return []
+
     async def get_quant_performance_metrics(self) -> dict:
         """
         퀀트 핵심 성과 지표(KPI)
@@ -572,7 +587,7 @@ class DatabaseManager:
 AsyncDatabase = DatabaseManager
 
 
-def compute_trade_metrics(orders) -> dict:
+def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
     """order_history 행(id 오름차순) → 청산 거래·승률·손익비·누적 실현손익·실현손익 최대 낙폭
     - CANCEL_BUY/CANCEL_SELL 행은 같은 종목의 직전 BUY/SELL 접수 수량에서 차감한 뒤 FIFO 매칭
     - 수수료·세금: 매수 0.015%, 매도 0.195%(수수료+거래세) 근사"""
@@ -651,6 +666,6 @@ def compute_trade_metrics(orders) -> dict:
         "profit_factor": round(tot_profit / tot_loss, 2) if tot_loss > 0 else (99.0 if tot_profit > 0 else 0.0),
         "total_profit": round(tot_profit, 0),
         "total_loss": round(tot_loss, 0),
-        "recent_closed_trades": list(reversed(closed_trades[-10:])),
+        "recent_closed_trades": list(reversed(closed_trades[-recent_limit:])),
         "equity_history": [],
     }

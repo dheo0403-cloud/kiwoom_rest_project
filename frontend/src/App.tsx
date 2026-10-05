@@ -12,7 +12,7 @@ import { EmergencyModal } from './components/EmergencyModal';
 import { ParamsModal } from './components/ParamsModal';
 import { useTradingWebSocket } from './hooks/useWebSocket';
 import { WatchlistItem } from './types';
-import { getApiUrl } from './utils/apiConfig';
+import { getApiUrl, postApi } from './utils/apiConfig';
 
 export function App() {
   const {
@@ -102,7 +102,7 @@ export function App() {
   const handleConfirmKillSwitch = async () => {
     setIsTriggeringKill(true);
     try {
-      const res = await fetch(getApiUrl('/bot/emergency-stop'), { method: 'POST' });
+      const res = await postApi('/bot/emergency-stop');
       if (res.ok) {
         addManualLog('CRITICAL', '🚨 [EMERGENCY KILL-SWITCH] 전 포지션 긴급 시장가 청산이 실행되었습니다!');
         setIsKillSwitchOpen(false);
