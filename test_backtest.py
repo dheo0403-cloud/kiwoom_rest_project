@@ -5,6 +5,7 @@ import unittest
 import numpy as np
 import pandas as pd
 from backtest import HighFidelityBacktester
+from indicators import TechnicalIndicators
 
 
 def make_minute_bars(n_days: int = 2, bars_per_day: int = 60, seed: int = 42) -> pd.DataFrame:
@@ -67,6 +68,28 @@ class TestHighFidelityBacktester(unittest.TestCase):
         self.assertAlmostEqual(trade.exit_price, self.df['low'][sell_i] * (1 - bt.slippage_rate))
         self.assertEqual(stub.sell_times[0], times[buy_i + 1].to_pydatetime())  # 진입 다음 봉부터 청산 판정
         self.assertLess(trade.pnl, trade.realized)  # 매수 원가·수수료 차감 확인
+
+    def test_daily_atr_source_uses_prior_days_only(self):
+        """atr_source='daily'면 전일까지 일봉 ATR을 사용 (2일 미만이면 0, look-ahead 없음)"""
+        df = make_minute_bars(n_days=3, bars_per_day=30)
+        seen = {}
+
+        class AtrSpy(StubStrategy):
+            async def check_buy_signal(self, code, current_price, current_volume, ind=None):
+                seen.setdefault(ind['now'].date(), ind['atr14'])
+                return False, ""
+
+        HighFidelityBacktester(strategy=AtrSpy(None, None), atr_source="daily").run_backtest(df)
+        times = pd.to_datetime(df['datetime'])
+        daily = df.groupby(times.dt.date).agg(open=('open', 'first'), high=('high', 'max'),
+                                              low=('low', 'min'), close=('close', 'last'))
+        days = list(daily.index)
+        self.assertEqual(seen[days[0]], 0.0)
+        self.assertEqual(seen[days[1]], 0.0)  # 전일 1일뿐 → 0
+        expected = float(TechnicalIndicators.calculate_atr(daily.iloc[:2], period=14).iloc[-1])
+        self.assertAlmostEqual(seen[days[2]], expected)
+        with self.assertRaises(ValueError):
+            HighFidelityBacktester(atr_source="weekly")
 
     def test_walk_forward_optimization(self):
         """Walk-Forward Optimization (WFO) 롤링 검증"""

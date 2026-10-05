@@ -54,7 +54,8 @@ class HighFidelityBacktester:
         buy_fee_rate: float = 0.00015,     # 0.015% 매수 수수료
         sell_fee_rate: float = 0.00015,    # 0.015% 매도 수수료
         sell_tax_rate: float = 0.0018,     # 0.18% 증권거래세
-        strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None
+        strategy: Optional[AdaptiveVolatilityBreakoutStrategy] = None,
+        atr_source: str = "minute"       # 'minute'(실거래와 동일, 최근 20분봉) | 'daily'(실험: 전일까지 일봉 ATR14)
     ):
         self.initial_capital = initial_capital
         self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(k_breakout=k_breakout)
@@ -64,6 +65,9 @@ class HighFidelityBacktester:
         self.buy_fee_rate = buy_fee_rate
         self.sell_fee_rate = sell_fee_rate
         self.sell_tax_rate = sell_tax_rate
+        if atr_source not in ("minute", "daily"):
+            raise ValueError(f"atr_source는 'minute' 또는 'daily': {atr_source}")
+        self.atr_source = atr_source
 
         self.closed_trades: List[BacktestTrade] = []
         self.equity_curve: List[Dict[str, Any]] = []
@@ -94,6 +98,8 @@ class HighFidelityBacktester:
             'fib_500': period_high - diff * 0.500,
             'fib_618': period_high - diff * 0.618,
             'avg_vol': float(prior['volume'].mean()),
+            # 일봉 ATR(14): 전일까지 일봉만 사용 (2일 미만이면 0 → 전략 기본 폴백)
+            'daily_atr14': float(TechnicalIndicators.calculate_atr(prior, period=14).iloc[-1]) if len(prior) >= 2 else 0.0,
         }
 
     def _close_trade(self, pos: BacktestTrade, shares: int, raw_price: float, date: Any) -> float:
@@ -118,8 +124,8 @@ class HighFidelityBacktester:
         time_col = 'datetime' if 'datetime' in bars.columns else 'date'
         times = pd.to_datetime(bars[time_col])
         days = times.dt.date
-        daily = bars.groupby(days).agg(open=('open', 'first'), high=('high', 'max'),
-                                       low=('low', 'min'), volume=('volume', 'sum'))
+        daily = bars.groupby(days).agg(open=('open', 'first'), high=('high', 'max'), low=('low', 'min'),
+                                       close=('close', 'last'), volume=('volume', 'sum'))
         inds = [TechnicalIndicators.get_latest_indicators(bars.iloc[max(0, i - BUFFER_BARS + 1):i + 1])
                 for i in range(len(bars))]
         day_starts = [int(i) for i in np.flatnonzero(days.ne(days.shift()).to_numpy())] + [len(bars)]
@@ -159,6 +165,8 @@ class HighFidelityBacktester:
             # 실거래와 동일하게 최근 20개 분봉으로 산출한 지표 (사전 계산본 복사 사용)
             ind = dict(data['inds'][i])
             ind['now'] = now
+            if self.atr_source == "daily":
+                ind['atr14'] = context.get('daily_atr14', 0.0)
 
             # 1. 보유 포지션 청산 판정 (봉 저가 기준 비관적 체결)
             if pos is not None:
@@ -375,11 +383,13 @@ if __name__ == "__main__":
     parser.add_argument("--train-days", type=int, default=20)
     parser.add_argument("--test-days", type=int, default=5)
     parser.add_argument("--k-values", type=float, nargs="+", default=[0.4, 0.5, 0.6, 0.7])
+    parser.add_argument("--atr-source", choices=["minute", "daily"], default="minute")
     args = parser.parse_args()
 
     bars_df = load_minute_bars_from_db(args.code)
     print(f"[기간] {bars_df['datetime'].min()} ~ {bars_df['datetime'].max()}, 거래일 {bars_df['datetime'].dt.date.nunique()}일")
-    bt = HighFidelityBacktester()
+    bt = HighFidelityBacktester(atr_source=args.atr_source)
+    print(f"[설정] atr_source={args.atr_source}, train {args.train_days}일 / test {args.test_days}일, k={args.k_values}")
     res = bt.run_walk_forward_optimization(bars_df, k_values=args.k_values,
                                            train_days=args.train_days, test_days=args.test_days)
     print(f"{'train':^25} {'test':^25} {'best_k':>6} {'IS샤프':>7} {'OOS수익%':>8} {'OOS거래':>6} {'OOS승률%':>7}")
