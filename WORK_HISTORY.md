@@ -28,7 +28,9 @@
 
   평균 수익: 기준 −2.17%, E1 −2.35%. E2가 기준과 동일한 이유: 일봉 ATR 기준 R1(1.5 ATR≈4~5%)에 닿기 전 트레일링(고점 −2%)이 먼저 청산 → 분할익절 미발동. 결론: 세 안 모두 개선 없음, PF>1 종목 0.
 * **리뷰:** 미체결·호가 파서는 문서 기준이며 실제 응답 검증은 장중에 필요. 동기화 주기를 늘려 장중 외부(MTS) 거래 반영이 최대 30초 늦어짐. 토큰은 브라우저 localStorage 저장(공용 PC 주의).
-* **검증:** `pytest -q` 82 passed(저장소), `.env` 없는 사본에서도 82 passed(CI 조건 모사), `tsc --noEmit` exit 0, `npm run build` exit 0. 배포·운영 실측은 아래.
+* **검증:** `pytest -q` 82 passed(저장소), `.env` 없는 사본에서도 82 passed(CI 조건 모사), `tsc --noEmit` exit 0, `npm run build` exit 0. 배포 37258193879 success(새 CI 테스트 단계 success). 운영 실측: 호가 005930 매수잔량 274,869 / 매도잔량 440,785 / 스프레드 500(이전 0·0·551,500), 체결강도 "데이터 없음", 대시보드 콘솔 오류 0. 관심종목은 다음 갱신(영업일 08:50)부터 동전주 필터 적용.
+* **운영 DB 정리(승인):** 보유 4종목(10/01 장중 매수, 이후 매도 없음)이 있었는데 예수금만 기록된 balance 3행 삭제 — 백업 `(2026-10-01|02|04, 36712, 36712, 0, 0.0)`, `DELETE ... WHERE date IN (...) AND total_asset = deposit` 3행. 이후 운영 일일 수익률 +203.41% → 0.00%. 9/16~9/30·9/15 이전 행은 당시 보유 여부 확인 불가로 유지.
+* **main 병합(승인):** PR #1(https://github.com/dheo0403-cloud/kiwoom_rest_project/pull/1) 커밋 14건 병합(main은 0 ahead/14 behind였음), main 배포 37259676602 success. 참고: 저장소 기본 브랜치는 main이 아니라 fix/rendering-optimization-and-safety-fixes.
 
 ---
 
