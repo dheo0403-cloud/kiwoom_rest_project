@@ -2,6 +2,20 @@
 
 ---
 
+## 📅 [2026-10-05 21:45] [기능+설계] 전 종목 분봉 수집·야간 과거 백필, 되밀림 매수 1차 탐색 설계 고정
+
+* **내용:**
+  - `research/pullback_plan.md`(신규): 데이터 보기 전에 고정한 1차 탐색 설계. 대상(전일 거래대금 상위 300), 기준선 B0(현 방식)·B1(무작위), 후보 P1 돌파선 되돌림·P2 VWAP 터치·P3 50% 되돌림(60분 내), 청산 X1 당일·X2 최대 5일(1.5×ATR 손절), 보수적 지정가 체결, 앞 60% 선택 → 뒤 40% 확인, 합격 기준(+0.10%/거래, PF≥1.1, 무작위 +0.2%p, 월 2/3 양수, 300건 이상).
+  - 수집 범위: `MINUTE_UNIVERSE=all`(기본) → 장 마감 후 당일 1분봉을 `stock_master` 코스피·코스닥 보통주 전체(ETF·스팩·우선주 제외)로 확대. `database.get_stock_universe()`.
+  - 과거 백필: 봇 안 독립 태스크 `_minute_backfill_worker` — 휴장일 종일·거래일 `MINUTE_BACKFILL_WINDOW`(기본 16:10~08:00)에만, 종목별 20페이지씩 돌아가며 과거로 이어받기(`collect_history.backfill_minute_step`), 진행표 새 테이블 `minute_backfill`(oldest_date·rows_saved·done·done_reason). 키움이 더 안 주면 `no_more`(= 보관 한도), 목표(`MINUTE_BACKFILL_DAYS`, 기본 365일) 도달 시 `reached_target`, 업무·네트워크 오류는 완료 처리 안 하고 재시도. stock_master가 비어 있으면 워커가 직접 채움. 라운드마다 로그(처리 종목·신규 행·남은 종목). `MINUTE_BACKFILL_ENABLED`로 끄기 가능.
+* **용량·시간 추정:** 분봉 행당 약 68바이트(현재 196만 행 134MB). 전 종목 약 2,500~2,700개 기준 하루 약 100만 행(70MB), 1년 약 2.6억 행(약 18GB). 백필 1년치 약 29만 요청 ≈ 23시간(3.5 TPS) → 여러 밤에 나눠 진행. DB 버퍼 풀 128MB, **디스크 용량 미확인**.
+* **수정/생성 파일:** `research/pullback_plan.md`(신규), `collect_history.py`, `database.py`, `main_rest_async.py`, `test_collect_history.py`(+5건)
+* **검증:** `pytest -q` → 112 passed. 실제 키움 분봉 이어받기·보관 기간은 배포 후 운영 Pod에서 확인(로컬은 등록 IP 아님).
+* **리뷰:** 장 시간에는 백필 안 함, 요청은 LOW 우선순위·봇과 같은 토큰. 수정주가(upd_stkpc_tp=1)로 받으므로 과거 실시간 저장분과 값이 다를 수 있음(같은 PK 시각이면 덮어씀). 키움 일일 요청 한도 존재 여부 미확인 → 오류 로그로 확인. 디스크가 부족하면 `MINUTE_BACKFILL_DAYS`를 줄이거나 끔.
+* **후속 할 일:** 10/6 아침 `minute_backfill`로 키움 분봉 보관 기간(`done_reason='no_more'`인 종목의 oldest_date)과 진행률 확인 → 충분히 쌓이면 `pullback_plan.md`대로 1차 탐색 실행. DB 디스크 사용량 확인.
+
+---
+
 ## 📅 [2026-10-05 21:00] [실험+문서] 코스피 30년 지수 보유 vs 월말 추세 규칙, kiwoom-backtest 스킬 보강
 
 * **내용:**

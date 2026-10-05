@@ -186,6 +186,60 @@ class DatabaseManager:
             INSERT INTO stock_master (code, name, market, is_etf) VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), is_etf=VALUES(is_etf)''', rows, "Stock Master")
 
+    async def ensure_minute_backfill(self):
+        """분봉 과거 백필 진행표 (종목별 가장 오래 받은 날짜·완료 여부) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS minute_backfill (
+                            code VARCHAR(10) NOT NULL PRIMARY KEY,
+                            oldest_date VARCHAR(8) NULL,
+                            rows_saved BIGINT NOT NULL DEFAULT 0,
+                            done TINYINT(1) NOT NULL DEFAULT 0,
+                            done_reason VARCHAR(20) NULL,
+                            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB minute_backfill 생성 Error: {e}")
+
+    async def get_minute_backfill(self) -> dict:
+        """code → {oldest_date, rows_saved, done}"""
+        if not self.pool: return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT code, oldest_date, rows_saved, done FROM minute_backfill")
+                    return {r['code']: dict(r) for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB minute_backfill 조회 Error: {e}")
+            return {}
+
+    async def upsert_minute_backfill(self, code: str, oldest_date, rows_saved: int, done: bool, reason=None):
+        await self._executemany('''
+            INSERT INTO minute_backfill (code, oldest_date, rows_saved, done, done_reason) VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE oldest_date=VALUES(oldest_date), rows_saved=VALUES(rows_saved),
+            done=VALUES(done), done_reason=VALUES(done_reason)''',
+            [(code, oldest_date, rows_saved, 1 if done else 0, reason)], "Minute Backfill")
+
+    async def get_stock_universe(self) -> list:
+        """분봉 수집 대상: stock_master 코스피·코스닥 보통주 (ETF·스팩·우선주 제외) — 테이블이 없으면 빈 목록"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT code FROM stock_master
+                        WHERE is_etf = 0 AND market IN ('KOSPI', 'KOSDAQ')
+                          AND code REGEXP '^[0-9]{5}0$' AND name NOT LIKE '%%스팩%%'
+                        ORDER BY code''')
+                    return [r['code'] for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB 수집 대상 조회 Error: {e}")
+            return []
+
     async def ensure_us_daily(self):
         """미국 시장 일봉 테이블 (us_market.py: 심볼·현지 날짜·종가) — 없으면 생성"""
         if not self.pool: return

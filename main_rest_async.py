@@ -23,7 +23,7 @@ from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
-from collect_history import collect_after_close
+from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master
 from us_market import refresh_us_daily, summarize as summarize_us
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -266,6 +266,13 @@ class AsyncTradingBot:
         # 매크로 필터에 VIX·원달러 주입 여부 (기본 꺼짐: 2.8년 검증에서 일관된 개선 근거 없음 → 켜려면 별도 승인)
         self.us_macro_filter_enabled = os.getenv("US_MACRO_FILTER_ENABLED", "false").lower() in ("1", "true", "yes")
         self.us_data_max_age_days = int(os.getenv("US_DATA_MAX_AGE_DAYS", "4"))  # 이보다 오래된 미국 데이터는 사용 안 함
+        # 분봉 수집 범위·과거 백필 (장 시간 외에만, 진행표 minute_backfill로 이어받기)
+        self.minute_universe = os.getenv("MINUTE_UNIVERSE", "all").lower()  # all = stock_master 보통주 전체 / watchlist
+        self.minute_backfill_enabled = os.getenv("MINUTE_BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.minute_backfill_days = int(os.getenv("MINUTE_BACKFILL_DAYS", "365"))
+        self.backfill_window = tuple(tuple(int(x) for x in t.split(":")) for t in
+                                     os.getenv("MINUTE_BACKFILL_WINDOW", "16:10-08:00").split("-"))
+        self.minute_backfill_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -451,6 +458,8 @@ class AsyncTradingBot:
         self.is_running = True
         if not self.us_market_task or self.us_market_task.done():
             self.us_market_task = asyncio.create_task(self._us_market_worker())
+        if self.minute_backfill_enabled and (not self.minute_backfill_task or self.minute_backfill_task.done()):
+            self.minute_backfill_task = asyncio.create_task(self._minute_backfill_worker())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -1805,13 +1814,70 @@ class AsyncTradingBot:
         watch = sorted(set(self.watchlist) | set(self.portfolio.positions))
         extra = [c.strip() for c in os.getenv("EXTRA_DAILY_CODES", "").split(",") if c.strip()]
         try:
-            stats = await collect_after_close(self.client, self.db, watch, extra)
-            msg = f"장 마감 후 시세 수집 완료: 종목정보 {stats['master']:,}건, 일봉 {stats['daily']:,}행, 1분봉 {stats['minute']:,}행"
+            stats = await collect_after_close(self.client, self.db, watch, extra, self.minute_universe)
+            msg = (f"장 마감 후 시세 수집 완료: 종목정보 {stats['master']:,}건, 일봉 {stats['daily']:,}행, "
+                   f"1분봉 {stats['minute']:,}행({stats['minute_codes']:,}종목)")
             print(f"🗄️ [수집] {msg}")
             await self.db.log_message("SYSTEM", msg)
         except Exception as e:
             print(f"❌ [수집 오류] {e}")
             await self.db.log_message("ERROR", f"장 마감 후 시세 수집 오류: {e}")
+
+    def _backfill_allowed(self, now: datetime) -> bool:
+        """백필 허용 시간: 휴장일 종일, 거래일은 MINUTE_BACKFILL_WINDOW(기본 16:10~익일 08:00)"""
+        if self.is_korean_market_holiday(now):
+            return True
+        (sh, sm), (eh, em) = self.backfill_window
+        t = (now.hour, now.minute)
+        return t >= (sh, sm) or t < (eh, em)
+
+    async def _minute_backfill_worker(self):
+        """전 종목 분봉 과거 백필 (장 시간 외, 종목별 20페이지씩 돌아가며, 진행표로 재시작 후 이어받기)"""
+        await self.db.ensure_minute_backfill()
+        announced_done = False
+        while not self.is_shutdown:
+            try:
+                if not self._backfill_allowed(get_kst_now()):
+                    await asyncio.sleep(60.0)
+                    continue
+                universe = await self.db.get_stock_universe()
+                if not universe:  # stock_master가 비어 있으면 직접 채움 (장 마감 후 수집을 기다리지 않음)
+                    await self.db.ensure_stock_master()
+                    n = await refresh_stock_master(self.client, self.db)
+                    await self.db.log_message("SYSTEM", f"분봉 백필 준비: 종목 정보 {n:,}건 갱신")
+                    universe = await self.db.get_stock_universe()
+                    if not universe:
+                        await asyncio.sleep(600.0)
+                        continue
+                states = await self.db.get_minute_backfill()
+                pending = [c for c in universe if not int((states.get(c) or {}).get("done", 0))]
+                if not pending:
+                    if not announced_done:
+                        await self.db.log_message("SYSTEM", f"분봉 과거 백필 완료: {len(universe):,}종목")
+                        announced_done = True
+                    await asyncio.sleep(3600.0)
+                    continue
+                announced_done = False
+                rows_before, steps, errors = sum(int((states.get(c) or {}).get("rows_saved", 0)) for c in universe), 0, 0
+                for code in pending:
+                    if self.is_shutdown or not self._backfill_allowed(get_kst_now()):
+                        break
+                    before = states.get(code)
+                    after = await backfill_minute_step(self.client, self.db, code, before, self.minute_backfill_days)
+                    steps += 1
+                    if not after["done"] and after["oldest_date"] == (before or {}).get("oldest_date"):
+                        errors += 1
+                        await asyncio.sleep(5.0)  # 오류·무진전: 잠시 쉬고 다음 종목
+                    states[code] = after
+                rows_after = sum(int((states.get(c) or {}).get("rows_saved", 0)) for c in universe)
+                await self.db.log_message("SYSTEM", f"분봉 백필 라운드: {steps:,}종목 처리, 신규 {rows_after - rows_before:,}행, "
+                                                    f"오류·무진전 {errors}, 남은 종목 {sum(1 for c in universe if not int((states.get(c) or {}).get('done', 0))):,}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ [분봉 백필 오류] {e}")
+                await self.db.log_message("ERROR", f"분봉 백필 오류: {e}")
+                await asyncio.sleep(60.0)
 
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
@@ -1890,6 +1956,8 @@ class AsyncTradingBot:
             self.realtime_stream_task.cancel()
         if self.us_market_task and not self.us_market_task.done():
             self.us_market_task.cancel()
+        if self.minute_backfill_task and not self.minute_backfill_task.done():
+            self.minute_backfill_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

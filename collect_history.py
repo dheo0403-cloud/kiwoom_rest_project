@@ -99,6 +99,47 @@ async def collect_minute(client, db, code: str, days: int = 1, base_dt: Optional
     return len(rows)
 
 
+async def backfill_minute_step(client, db, code: str, state: Optional[Dict[str, Any]], max_days: int,
+                               pages: int = 20) -> Dict[str, Any]:
+    """분봉 과거 백필 1단계: 진행표의 가장 오래된 날짜(없으면 오늘)부터 과거로 최대 pages페이지 받아 저장.
+    더 받을 게 없거나(키움 보관 한도) 목표 기간에 닿으면 완료 처리. 반환: 갱신된 진행 상태"""
+    state = state or {"oldest_date": None, "rows_saved": 0, "done": 0}
+    cutoff = (get_kst_now() - timedelta(days=max_days)).strftime('%Y%m%d')
+    base_dt = state["oldest_date"] or get_kst_now().strftime('%Y%m%d')
+    rows, next_key, reason = [], None, None
+    for _ in range(pages):
+        headers = {"cont-yn": "Y", "next-key": next_key} if next_key else None
+        data, resp_headers = await client.request("ka10080", f"{client.base_url}/api/dostk/chart",
+                                                  {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": base_dt},
+                                                  headers_override=headers)
+        page = parse_minute(code, (data or {}).get("stk_min_pole_chart_qry") or [])
+        if data is None or str(data.get("return_code", 0)) not in ("0", ""):
+            reason = "error"  # 네트워크·업무 오류(요청 한도 등): 완료 처리하지 않고 다음에 재시도
+            if data:
+                print(f"⚠️ [분봉 백필] {code} 업무 오류: {data.get('return_msg')}")
+            break
+        if not page:
+            reason = "no_more"
+            break
+        rows.extend(page)
+        if min(r[1][:8] for r in page) <= cutoff:
+            reason = "reached_target"
+            break
+        if not resp_headers or str(resp_headers.get('cont-yn', 'N')).upper() != 'Y' or not resp_headers.get('next-key'):
+            reason = "no_more"
+            break
+        next_key = resp_headers.get('next-key')
+    rows = [r for r in rows if r[1][:8] >= cutoff]
+    await db.upsert_minute_rows(rows)
+    oldest = min([r[1][:8] for r in rows] + ([state["oldest_date"]] if state["oldest_date"] else []), default=None)
+    done = reason in ("no_more", "reached_target")
+    if reason is None and oldest == state["oldest_date"]:
+        done, reason = True, "no_progress"  # 같은 날짜만 반복되면 무한 반복 방지
+    new_state = {"oldest_date": oldest, "rows_saved": int(state["rows_saved"]) + len(rows), "done": int(done)}
+    await db.upsert_minute_backfill(code, oldest, new_state["rows_saved"], done, reason if done else None)
+    return new_state
+
+
 async def refresh_stock_master(client, db) -> int:
     """ka10099 전 종목 목록 → stock_master (코스피·코스닥·ETF)"""
     rows = []
@@ -113,14 +154,20 @@ async def refresh_stock_master(client, db) -> int:
     return len(rows)
 
 
-async def collect_after_close(client, db, watch_codes: List[str], extra_codes: List[str]) -> Dict[str, int]:
-    """장 마감 후 일일 수집: 종목 정보 갱신 + (관심·보유·추가 종목) 일봉 최신 페이지 + (관심·보유) 당일 1분봉"""
-    stats = {"master": 0, "daily": 0, "minute": 0}
+async def collect_after_close(client, db, watch_codes: List[str], extra_codes: List[str],
+                              minute_universe: str = "watchlist") -> Dict[str, int]:
+    """장 마감 후 일일 수집: 종목 정보 갱신 + (관심·보유·추가 종목) 일봉 최신 페이지
+    + 당일 1분봉 (minute_universe='all'이면 stock_master 보통주 전체, 아니면 관심·보유)"""
+    stats = {"master": 0, "daily": 0, "minute": 0, "minute_codes": 0}
     await db.ensure_stock_master()
     stats["master"] = await refresh_stock_master(client, db)
     for code in sorted(set(watch_codes) | set(extra_codes)):
         stats["daily"] += await collect_daily(client, db, code)
-    for code in sorted(set(watch_codes)):
+    minute_codes = set(watch_codes)
+    if minute_universe == "all":
+        minute_codes |= set(await db.get_stock_universe())
+    stats["minute_codes"] = len(minute_codes)
+    for code in sorted(minute_codes):
         stats["minute"] += await collect_minute(client, db, code, days=1)
     return stats
 
