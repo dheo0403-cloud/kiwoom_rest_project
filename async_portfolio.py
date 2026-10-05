@@ -92,6 +92,11 @@ class AsyncPortfolioManager:
         async with self._lock:
             if not account_data:
                 return
+            # 업무 오류 응답(return_code≠0)은 '보유 0건'이 아니라 '알 수 없음' → 기존 포지션 유지
+            rc = account_data.get('return_code') if isinstance(account_data, dict) else None
+            if rc is not None and str(rc).strip() not in ('0', ''):
+                print(f"⚠️ [Portfolio sync_positions] 잔고 TR 오류 응답(return_code={rc}) → 기존 포지션 유지")
+                return
 
             # 1. 딕셔너리의 모든 리스트 키들을 검사하여 종목 리스트가 있는 키를 지능적으로 탐색
             raw_list = []
@@ -534,22 +539,24 @@ class AsyncPortfolioManager:
         """미체결 매수 주문 증거금을 차감한 순수 가용 주문 가능 금액 반환"""
         return max(0.0, self.current_capital - float(pending_buy_amount or 0.0))
 
-    async def get_order_qty(self, current_price: float, atr: Optional[float] = None, available_cash: Optional[float] = None) -> int:
+    async def get_order_qty(self, current_price: float, atr: Optional[float] = None, available_cash: Optional[float] = None,
+                            regime_multiplier: float = 1.0) -> int:
         """
         프랙셔널 켈리 공식 및 변동성 기반 주문 수량 계산
         - 1회 거래 최대 허용 위험액(Risk-at-Risk) 1.5% 한도 적용
         - 미체결 매수 증거금 락이 반영된 실제 가용 예수금(available_cash) 기준 산출
+        - 시장 레짐 승수(강세 1.0 / 횡보 0.6 / 급락 0.0)로 켈리 비중 축소
         """
         async with self._lock:
-            if current_price <= 0:
+            if current_price <= 0 or regime_multiplier <= 0:
                 return 0
 
             effective_cash = float(available_cash) if available_cash is not None else self.current_capital
             invested = sum(pos['buy_price'] * pos['qty'] for pos in self.positions.values())
             total_asset = effective_cash + invested
 
-            # 1. 켈리 비중 산출
-            kelly_alloc = self.get_kelly_allocation_fraction()
+            # 1. 켈리 비중 × 시장 레짐 승수 산출
+            kelly_alloc = self.get_kelly_allocation_fraction() * regime_multiplier
             allocate_amt = total_asset * kelly_alloc
 
             # 2. ATR 위험액 캡 (단일 거래 최대 손실액을 총 자산의 1.5%로 제한)

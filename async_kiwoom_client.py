@@ -105,6 +105,40 @@ class CircuitBreaker:
             return False
         return True  # HALF-OPEN
 
+def is_tr_ok(resp: Any) -> bool:
+    """키움 TR 응답 정상 여부: dict이고 HTTP 오류 표식이 없으며 return_code가 없거나 0"""
+    if not isinstance(resp, dict) or resp.get('http_status'):
+        return False
+    rc = resp.get('return_code')
+    return rc is None or str(rc).strip() in ('0', '')
+
+
+def parse_unexecuted_orders(data: Any) -> List[Dict[str, Any]]:
+    """미체결 응답(ka10075 'oso' 목록 / kt00007 등) → [{ord_no, code, name, side('BUY'|'SELL'|None), qty}]
+    - 수량: oso_qty(ka10075 미체결수량) 우선, side: io_tp_nm('+매수'/'-매도') 등에서 판별, 판별 불가면 None"""
+    if isinstance(data, list):
+        items = data
+    elif isinstance(data, dict):
+        items = data.get('oso') or data.get('output') or data.get('output1') or data.get('list') or []
+    else:
+        items = []
+    orders = []
+    for o in items if isinstance(items, list) else []:
+        if not isinstance(o, dict):
+            continue
+        ord_no = str(o.get('ord_no') or o.get('odno') or o.get('order_no') or '').strip()
+        code = str(o.get('stk_cd') or o.get('pdno') or o.get('code') or '').replace('A', '').split('_')[0].strip()
+        try:
+            qty = int(abs(float(str(o.get('oso_qty') or o.get('uncl_qty') or o.get('otst_qty') or o.get('qty') or 0).replace(',', ''))))
+        except ValueError:
+            qty = 0
+        side_raw = str(o.get('io_tp_nm') or o.get('side') or o.get('sll_buy_tp') or '').upper()
+        side = "SELL" if ("매도" in side_raw or "SELL" in side_raw) else ("BUY" if ("매수" in side_raw or "BUY" in side_raw) else None)
+        if ord_no and qty > 0:
+            orders.append({"ord_no": ord_no, "code": code, "name": str(o.get('stk_nm') or code), "side": side, "qty": qty})
+    return orders
+
+
 class AsyncKiwoomClient:
     """
     고도화된 비동기 키움증권 REST 클라이언트
@@ -113,6 +147,8 @@ class AsyncKiwoomClient:
     - 서킷 브레이커 및 자동 재시도
     - 비동기 워커 디스패처
     """
+    _SECRET_KEYS = {"accpwd", "appkey", "secretkey"}  # 로그 출력 시 마스킹할 payload 키(소문자)
+
     def __init__(self, is_demo: Optional[bool] = None, max_tps: float = None):
         if is_demo is None:
             # 환경변수 IS_REAL 또는 KIWOOM_MODE 기반 결정 (기본값: 실전투자 REAL)
@@ -257,7 +293,8 @@ class AsyncKiwoomClient:
 
                     if response.status != 200:
                         msg = data.get('msg1') or data.get('return_msg') or data.get('raw_text') or 'HTTP Error'
-                        print(f"❌ [API_HTTP_{response.status}] {req.api_id} 호출 실패: {msg} (Payload: {req.payload})")
+                        safe_payload = {k: ("***" if k.lower() in self._SECRET_KEYS else v) for k, v in req.payload.items()}  # 계좌 비밀번호/키 로그 노출 방지
+                        print(f"❌ [API_HTTP_{response.status}] {req.api_id} 호출 실패: {msg} (Payload: {safe_payload})")
                         if attempt == req.retries - 1:
                             if not req.future.done():
                                 req.future.set_result((data, response.headers))
@@ -334,7 +371,8 @@ class AsyncKiwoomClient:
             "trde_tp": str(order_type),   # "00": 보통(지정가), "03": 시장가
             "cond_uv": "0"
         }
-        data, _ = await self.request(api_id, url, payload, priority=priority, retries=5)
+        # 주문은 재시도 시 중복 접수 위험이 있으므로 1회만 시도 (실패 시 다음 루프에서 재판단)
+        data, _ = await self.request(api_id, url, payload, priority=priority, retries=1)
         if not data:
             print(f"❌ [ORDER_FAIL] 주문 응답 없음 ({side} {clean_code} {qty}주 @ {price}원)")
             return None
@@ -397,18 +435,15 @@ class AsyncKiwoomClient:
             "qry_tp": "0"
         }
         data, _ = await self.request("kt00007", url, payload, priority=priority)
-        if not data or (isinstance(data, dict) and data.get('http_status')):
-            # ka10075 폴백 조회
-            payload_ka = {
-                "dmst_stex_tp": "KRX",
-                "accNo": self.account,
-                "accPwd": self.password,
-                "qry_tp": "1"
-            }
+        if not is_tr_ok(data) or not parse_unexecuted_orders(data):
+            # ka10075 미체결요청 (문서 기준: all_stk_tp 0=전체/1=종목, trde_tp 0=전체, stex_tp 0=통합, 응답 목록 키 oso)
+            payload_ka = {"all_stk_tp": "1" if clean_code else "0", "trde_tp": "0", "stex_tp": "0"}
+            if clean_code:
+                payload_ka["stk_cd"] = clean_code
             data_ka, _ = await self.request("ka10075", url, payload_ka, priority=priority)
-            if data_ka and not (isinstance(data_ka, dict) and data_ka.get('http_status')):
+            if is_tr_ok(data_ka):
                 return data_ka
-        return data
+        return data if is_tr_ok(data) else None
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """현재가 시세 조회"""
@@ -492,9 +527,15 @@ class AsyncKiwoomClient:
                         return c
             return ""
 
+        ok_count = 0  # 정상 응답(return_code 0) TR 수 — 0이면 잔고를 알 수 없으므로 None 반환
+
         def merge_tr_response(tr_resp: Optional[Dict[str, Any]]):
-            if not isinstance(tr_resp, dict) or tr_resp.get('http_status'):
+            nonlocal ok_count
+            # 키움은 업무 오류(요청 한도 초과·점검 등)도 HTTP 200 + return_code≠0으로 응답 →
+            # 병합하면 '보유 0건'으로 오인되어 포지션이 비워지므로 제외
+            if not is_tr_ok(tr_resp):
                 return
+            ok_count += 1
 
             # 1. 요약 필드 및 스칼라 값 병합
             for k, v in tr_resp.items():
@@ -562,7 +603,7 @@ class AsyncKiwoomClient:
         elif 'output2' not in merged_data:
             merged_data['output2'] = []
 
-        return merged_data if merged_data else None
+        return merged_data if ok_count > 0 else None
 
     async def get_top_trading_value(self, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """거래대금 상위 종목 조회 (KRX/통합 다중 거래소 파라미터 방어 지원)"""

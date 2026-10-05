@@ -6,6 +6,7 @@ Gate Info:
 - User's verbatim instruction: "파일 전체를 읽지 말고 최근 로그 50줄만 읽으면서 계속 진행해줘"
 """
 import asyncio
+import json
 import os
 import sys
 import time
@@ -14,11 +15,11 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
-from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
+from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
 from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
-from strategy import AdaptiveVolatilityBreakoutStrategy
+from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
@@ -26,6 +27,29 @@ from macro_regime_filter import MacroRegimeFilter, MarketRegime
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path, override=False)
+
+def _load_krx_holidays() -> Dict[int, set]:
+    """krx_holidays.json에서 연도별 휴장일 집합 로드 (파일 없음/파싱 오류 시 빈 값 -> 고정 휴일 로직 폴백)"""
+    try:
+        with open(os.path.join(current_dir, 'krx_holidays.json'), encoding='utf-8') as f:
+            raw = json.load(f)
+        return {int(y): set(days) for y, days in raw.items() if y.isdigit()}
+    except Exception as e:
+        print(f"⚠️ [휴장일 달력] krx_holidays.json 로드 실패 -> 양력 고정 휴일 로직 사용: {e}")
+        return {}
+
+KRX_HOLIDAYS = _load_krx_holidays()
+_warned_holiday_years: set = set()
+
+async def cancel_and_record(client, db, order_no: str, code: str, name: str, side: str, qty: int, priority):
+    """주문 취소 후 성공(rt_cd 0)일 때만 order_history에 CANCEL_<side> 기록
+    - 주문은 '접수' 시점에 order_history에 남으므로, 취소된 수량을 성과(승률/PF) 계산에서 차감하기 위함"""
+    res = await client.cancel_order(order_no=order_no, code=code, qty=qty, priority=priority)
+    rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
+    if res and str(rt_cd) == '0' and db and side in ("BUY", "SELL"):
+        await db.log_order(code, name, f"CANCEL_{side}", qty, 0)
+    return res
+
 
 class OrderTimeoutManager:
     """
@@ -143,14 +167,14 @@ class OrderTimeoutManager:
                 # 미체결 매수 -> 취소하여 예수금 반환 및 30초 쿨다운 적용
                 self.cancelled_cooldowns[code] = time.time() + 30.0
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    await cancel_and_record(self.client, self.db, ord_no, code, name, "BUY", uncl_qty, RequestPriority.HIGH)
                     if self.db:
                         await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환 (30초 쿨다운)")
                     print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환, 30초 쿨다운)")
             elif side == "SELL":
                 # 미체결 매도 -> 지정가 취소 후 KRX 락 해제 대기 및 즉시 긴급 시장가(03) CRITICAL 전량 재발주
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await self.client.cancel_order(order_no=ord_no, code=code, qty=uncl_qty, priority=RequestPriority.HIGH)
+                    await cancel_and_record(self.client, self.db, ord_no, code, name, "SELL", uncl_qty, RequestPriority.HIGH)
                     await asyncio.sleep(0.2)  # KRX 매도가능수량 락 해제 비동기 대기
 
                 print(f"🚨 [미체결 매도 타임아웃] {name}({code}) 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주!")
@@ -169,9 +193,6 @@ class OrderTimeoutManager:
                         await self.track_order(new_ord_no, code, name, "SELL", uncl_qty, 0, order_type="03")
                 if self.db:
                     await self.db.log_message("CRITICAL", f"🚨 [미체결 매도 대체] {name}({code}) {uncl_qty}주 긴급 시장가(03) 재청산 발주 완료!")
-
-            if self.bot and hasattr(self.bot, '_sync_account_balance'):
-                await self.bot._sync_account_balance()
 
             if self.bot and hasattr(self.bot, '_sync_account_balance'):
                 await self.bot._sync_account_balance()
@@ -243,6 +264,7 @@ class AsyncTradingBot:
         timeout_sec = float(os.getenv("ORDER_TIMEOUT_SECONDS", "30.0"))
         self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
         self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
+        self._buy_inflight: set = set()  # 매수 판단/발주 진행 중인 종목 (동시 중복 진입 차단)
 
     @property
     def running(self) -> bool:
@@ -286,6 +308,13 @@ class AsyncTradingBot:
         # 주말 (토=5, 일=6)
         if dt.weekday() >= 5:
             return True
+        # 달력 파일에 해당 연도가 있으면 KRX 휴장일 목록을 그대로 따른다
+        year_days = KRX_HOLIDAYS.get(dt.year)
+        if year_days is not None:
+            return dt.strftime('%Y-%m-%d') in year_days
+        if dt.year not in _warned_holiday_years:
+            _warned_holiday_years.add(dt.year)
+            print(f"⚠️ [휴장일 달력] {dt.year}년 데이터 없음 -> 양력 고정 휴일만 적용 (음력/대체공휴일 누락 가능, krx_holidays.json 갱신 필요)")
         # 양력 고정 공휴일 및 증시 폐장일 (월, 일)
         fixed_holidays = {
             (1, 1),   # 신정
@@ -321,7 +350,7 @@ class AsyncTradingBot:
         - 피보나치 매수 조건 평가 함수(_evaluate_buy_condition) 즉시 호출
         """
         raw_p = real_data.get('current_price') or real_data.get('prpr') or real_data.get('stck_prpr') or real_data.get('cur_prc') or 0
-        raw_v = real_data.get('volume') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
+        raw_v = real_data.get('volume') or real_data.get('trde_qty') or real_data.get('acml_vol') or real_data.get('cntg_vol') or 0
         raw_open = real_data.get('open_price') or real_data.get('oprn') or real_data.get('stck_oprc') or real_data.get('open_pric') or 0
 
         try:
@@ -380,6 +409,8 @@ class AsyncTradingBot:
     async def initialize(self):
         """클라이언트, DB 풀, 인메모리 버퍼, 텔레그램 알림, 계좌 상태 초기화"""
         print(f"🚀 [AsyncTradingBot] 엔진 초기화 시작 (모드: {'모의투자' if self.is_demo else '실전투자'})...")
+        if not self.is_demo:
+            print("⚠️ [실전투자 모드] 실제 계좌로 주문이 발송됩니다. 모의 테스트는 --mock 또는 IS_REAL=false 로 실행하세요.")
         await self.db.init_pool()
         await self.buffer.start()
         await self.notifier.start()
@@ -569,9 +600,7 @@ class AsyncTradingBot:
             try:
                 uncl_data = await self.client.get_unexecuted_orders(priority=RequestPriority.LOW)
                 if uncl_data:
-                    u_list = uncl_data.get('output', uncl_data.get('output1', []))
-                    if isinstance(u_list, list):
-                        unclosed_cnt = max(unclosed_cnt, len(u_list))
+                    unclosed_cnt = max(unclosed_cnt, len(parse_unexecuted_orders(uncl_data)))
             except Exception:
                 pass
 
@@ -771,7 +800,8 @@ class AsyncTradingBot:
             'insufficient_candles': 0,
             'zero_price_diff': 0,
             'analysis_error': 0,
-            'price_over_cash': 0  # 예수금 초과 고가 종목 탈락
+            'price_over_cash': 0,  # 예수금 초과 고가 종목 탈락
+            'penny_stock': 0       # 동전주(전략 매수 대상 아님) 탈락
         }
 
         # D+2 주문가능 금액 기반 고가 종목 필터링에 사용할 현재 예수금 캐시
@@ -839,7 +869,7 @@ class AsyncTradingBot:
                         continue
                     h_val = c.get('high_pric') or c.get('hgpr') or c.get('stck_hgpr') or c.get('high_price') or c.get('high') or 0
                     l_val = c.get('low_pric') or c.get('lwpr') or c.get('stck_lwpr') or c.get('low_price') or c.get('low') or 0
-                    v_val = c.get('acml_vol') or c.get('vol') or c.get('volume') or c.get('stck_cntg_hour') or 0
+                    v_val = c.get('trde_qty') or c.get('acml_vol') or c.get('vol') or c.get('volume') or c.get('stck_cntg_hour') or 0  # 일봉 거래량 키는 trde_qty
                     h = abs(float(str(h_val).replace(',', '').strip()))
                     l = abs(float(str(l_val).replace(',', '').strip()))
                     v = abs(float(str(v_val).replace(',', '').strip()))
@@ -878,6 +908,11 @@ class AsyncTradingBot:
                 )
                 open_price = abs(float(str(open_price_raw).replace(',', '').strip())) if open_price_raw else cur_price
 
+                # 동전주는 전략이 항상 매수 기각하므로 감시 슬롯을 차지하지 않게 제외
+                if 0 < cur_price < MIN_STOCK_PRICE:
+                    drop_reasons['penny_stock'] += 1
+                    continue
+
                 # [1차 방어] 고가 종목 필터: 현재가 > D+2 주문가능금액이면 Watchlist에서 즉시 제외
                 if available_cash > 0 and cur_price > available_cash:
                     drop_reasons['price_over_cash'] += 1
@@ -904,7 +939,7 @@ class AsyncTradingBot:
 
         # 단계별 필터링 디버그 리포트 출력
         total_dropped = sum(drop_reasons.values())
-        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']})")
+        print(f"  📊 [Watchlist Debug] 스캔 요약: 원본 {raw_count}개 ➔ 유효 감시종목 {len(new_watchlist)}개 확정 (탈락 {total_dropped}개: 코드오류 {drop_reasons['invalid_code']}, 일봉부재 {drop_reasons['no_chart_data']}, 캔들부족 {drop_reasons['insufficient_candles']}, 고저차0 {drop_reasons['zero_price_diff']}, 연산오류 {drop_reasons['analysis_error']}, 잔고부족(고가) {drop_reasons['price_over_cash']}, 동전주 {drop_reasons['penny_stock']})")
         if drop_reasons['price_over_cash'] > 0:
             print(f"  💰 [Watchlist 필터] 예수금({int(available_cash):,}원) 초과로 {drop_reasons['price_over_cash']}개 고가 종목이 감시 대상에서 제외되었습니다.")
 
@@ -982,7 +1017,7 @@ class AsyncTradingBot:
                 elif hasattr(self.db, 'update_manual_order_status'):
                     await self.db.update_manual_order_status(order_id, "COMPLETED")
                 await self.db.log_order(code, name, side, qty, price)
-                await self.db.log_message("INFO", f"수동 주문 체결 완료: {side} {name}({code}) {qty}주")
+                await self.db.log_message("INFO", f"수동 주문 접수 완료: {side} {name}({code}) {qty}주")
                 await self._sync_account_balance()
             else:
                 msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 실패'
@@ -1031,7 +1066,7 @@ class AsyncTradingBot:
             if cur_price <= 0:
                 continue
 
-            cur_volume_raw = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            cur_volume_raw = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
             try:
                 cur_volume = abs(float(str(cur_volume_raw).replace(',', '').replace('+', '').replace('-', '').strip() or 0))
             except (ValueError, TypeError):
@@ -1124,24 +1159,9 @@ class AsyncTradingBot:
             if not uncl_data:
                 return
 
-            items = []
-            if isinstance(uncl_data, dict):
-                items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
-            elif isinstance(uncl_data, list):
-                items = uncl_data
-
-            if not items:
-                return
-
-            for order in items:
-                if not isinstance(order, dict):
-                    continue
-
-                order_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
-                code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').strip()
-                uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
-                side = str(order.get('side') or order.get('sll_buy_tp') or 'BUY').upper()
-                side_str = "SELL" if ("매도" in side or "SELL" in side or "01" in side) else "BUY"
+            for order in parse_unexecuted_orders(uncl_data):
+                order_no, code, uncl_qty = order['ord_no'], order['code'], order['qty']
+                side_str = order['side'] or "BUY"
 
                 if order_no and uncl_qty > 0:
                     if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and order_no not in self.order_timeout_mgr.tracked_orders:
@@ -1172,12 +1192,8 @@ class AsyncTradingBot:
                         if ord_no not in cancelled_order_nos:
                             print(f"🛡️ [미체결 사전 취소/Tracker] {info['name']}({clean_code}) 주문번호 {ord_no} ({info['side']} {info['unfilled_qty']}주) 취소 발송...")
                             if self.client and hasattr(self.client, 'cancel_order'):
-                                await self.client.cancel_order(
-                                    order_no=ord_no,
-                                    code=clean_code,
-                                    qty=info['unfilled_qty'],
-                                    priority=RequestPriority.CRITICAL
-                                )
+                                await cancel_and_record(self.client, self.db, ord_no, clean_code, info['name'],
+                                                        info['side'], info['unfilled_qty'], RequestPriority.CRITICAL)
                             cancelled_order_nos.add(ord_no)
                             cancelled_count += 1
                             del self.order_timeout_mgr.tracked_orders[ord_no]
@@ -1186,31 +1202,15 @@ class AsyncTradingBot:
         if self.client and hasattr(self.client, 'get_unexecuted_orders') and hasattr(self.client, 'cancel_order'):
             try:
                 uncl_data = await self.client.get_unexecuted_orders(code=clean_code, priority=RequestPriority.CRITICAL)
-                items = []
-                if isinstance(uncl_data, dict):
-                    items = uncl_data.get('output') or uncl_data.get('output1') or uncl_data.get('list') or []
-                elif isinstance(uncl_data, list):
-                    items = uncl_data
-
-                if items:
-                    for order in items:
-                        if not isinstance(order, dict):
-                            continue
-                        ord_no = str(order.get('ord_no') or order.get('odno') or order.get('order_no') or '').strip()
-                        ord_code = str(order.get('stk_cd') or order.get('pdno') or order.get('code') or '').replace('A', '').strip()
-                        uncl_qty = int(float(str(order.get('uncl_qty') or order.get('otst_qty') or order.get('qty') or 0)))
-
-                        if (not ord_code or ord_code == clean_code) and ord_no and uncl_qty > 0:
-                            if ord_no not in cancelled_order_nos:
-                                print(f"🛡️ [미체결 사전 취소/API] {clean_code} 주문번호 {ord_no} ({uncl_qty}주) kt10003 취소 발송...")
-                                await self.client.cancel_order(
-                                    order_no=ord_no,
-                                    code=clean_code,
-                                    qty=uncl_qty,
-                                    priority=RequestPriority.CRITICAL
-                                )
-                                cancelled_order_nos.add(ord_no)
-                                cancelled_count += 1
+                for order in parse_unexecuted_orders(uncl_data):
+                    ord_no, ord_code, uncl_qty = order['ord_no'], order['code'], order['qty']
+                    if (not ord_code or ord_code == clean_code) and ord_no not in cancelled_order_nos:
+                        print(f"🛡️ [미체결 사전 취소/API] {clean_code} 주문번호 {ord_no} ({order['side'] or '구분불명'} {uncl_qty}주) kt10003 취소 발송...")
+                        # 매수/매도 구분이 확인된 경우에만 CANCEL 기록 (cancel_and_record는 side가 BUY/SELL일 때만 기록)
+                        await cancel_and_record(self.client, self.db, ord_no, clean_code, order['name'],
+                                                order['side'] or "", uncl_qty, RequestPriority.CRITICAL)
+                        cancelled_order_nos.add(ord_no)
+                        cancelled_count += 1
             except Exception as e:
                 print(f"⚠️ [미체결 사전 취소 예외] {clean_code}: {e}")
 
@@ -1276,7 +1276,7 @@ class AsyncTradingBot:
             pos = await self.portfolio.remove_position(code, cur_price if sell_price == 0 else sell_price)
             actual_exit_price = cur_price if sell_price == 0 else sell_price
             await self.db.log_order(code, name, "SELL", qty, int(actual_exit_price))
-            await self.db.log_message("WARNING", f"🚨 [긴급 매도 성공] {name}({code}) {qty}주 @ {int(actual_exit_price):,}원 ({reason})")
+            await self.db.log_message("WARNING", f"🚨 [긴급 매도 주문 접수] {name}({code}) {qty}주 @ {int(actual_exit_price):,}원 ({reason})")
             pnl = (actual_exit_price - pos['buy_price']) * qty if pos else None
             yield_rt = (actual_exit_price - pos['buy_price']) / pos['buy_price'] * 100.0 if pos and pos['buy_price'] > 0 else None
             self.notifier.notify_order_filled("SELL", name, code, qty, actual_exit_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
@@ -1324,7 +1324,7 @@ class AsyncTradingBot:
             buy_p = snap_pos.get('buy_price', sell_price)
             await self.portfolio.update_partial_sell(code, qty, sell_price, next_stage)
             await self.db.log_order(code, name, "SELL", qty, sell_price)
-            await self.db.log_message("INFO", f"🎯 [분할 익절 성공] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
+            await self.db.log_message("INFO", f"🎯 [분할 익절 주문 접수] {name}({code}) {qty}주 @ {sell_price:,}원 ({reason})")
             pnl = (sell_price - buy_p) * qty
             yield_rt = (sell_price - buy_p) / buy_p * 100.0 if buy_p > 0 else 0.0
             self.notifier.notify_order_filled("SELL", name, code, qty, sell_price, reason=reason, pnl=pnl, yield_rate=yield_rt)
@@ -1334,6 +1334,16 @@ class AsyncTradingBot:
             await self.db.log_message("ERROR", f"분할 익절 실패: {name}({code}) - {msg}")
 
     async def _evaluate_buy_condition(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
+        """종목별 동시 진입 차단 래퍼: 스트림 워커와 감시 루프가 같은 종목을 동시에 평가해도 주문은 한 번만 나간다."""
+        if code in self._buy_inflight:
+            return
+        self._buy_inflight.add(code)
+        try:
+            await self._evaluate_buy_condition_impl(code, cur_price, cur_volume, raw_data)
+        finally:
+            self._buy_inflight.discard(code)
+
+    async def _evaluate_buy_condition_impl(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
         """
         실시간 피보나치 눌림목 및 ATR 변동성 돌파 매수 조건 평가 함수
         - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
@@ -1418,8 +1428,10 @@ class AsyncTradingBot:
 
         if buy_signal:
             atr14 = ind.get('atr14', 0)
-            # 프랙셔널 켈리 공식 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
-            order_qty = await self.portfolio.get_order_qty(cur_price, atr=atr14, available_cash=real_available_cash)
+            # 프랙셔널 켈리 공식 × 시장 레짐 승수 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
+            order_qty = await self.portfolio.get_order_qty(
+                cur_price, atr=atr14, available_cash=real_available_cash,
+                regime_multiplier=self.macro_filter.get_regime_kelly_multiplier())
 
             if order_qty <= 0:
                 if real_available_cash >= cur_price:
@@ -1455,14 +1467,15 @@ class AsyncTradingBot:
             else:
                 status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
 
-            # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회 또는 괴리율 0.5%p 이상 변동 시에만 콘솔/DB/웹 출력)
+            # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회, 괴리율 0.5%p 이상 변동 시에도 최소 2초 간격)
+            # - 저가주는 1호가 변동만으로 괴리율이 0.5%p를 넘어 같은 종목 로그가 초당 여러 번 찍히던 문제 방지
             now_ts = time.time()
             last_time = self._last_watch_log_time.get(code, 0.0)
             last_diff = self._last_watch_diff_pct.get(code, -999.0)
             time_elapsed = now_ts - last_time
             diff_changed = abs(diff_pct - last_diff) >= 0.5
 
-            if time_elapsed >= 5.0 or diff_changed:
+            if time_elapsed >= 5.0 or (diff_changed and time_elapsed >= 2.0):
                 self._last_watch_log_time[code] = now_ts
                 self._last_watch_diff_pct[code] = diff_pct
                 print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")
@@ -1499,7 +1512,7 @@ class AsyncTradingBot:
                         out = {}
 
                     raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
-                    raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+                    raw_v = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
                     raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
                     try:
@@ -1552,7 +1565,7 @@ class AsyncTradingBot:
                 out = {}
 
             raw_p = out.get('prpr') or out.get('current_price') or out.get('stck_prpr') or out.get('cur_prc') or out.get('clpr') or 0
-            raw_v = out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0
+            raw_v = out.get('trde_qty') or out.get('acml_vol') or out.get('volume') or out.get('cntg_vol') or 0  # ka10001 거래량 키는 trde_qty(당일 누적)
             raw_o = out.get('oprn') or out.get('stck_oprc') or out.get('open_price') or out.get('open_pric') or out.get('oprc') or 0
 
             try:
@@ -1603,7 +1616,7 @@ class AsyncTradingBot:
                 await self.order_timeout_mgr.track_order(ord_no, code, name, "BUY", qty, buy_price, order_type="00")
             await self.portfolio.add_position(code, name, qty, buy_price)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
-            await self.db.log_message("INFO", f"🔥 [매수 체결 완료] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
+            await self.db.log_message("INFO", f"🔥 [매수 주문 접수] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
             self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason=reason)
             await self._sync_account_balance()
         else:
@@ -1803,9 +1816,6 @@ class AsyncTradingBot:
             await self.notifier.stop()
         except Exception as e:
             print(f"⚠️ [Shutdown] 알림 워커 정지 오류: {e}")
-        await self.client.stop()
-        await self.db.close_pool()
-        print("✅ [AsyncTradingBot] 정상 종료 완료")
         await self.client.stop()
         await self.db.close_pool()
         print("✅ [AsyncTradingBot] 정상 종료 완료")

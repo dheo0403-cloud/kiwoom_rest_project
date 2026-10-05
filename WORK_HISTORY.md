@@ -2,6 +2,211 @@
 
 ---
 
+## 📅 [2026-10-05 14:30] [일괄] 잔고 동기화 주기 · 켈리 이력 복원 · 키움 파서 · 동전주 제외 · API 토큰 · CI 테스트 · 전략 실험
+
+* **내용:**
+  1. 잔고 동기화: 5초 고정 → 장중 30초/장외 300초(`ACCOUNT_SYNC_MARKET_SEC`/`ACCOUNT_SYNC_IDLE_SEC`). 1회 동기화에 잔고·예수금 TR 최대 11회라 요청 한도 초과 유발 가능. 주문·청산 직후 즉시 동기화는 유지.
+  2. 켈리 이력 복원: 기동 시 `get_recent_trade_returns()`(order_history, 취소 차감 FIFO) 최근 50건 → `trade_returns`. 재시작 후 기본 비중(1/N) 회귀 방지.
+  3. 차트 API 거래량 키에 `trde_qty` 추가(2곳).
+  4. 관심종목 선정에서 전략 기준(`strategy.MIN_STOCK_PRICE`=1,000원) 미만 제외(`drop_reasons['penny_stock']`).
+  5. 키움 파서(문서: AlgoLab ka10004/ka10075 정리): 호가 총잔량 `tot_buy_req/tot_sel_req`, 호가 부호 절댓값(스프레드 551,500 원인). 미체결 `ka10075` 요청을 문서대로(`all_stk_tp/trde_tp/stex_tp`), `parse_unexecuted_orders()`(oso·oso_qty·io_tp_nm)로 3곳 통일, kt00007 업무 오류·0건이면 ka10075 폴백. API 경로 사전 취소도 구분 확인 시 CANCEL 기록. 체결강도는 필드 미확인으로 제외.
+  8. CI: 빌드 전 `pytest -q`(테스트 의존성 pytest-asyncio 1.4.0, httpx 0.28.1), 실패 시 배포 중단.
+  9. 프론트 POST 5곳 → `postApi()`: `X-API-Token` 헤더, 401이면 토큰 입력받아 브라우저 저장 후 재시도(서버 `API_AUTH_TOKEN` 미설정이면 영향 없음).
+  10. 미사용 `LiveTerminalBento.tsx` 삭제.
+  11. KRX 2026 휴장일: KRX 공지 원문은 못 찾음, 증권사(토스증권)·언론 기준 17일이 현재 파일과 일치 → 변경 없음.
+  7. 실험(백테스트만): `breakeven_buffer_pct` 파라미터화(기본 0.25% 동일), CLI `--set key=value`.
+* **수정/생성/삭제 파일:** `api_server.py`, `main_rest_async.py`, `database.py`, `strategy.py`, `async_kiwoom_client.py`, `indicators.py`, `backtest.py`, `test_safety_guards.py`(파서 2건), `.github/workflows/deploy.yml`, `frontend/src/{utils/apiConfig.ts, App.tsx, components/ParamsModal.tsx, components/StrategyControlsBento.tsx, components/ActivePositionsBento.tsx}`, `frontend/src/components/LiveTerminalBento.tsx`(삭제)
+* **실험 결과(daily ATR, 5종목 롤링 WFO, 병렬 1,660초):**
+
+  | 종목 | 기준 | E1 본절 0.5% | E2 분할익절 | E3 E1+E2 |
+  |---|---|---|---|---|
+  | 005930 | −2.26% PF0.31 | −2.69% PF0.21 | 동일 | E1과 동일 |
+  | 000660 | −2.20% PF0.59 | −1.94% PF0.62 | 동일 | E1과 동일 |
+  | 009150 | −4.54% PF0.15 | −4.13% PF0.19 | 동일 | E1과 동일 |
+  | 402340 | −1.17% PF0.61 | −2.40% PF0.38 | 동일 | E1과 동일 |
+  | 011070 | −0.68% PF0.64 | −0.57% PF0.67 | 동일 | E1과 동일 |
+
+  평균 수익: 기준 −2.17%, E1 −2.35%. E2가 기준과 동일한 이유: 일봉 ATR 기준 R1(1.5 ATR≈4~5%)에 닿기 전 트레일링(고점 −2%)이 먼저 청산 → 분할익절 미발동. 결론: 세 안 모두 개선 없음, PF>1 종목 0.
+* **리뷰:** 미체결·호가 파서는 문서 기준이며 실제 응답 검증은 장중에 필요. 동기화 주기를 늘려 장중 외부(MTS) 거래 반영이 최대 30초 늦어짐. 토큰은 브라우저 localStorage 저장(공용 PC 주의).
+* **검증:** `pytest -q` 82 passed(저장소), `.env` 없는 사본에서도 82 passed(CI 조건 모사), `tsc --noEmit` exit 0, `npm run build` exit 0. 배포·운영 실측은 아래.
+
+---
+
+## 📅 [2026-10-05 12:30] [버그/지표] 잔고 스냅샷 보유주 누락(D1) · 성과 지표 실현손익 기준(D2) · 취소 주문 보정(D3)
+
+* **D1 원인(코드 확인, Pod 로그는 az 미로그인으로 미확인):** 계좌 동기화 5초 주기, 잔고 TR 7회(kt00018×3, kt00004×3, kt00005). 키움은 업무 오류도 HTTP 200 + `return_code`≠0 → `get_account_balance`가 오류 응답의 스칼라(return_code 등)를 병합해 비어 있지 않은 dict 반환 → `sync_positions`가 '보유 0건'으로 포지션 비움 → 총자산=예수금으로 `balance` 기록. 근거: 최근 40일 중 35일 total==deposit, 배포 직후(10/03·10/05)만 정상. (9월 중순 이전은 deposit에 총자산이 들어간 과거 버전 문제로 별개)
+* **D1 조치:** `async_kiwoom_client.is_tr_ok()` — return_code≠0·HTTP 오류 TR은 병합 제외, 정상 TR 0개면 None(기존 포지션 유지). `sync_positions`도 return_code≠0이면 포지션 유지(2중 방어). 과거 balance 행은 변경하지 않음.
+* **D2 조치:** 입출금 기록이 없어 총자산 변화로 전략 성과 분리 불가 → 누적 수익률(%)·MDD(%) 대신 누적 실현손익(원)·실현손익 최대 낙폭(원). 일일 수익률은 balance 기준 유지(D1 이후 정상화 기대). 가짜 "한도 −5%" 배지 제거.
+* **D3 조치:** 주문은 접수 시점에 order_history 기록 → 추적기 경로 취소 3곳(타임아웃 매수/매도, 사전 취소)에서 취소 성공(rt_cd 0) 시 `CANCEL_BUY/CANCEL_SELL` 행 기록, `compute_trade_metrics`가 직전 같은 종목·같은 방향 접수 수량에서 차감 후 FIFO. 스키마 변경 없음. 화면에 "주문 기록 기준" 표기. kt00007(API 경로) 취소는 응답의 매수/매도 구분 키를 확인 못 해 기록 안 함.
+* **수정/생성 파일:** `async_kiwoom_client.py`, `async_portfolio.py`, `main_rest_async.py`, `database.py`, `api_server.py`, `test_safety_guards.py`(3건 추가), `test_async_trading_loop.py`·`test_api_server.py`(모의 응답 필드 변경), `frontend/src/{types.ts, hooks/useWebSocket.ts, components/QuantPerformanceBento.tsx}`
+* **리뷰:** 과거 order_history에는 CANCEL 행이 없어 과거 승률·PF는 그대로(운영 데이터 사전 계산: 760회, 35.92%, PF 0.56, 누적 실현손익 −209,043원, 실현 MDD −217,103원). 잔고 TR을 5초마다 7회 호출하는 빈도 자체가 요청 한도 초과를 유발할 수 있음(미조치).
+* **검증:** `pytest -q` 80 passed(exit 0), `tsc --noEmit` exit 0. 배포·운영 실측은 아래 기록.
+* **후속:** 잔고 동기화 주기·TR 수 축소 검토, kt00007 매수/매도 구분 키 확인 후 API 경로 취소도 기록, 배포 후 며칠간 balance 행이 total≠deposit(보유 시)로 유지되는지 확인.
+
+---
+
+## 📅 [2026-10-05 11:00] [대시보드] 중복 제거 · 고정/가짜 값 제거 · 차트·자산 추이·미체결 추가 · 차트 API 500 수정
+
+* **목적:** 운영 대시보드(`/kiwoom`)의 중복·누락 정리. 운영 화면을 Puppeteer로 캡처(1920px, 콘솔 오류 0)하고 화면 문구 605줄을 코드·API·DB와 대조.
+* **발견 → 조치:**
+  - 중복: 총자산/예수금/보유가 헤더·KPI·로그 헤더 3곳 → 로그 헤더 제거. KODEX200 등락이 호가 카드·레짐 배지·제어 카드 3곳 → 호가 카드에서 제거(대상 종목 코드 표시로 대체). 감시 로그가 저가주에서 초당 여러 번 기록(괴리율 0.5%p 조건이 5초 쓰로틀을 우회) → 괴리율 조건도 최소 2초 간격.
+  - 고정/가짜 값: 리스크 카드 "하드 스탑 −4.0% / 트레일링 2.5 ATR / MDD −5% / 5종목" 고정 문자열 → `/api/status`의 `strategy_params`(실제 −3% / 1.5 ATR, 고점 −2% / 2.0 ATR, 일일 손실한도 −2.5%, max_stocks). 체결강도 128.5% 고정값과 호가 잔량 250,000/150,000 기본값(백엔드·프론트 모두) → 실데이터 없으면 "데이터 없음". 보유 카드 "3단계 분할 익절 1차(+3%)/2차(+5%), 33% 익절" → 실제 모드(트레일링 전용)면 "+1.5% 도달 후 고점 −2% 하락 시 청산", 수동 버튼 "50% 매도". "기초 원금"(총자산과 같은 값) 제거. "누적 이익"(이익 거래만 합산) → "누적 실현손익"(이익−손실).
+  - 누락: `TradingViewChartBento`가 있었지만 화면에 없어 종목 클릭이 아무 효과 없음 → 차트 행 추가. `equity_history`가 API에 있는데 미표시 → 총자산 추이 라인. 미체결 주문 목록 없음 → `/api/orders/pending` + 패널(5초 주기).
+  - 버그: `/api/chart/{보유종목}` 500 — 포지션 dict에 `pos.name` 속성 접근 → `.get()`.
+  - `useWebSocket` 봇 상태가 running/circuit만 비교해 다른 필드 변경이 반영 안 되던 부분 → 전체 비교.
+* **수정/생성 파일:** `api_server.py`, `main_rest_async.py`, `frontend/src/App.tsx`, `frontend/src/types.ts`, `frontend/src/hooks/useWebSocket.ts`, `frontend/src/components/{KpiMetricsRow,ActivePositionsBento,LogViewer,QuantPerformanceBento}.tsx`, `frontend/src/components/AccountSideBento.tsx`(신규)
+* **리뷰:** 총자산 추이는 `balance` 원본 그대로라 현재는 보유주가 빠진 날(예수금만)과 정상일이 번갈아 톱니 모양으로 보임(D항목, 미조치). 호가 잔량은 ka10004 응답 해석이 안 돼 "데이터 없음"으로 표시될 것(해석 로직 수정은 별도). 로컬 api_server는 실전 키로 잔고 동기화·DB 기록·스케줄러가 돌아 미실행 → 운영 배포 후 실측.
+* **추가 수정(배포 후 실측에서 발견):** 차트가 오래된 1봉만 표시 — `minute_ohlcv` datetime 형식 혼재로 `ORDER BY datetime DESC`가 7/31 데이터를 최신으로 반환(조회로 확인: 기존 20260731153000 / 수정 2026-10-01 13:24:00), 14자리 시각 해석 실패 시 `time.time()`으로 채워 봉이 겹침 → `database.get_candles_by_code` 숫자 정렬, `api_server._chart_time()`으로 두 형식 해석·실패 봉 제외·시간 오름차순 중복 제거. 자산 추이 축 정수 표시. 커밋 850040e.
+* **검증:** `tsc --noEmit` exit 0, `npm run build` exit 0, `pytest -q` 77 passed. 배포 `gh run watch` 37246202383·37246690220 success. 운영 API: `/orders/pending` 200, `/status.strategy_params` 실제값, `/chart/018880` 500→200, 차트 3종목 각 60봉(10-01 12:25~13:24). 운영 Puppeteer(1920px): 차트·자산 추이 카드 높이 420/420·같은 행, 캔버스 렌더링, 리스크 카드 "하드 스탑: -3% / 1.5 ATR | 트레일링: 고점 -2% / 2 ATR | 일일 손실한도 -2.5%", 128.5%·"33% 익절"·로그 헤더 자산 표시 없음, 보유 종목 클릭 시 차트 종목 전환, 콘솔 오류 0.
+* **후속(D):** `balance`에 보유주 누락 스냅샷이 저장되는 원인 수정, 누적 수익률·MDD 기준(입출금·모의 구간 제외), 승률/PF를 접수가 아닌 체결 기준으로.
+
+---
+
+## 📅 [2026-10-05 10:00] [실험] 일봉 ATR 기준 돌파선·스탑 백테스트 + kiwoom-backtest 스킬
+
+* **내용:** `HighFidelityBacktester(atr_source='daily')`(CLI `--atr-source daily`) — 전일까지 20일 일봉 ATR(14)을 `ind['atr14']`로 사용(실거래 코드 불변, 기본 minute). `.claude/skills/kiwoom-backtest/SKILL.md` 생성(실행법·DB 함정·해석 기준·실거래 차이).
+* **수정/생성 파일:** `backtest.py`, `test_backtest.py`(전일까지만 쓰는지·잘못된 옵션 검증 테스트), `.claude/skills/kiwoom-backtest/SKILL.md`
+* **검증:** `pytest -q` 77 passed. 5종목 롤링 WFO(train 20/test 5, 병렬 1,024초, 모두 exit 0):
+
+  | 종목 | minute 수익% / PF | daily 수익% / 거래 / PF |
+  |---|---|---|
+  | 005930 | −8.40 / 0.19 | −2.26 / 21 / 0.31 |
+  | 000660 | −7.12 / 0.25 | −2.20 / 16 / 0.59 |
+  | 009150 | −5.57 / 0.35 | −4.54 / 29 / 0.15 |
+  | 402340 | −5.42 / 0.31 | −1.17 / 20 / 0.61 |
+  | 011070 | −5.54 / 0.26 | −0.68 / 22 / 0.64 |
+
+  daily는 거래 수가 약 1/3로 줄고 손실 폭이 줄었지만 전 종목 여전히 손실. 하드스탑 1건 평균 약 −3.4%(−3% 캡+비용)가 트레일링 이익(평균 +0.7~2.8%)보다 큼.
+* **판단:** 일봉 ATR은 개선 방향이나 단독으로는 실전 불가. 다음 실험 후보: 손절 폭 대비 익절 목표 확대(R배수), 장마감 청산 대신 보유 허용 여부, 종목 선정 기준.
+
+---
+
+## 📅 [2026-10-05 08:20] [버그/분석] 실시간 거래량 0 수정 · 5종목 실데이터 WFO · 청산 사유 분해
+
+* **목적:** 직전 후속 3건(실시간 거래량, 손실 원인 파악, 전략 재검토) 처리.
+* **원인(거래량 0):** 시세 폴링 API `ka10001` 응답의 거래량 키는 `trde_qty`(당일 누적)인데 코드는 `acml_vol`/`volume`/`cntg_vol`만 조회 → 실시간 분봉 거래량 항상 0(DB 실시간 저장분 98,764행 전부 0으로 확인). 관심종목 일봉 집계도 같은 문제로 `avg_vol`=0 → 환산거래량 필터 우회. 근거: AlgoLab ka10001 정리(cur_prc/open_pric/trde_qty), `data_collector.py`·실전 스키마 테스트의 `trde_qty`. 모의투자 토큰 발급이 400으로 실패해 실제 응답 직접 확인은 못 함(실전 키는 운영 토큰 영향 우려로 미사용).
+* **내용:**
+  - `main_rest_async.py`: 시세 조회 4곳 + 일봉 집계 1곳에서 `trde_qty` 우선 조회.
+  - `market_data_buffer.py`: `update_tick`의 volume을 당일 누적으로 보고 분봉 거래량 = 누적 차분(직전 분 마지막 누적 기준). 기동 후 첫 분봉은 첫 관측값부터, 누적 감소(날 바뀜) 시 기준 리셋, 0 이하는 무시.
+  - `backtest.py`: WFO 결과에 OOS `trades` 추가, CLI에 청산 사유별 건수·평균수익·총손익 출력.
+  - `test_market_data_buffer.py`: 누적 차분 기대값으로 수정 + 0 무시·날 바뀜 리셋 테스트 추가.
+* **수정/생성 파일:** `main_rest_async.py`, `market_data_buffer.py`, `backtest.py`, `test_market_data_buffer.py`
+* **리뷰:** 운영 반영 시 VWAP·POC·환산거래량 필터가 실제로 작동 → 신규 매수 빈도 감소 예상. 체결강도(`volume_power`)는 ka10001에 해당 키가 있는지 미확인(여전히 0이면 필터 미적용). `api_server.py:736,758` 대시보드 차트 거래량 키는 미수정(표시용).
+* **검증:** `pytest -q` 76 passed(exit 0). 5종목 롤링 WFO(train 20일/test 5일, 조회 전용, 병렬) 모두 exit 0:
+
+  | 종목 | OOS수익% | 거래 | 승률% | PF |
+  |---|---|---|---|---|
+  | 005930 | −8.40 | 75 | 18.7 | 0.19 |
+  | 000660 | −7.12 | 63 | 20.6 | 0.25 |
+  | 009150 | −5.57 | 73 | 31.5 | 0.35 |
+  | 402340 | −5.42 | 73 | 23.3 | 0.31 |
+  | 011070 | −5.54 | 71 | 16.9 | 0.26 |
+
+  청산 사유 합계(355건): 하드스탑 237건(67%) 평균 −1.17% 총 −4,386,238원 / 샹들리에 78건 평균 +0.97% 총 +1,193,379원 / 본절 38건 평균 −0.21% / 장마감 1건 / 트레일링 1건.
+* **판단:** 손실의 대부분이 하드스탑. 돌파선·스탑이 모두 **1분봉 ATR** 기준이라 돌파선은 시가 바로 위, 스탑은 분봉 노이즈 폭 → 진입 직후 손절이 반복. 왕복 비용 약 0.37%(수수료·세금 0.21% + 슬리피지 0.08%×2)가 평균 이익 0.97%의 약 38%. 본절 +0.25% 보전이 비용보다 작아 본절 청산도 평균 손실. 대상이 거래대금 상위 5종목(선택 편향), 청산 체결가 봉 저가(보수적) 한계 있음. **실전 투입 보류 권고.**
+* **후속:** ① 일봉 ATR 기반 돌파선·스탑 실험(백테스트로 비교) ② 본절 보전폭을 왕복 비용 이상으로 ③ 체결강도 키 확인(ka10001/ka10003) ④ 운영 배포 후 실시간 분봉 거래량 DB 적재 확인.
+
+---
+
+## 📅 [2026-10-05 04:00] [백테스트] ATR 재사용 · 일 단위 롤링 WFO · DB 실데이터 백테스트
+
+* **목적:** 직전 작업 후속 3건 일괄 처리.
+* **내용:**
+  - `indicators.py`: `calculate_adx`/`calculate_chandelier_exit`에 `atr=None` 인자, `compute_all_indicators`가 atr14 전달(ATR(14) 3회→1회).
+  - `backtest.py`: `prepare()`로 봉별 지표(최근 20봉) 1회 사전 계산 후 k별 재사용, `_run(start, end)`로 구간만 거래(앞 구간은 지표·일봉 기준값 웜업). WFO를 일 경계 분할로 변경, `train_days`/`test_days` 지정 시 롤링 폴드 + OOS 합산(폴드 복리 수익·거래·승률·PF), 기존 반환 키 유지 + `folds` 추가, 최적화 후 k 원복. `load_minute_bars_from_db()`와 CLI(`python backtest.py <code> --train-days 20 --test-days 5`) 추가 — 조회 전용, datetime 14자리/19자 혼재를 숫자 추출로 파싱, 거래량 0 봉은 보정 없이 제외하고 건수 출력.
+  - `test_backtest.py`: 일 경계 분할 검증, 롤링 폴드 구성·OOS 거래가 검증 구간 안에서만 발생·k 원복 테스트 추가.
+* **수정/생성 파일:** `indicators.py`, `backtest.py`, `test_backtest.py`
+* **리뷰:** 사전 계산 지표는 각 봉까지의 20봉만 사용(look-ahead 없음), `_run`은 캐시 dict를 복사해 써 컨텍스트 주입이 캐시를 오염시키지 않음. 폴드 경계가 일 단위라 당일 누적거래량이 끊기지 않음. 한계: 단일 종목·1포지션, 체결강도·호가·레짐 미반영, 청산 체결가를 봉 저가로 둬 보수적 편향.
+* **검증:**
+  - ATR 변경 HEAD 대비 `assert_frame_equal` 9개 케이스 EQUAL, 속도 14.43ms → 12.91ms(15회 교차 최소값).
+  - `pytest -q` 75 passed(exit 0, 34초 → 17초).
+  - **실데이터 롤링 WFO** `python backtest.py 005930 --train-days 20 --test-days 5` → exit 0, 639초. 조회 24,225행 중 거래량0 678행 제외, 23,547행·69거래일(2026-05-07~08-27), 10폴드. **OOS 합산: 수익 −8.40%, 거래 75건, 승률 18.7%, PF 0.19.** 모든 폴드의 In-Sample 최고 샤프가 음수(−5.5 ~ −10.5) → k 조정으로 해결되지 않는 수준.
+* **별도 발견(미조치):** `minute_ohlcv`의 실시간 저장 분봉(19자 datetime) 98,764행 거래량이 전부 0. 실시간 버퍼 분봉 거래량이 0이면 실거래 VWAP는 봉 대표가로 대체되고 POC는 최하단 구간으로 고정되어 VWAP·POC 필터가 사실상 통과 상태일 가능성.
+* **후속:** ① 실시간 틱 거래량 필드 확인 및 버퍼 분봉 거래량 수정(실거래 필터 정상화). ② 005930 외 종목 실데이터 WFO, 청산 사유별 손익 분해로 손실 원인(하드스탑/본절/트레일링/15:15 청산) 파악. ③ 결과 기준 실전 투입 보류 검토.
+
+---
+
+## 📅 [2026-10-05 03:20] [성능] indicators.py 지표 계산 속도 개선 (계산식 변경 없음)
+
+* **목적:** `get_latest_indicators`가 실거래 틱 평가·백테스트 봉마다 호출되는데 호출당 수십 ms 소요. 프로파일 결과 `_standardize_columns`의 반복 df 복사(지표 1회당 11번)와 컬럼별 `df[...] =` 삽입(25회)이 주원인.
+* **내용:** `_is_standardized()` 추가 — 컬럼명 중복·별칭·대문자 없음, OHLCV가 numpy 정수/실수형, 실수형 NaN 없음이면 `_standardize_columns`가 복사 없이 원본 반환. `compute_all_indicators`는 지름길일 때 `df.copy()`로 입력 보호, 지표 컬럼은 dict에 모아 `pd.concat` 1회(입력에 같은 이름 컬럼이 있으면 기존 위치에 덮어쓰기 유지).
+* **수정/생성 파일:** `indicators.py`, `test_indicators.py`(지름길/표준화 경로 결과 동일 + 입력 불변 테스트 1건)
+* **리뷰:** 지름길 반환은 원본 객체이므로 내부 함수가 df_std를 변형하면 호출자 df가 바뀔 수 있음 → 현재 calculate_* 함수들은 읽기만 함(확인), compute_all만 컬럼을 추가하므로 복사로 보호. 대상이 아닌 입력(별칭·object·bool·nullable·NaN)은 기존 경로 그대로.
+* **검증:** HEAD 버전과 `assert_frame_equal` 비교 9개 케이스(20/1/2/200봉, NaN, 실수 거래량, 대문자·키움 별칭 컬럼, 기존 ma5·문자 컬럼) 전부 EQUAL + 입력 df 변형 없음. 속도(20봉, 5회 교차 측정 최소값) 33.96ms → 20.67ms(−39%). `pytest -q` 74 passed(exit 0, 전체 78초 → 34초). 1일 390봉 백테스트 15.8초(거래 0건, 변경 전과 동일). 실거래 런타임 측정은 미실행(장외).
+* **후속:** ATR 중복 계산(14기간 3회 + 20기간 1회) 재사용 시 추가 단축 여지. DB `minute_ohlcv` 실데이터 백테스트, WFO 일 단위 다구간 개선.
+
+---
+
+## 📅 [2026-10-05 03:05] [백테스트] backtest.py가 실거래 strategy.py 판정을 그대로 호출하도록 통일
+
+* **목적:** PDF 분석 2순위. 백테스트가 별도 로직(2.0ATR/−5% 스탑, 2.5ATR 트레일링, R1/R2 분할익절, ADX·VWAP 등 필터 없음)을 써서 실거래 전략 성과를 대변하지 못하던 문제 해소.
+* **내용:**
+  - `strategy.py`: `now = ind.get('now') or get_kst_now()` (매수/매도 2곳). 실거래는 `now`를 넣지 않으므로 동작 불변.
+  - `backtest.py`: 분봉 입력(datetime 필수). 봉마다 최근 20봉 `get_latest_indicators` + 당일 시가 + 전일까지 20일 피보나치/평균거래량 + 당일 누적거래량 + 봉 시각을 `ind`로 구성해 `check_buy_signal`(종가 진입)/`check_sell_signal`(저가 판정·체결, 비관적) 호출. 수량은 `AsyncPortfolioManager.get_order_qty`. 부분매도 50%(실거래와 동일). 분할매도 수령액을 거래 PnL에 포함(기존엔 누락). 샤프/CAGR은 일별 자산 기준. 자체 켈리·스탑 파라미터 제거, `strategy` 주입 지원.
+  - `test_backtest.py`: 합성 분봉으로 재작성, 스텁 전략 주입으로 위임·봉 시각 전달·체결가/비용 검증 추가.
+* **수정/생성 파일:** `backtest.py`, `strategy.py`, `test_backtest.py`
+* **리뷰:** 실거래와 남은 차이 — 체결강도·호가잔량·시장 레짐 미반영(데이터 없음), 관심종목 기준값은 전일까지 20일(실거래는 당일 포함 가능), 단일종목·1포지션. WFO는 행 비율로 분할해 일중 분할 가능하고, OOS 첫날은 일봉 기준값이 없음. 성능: `get_latest_indicators`가 호출당 약 54ms(프로파일 결과 `_standardize_columns` 11회 반복이 약 40%) — 1일(390봉) 약 20초, 실거래 틱 평가도 같은 비용.
+* **검증:** `py_compile` exit 0. `pytest -q` 73 passed(exit 0, 78초). 실제 전략 1일 합성 분봉 실행: 거래 0건, 매수 거절 사유 집계 ADX 무추세 215·14:30 이후 60·DMI 43·돌파 미달 25·RSI 19·장초반 15·MA20 12·POC 1 → 봉 시각 기반 시간 필터 정상 작동 확인. 실데이터 백테스트는 미실행(분봉 데이터 미준비).
+* **후속:** `indicators.compute_all_indicators` 중복 표준화 제거로 속도 개선(실거래에도 이득). DB `minute_ohlcv` 실데이터로 백테스트 실행. WFO를 일 단위·다구간 롤링으로 개선.
+
+---
+
+## 📅 [2026-10-05 02:40] [리스크] 시장 레짐 승수를 실제 주문 수량에 반영
+
+* **목적:** "클로드를 펀드매니저로 만들기"(quantframe.io 번역) PDF 분석 결과 반영. 확신도(시장 상태)가 낮으면 비중을 줄인다는 원칙에 비춰 보니, `MacroRegimeFilter.get_regime_kelly_multiplier()`(강세 1.0/횡보 0.6/급락 0.0)가 API 표시용으로만 쓰이고 주문 수량에는 미반영이었음.
+* **내용:** `get_order_qty()`에 `regime_multiplier`(기본 1.0) 인자 추가, 켈리 비중에 곱함. 0 이하이면 0주. 매수 호출부(`_evaluate_buy_condition_impl`)에서 현재 레짐 승수 전달.
+* **수정/생성 파일:** `async_portfolio.py`, `main_rest_async.py`, `test_strategy_quant.py`(테스트 1건 추가)
+* **리뷰:** 기본값 1.0이라 기존 호출부/테스트 동작 불변. 급락장은 기존대로 `market_filter_passed`(main_rest_async.py:1377)에서 먼저 차단되므로 호출부의 "0주→1주 보정" 경로를 타지 않음. 소액 계좌 최소 1주 보정은 유지되어 횡보장에도 1주 매수는 가능. 레짐 평가는 KODEX200 등락률만 입력(VIX/환율 미연동)이라 횡보 판정은 사실상 KODEX200 −0.5% 미만일 때만 발생.
+* **검증:** `python -m py_compile` exit 0, `python -m pytest -q` 72 passed(신규 1건 포함, exit 0). 실제 키움 API 실행은 미실행(장외 시간).
+* **후속:** PDF 분석 2순위 — `backtest.py`가 `strategy.py` 판정 로직을 그대로 쓰도록 통일(현재 스탑·트레일링·필터 파라미터 불일치). WFO 롤링 다구간화. 재시작 시 `trade_returns` 복원 여부 확인.
+
+---
+
+## 📅 [2026-10-03] [기능] KRX 휴장일 달력(krx_holidays.json) 도입
+
+* **목적:** 양력 고정 휴일만 판별하던 `is_korean_market_holiday()`가 설날·추석·대체공휴일·선거일을 놓치던 문제 보완.
+* **내용:** `krx_holidays.json`에 연도별 휴장일을 두고, 해당 연도가 있으면 그 목록을 그대로 따름. 없는 연도는 기존 고정 휴일 로직으로 폴백하고 연도별 1회 경고. CI 패키징(`deploy.yml`)에 JSON 복사 추가(`COPY . .`인 Dockerfile은 변경 없음).
+* **수정/생성 파일:** `krx_holidays.json`(신규), `main_rest_async.py`, `.github/workflows/deploy.yml`, `test_safety_guards.py`
+* **데이터 한계:** 2026년 17일은 2차 출처(jangjeon.kr, glasswallet.com, 두 곳 일치)이며 KRX 공식 공지로 재확인 필요. 특히 7/17(제헌절)과 6/3(지방선거)은 공식 확인 전. 2027년은 확인된 목록이 없어 비워 둠(폴백 적용, 설날 2/7~9·추석 9/14~16 등 누락).
+* **리뷰:** 파일 누락·파싱 오류 시 봇이 죽지 않고 폴백. 연도 키가 있으면 목록 외 평일은 영업일로 판정하므로 목록 오기입 시 해당일 오판 가능.
+* **검증:** `pytest -q` 71 passed(신규 1건 포함, exit 0).
+* **후속:** 2027년 데이터 추가(12월경), KRX 공식 목록 대조.
+
+---
+
+## 📅 [2026-10-03] [보안/주문 안전] 코드 분석 지적 사항 중 코드로 처리 가능한 항목 수정
+
+### 1. 작업 개요 및 목적
+- 코드 분석에서 발견된 위험 중 코드 수정으로 막을 수 있는 항목 처리. (키 재발급, git 이력 삭제는 코드 밖 조치로 별도 필요)
+- 변경 내용:
+  - `.env` git 추적 해제(`git rm --cached`) 및 `.gitignore` 추가 (이력 속 값은 그대로이므로 키 재발급 필요)
+  - HTTP 오류 로그의 payload에서 `accPwd`/`appkey`/`secretkey` 마스킹
+  - 변경성 API 5개에 `API_AUTH_TOKEN` 설정 시 `X-API-Token` 검증 (미설정이면 기존 동작), `CORS_ORIGINS` 지정 시 해당 도메인만 허용 및 credentials 활성
+  - 종목별 `_buy_inflight`로 동시 중복 매수 차단
+  - 주문(kt10000/kt10001) 재시도 5→1회
+  - ADX/VWAP 미산출 시 매수 보류 (시간필터 skip 모드는 기존 동작)
+  - 접수 시점 로그 문구를 "체결"→"접수"로 정정, 실전 모드 시작 경고, 중복 호출 제거, 주석 불일치 수정
+
+### 2. 수정/생성된 파일
+- `.gitignore`, `api_server.py`, `async_kiwoom_client.py`, `main_rest_async.py`, `strategy.py`, `test_safety_guards.py`(신규), `.env`(추적 해제만, 로컬 파일 유지)
+
+### 3. 🔍 코드 리뷰 요약
+- 한계: 인증은 opt-in이라 `API_AUTH_TOKEN`을 설정하기 전까지 API는 무방비이며, 프론트엔드는 아직 `X-API-Token`을 보내지 않음(토큰 설정 시 프론트 수정 필요).
+- 미해결: 포지션이 "접수" 시점에 편입되는 구조는 유지(미체결 취소 시 싱크 전까지 불일치 가능). 모의 폴백 종목 주입, 휴장일 달력, API 호출 중복(스트림 워커와 감시 루프)은 이번 범위 제외.
+- 영향: 재시작 직후 캔들이 쌓이기 전(약 수 분)에는 신규 매수가 보류됨.
+
+### 4. 검증 결과
+- `python -m py_compile` → exit 0
+- 수정 전 `pytest -q`: 65 passed / 수정 후: 70 passed (신규 5건 포함, exit 0)
+- 동시 호출 단위 테스트는 목(Mock) 기반이며 실제 키움 API/AKS 실행은 미실행
+
+### 5. 후속 할 일
+- 코드 밖: 실전 APP_KEY/SECRET·계좌 비밀번호·DB 비밀번호 재발급, 저장소 공개 여부 확인, 필요 시 git 이력 정리
+- `API_AUTH_TOKEN`, `CORS_ORIGINS` 운영 환경변수 설정 및 프론트엔드에 토큰 헤더 반영
+- CI에 pytest 단계 추가 검토
+
+---
+
 ## 📅 [2026-09-29 15:20] [배포] KST 타임존 완벽 교정판 main 브랜치 병합 및 GitHub Actions -> AKS 무중단 자동 배포 트리거
 
 ### 1. 작업 개요 및 목적

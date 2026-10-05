@@ -2,9 +2,9 @@
 적응형 퀀트 매매 전략 모듈 (Adaptive Quant Strategy Engine)
 - ATR 기반 동적 변동성 돌파 진입 (Adaptive Volatility Breakout)
 - 승률 70%+ 타겟팅 5대 고승률 퀀트 알파 필터:
-  1) ADX(14) 추세 강도 필터: ADX >= 20 및 +DI > -DI (무추세 횡보장 휩소 100% 기각)
+  1) ADX(14) 추세 강도 필터: ADX >= 18 및 +DI > -DI (무추세 횡보장 휩소 100% 기각)
   2) VWAP 스마트 밴드 지지 & 건전 이격도(+0.2% ~ +2.0%) 가드
-  3) 체결강도(Volume Power >= 115%) 및 호가 불균형(Orderbook Imbalance) 필터
+  3) 체결강도(Volume Power >= 110%) 및 호가 불균형(Orderbook Imbalance) 필터
   4) 대량 매물대(Volume Profile POC) 저항선 돌파 안착 필터
   5) 볼린저 밴드 + 켈트너 채널 스퀴즈 모멘텀(Squeeze Momentum) 상방 발산
 - 엄격한 리스크 관리 & 출구 전략:
@@ -19,6 +19,9 @@ import pandas as pd
 import numpy as np
 
 from database import get_kst_now
+
+
+MIN_STOCK_PRICE = 1000  # 동전주 기준가 (미만이면 매수 대상 제외) — 관심종목 선정에서도 사용
 
 
 class AdaptiveVolatilityBreakoutStrategy:
@@ -37,7 +40,8 @@ class AdaptiveVolatilityBreakoutStrategy:
                  hard_stop_loss_rate: float = -0.03,
                  trailing_stop_drop_rate: float = -0.02,
                  trailing_activation_pct: float = 0.015,
-                 use_trailing_stop_only: bool = True):
+                 use_trailing_stop_only: bool = True,
+                 breakeven_buffer_pct: float = 0.0025):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
@@ -48,6 +52,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         self.trailing_stop_drop_rate = trailing_stop_drop_rate  # 고점 대비 -2.0% 하락 시 청산
         self.trailing_activation_pct = trailing_activation_pct  # +1.5% 이상 상승 시 트레일링 가동
         self.use_trailing_stop_only = use_trailing_stop_only    # 데이트레이딩 모드 (고정 분할익절 배제하고 추세 추종)
+        self.breakeven_buffer_pct = breakeven_buffer_pct        # 본절선 = 매수가 × (1 + 보전폭), 기본 0.25%
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -66,7 +71,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         if ind is None:
             ind = {}
 
-        now = get_kst_now()
+        now = ind.get('now') or get_kst_now()  # 백테스트는 봉 시각을 주입
         is_test = ind.get('is_test', False)
         skip_time_filter = ind.get('skip_time_filter', False) or is_test
 
@@ -78,7 +83,7 @@ class AdaptiveVolatilityBreakoutStrategy:
                 return False, "시간외_신규매수차단(14:30이후)"
 
         # [필터 2] 저가주/동전주 제외 (1,000원 미만 잡주 차단)
-        if current_price < 1000 and not is_test:
+        if current_price < MIN_STOCK_PRICE and not is_test:
             return False, "동전주_제외(1000원미만)"
 
         # 기본 시세 및 지표 파라미터 추출
@@ -102,6 +107,10 @@ class AdaptiveVolatilityBreakoutStrategy:
         adx = float(ind.get('adx', ind.get('adx14', 0)))                   # ADX 추세 강도
         plus_di = float(ind.get('plus_di', 0))
         minus_di = float(ind.get('minus_di', 0))
+
+        # [필터 2-1] 핵심 지표(ADX/VWAP) 미산출 시 진입 보류 (데이터 부족 상태에서 필터가 통째로 우회되는 것을 방지)
+        if (adx <= 0 or vwap <= 0) and not skip_time_filter:
+            return False, "지표_미산출_진입보류(ADX/VWAP)"
 
         # [필터 3] RSI(14) 극단적 초과열 구간(80+) 추격 매수 차단 (상투 잡기 방지)
         if rsi14 >= 80.0 and not is_test:
@@ -223,13 +232,13 @@ class AdaptiveVolatilityBreakoutStrategy:
         # 2. ⏰ 장 마감 전 시간 기반 강제 청산 (오버나잇 리스크 100% 회피, 15:15 이후)
         skip_time_filter = ind.get('skip_time_filter', False) if ind else False
         if not skip_time_filter:
-            now = get_kst_now()
+            now = (ind.get('now') if ind else None) or get_kst_now()  # 백테스트는 봉 시각을 주입
             if now.hour == 15 and now.minute >= 15:
                 return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.2%})"
 
         # 3. 🛡️ [Risk-Free Guard] 본절선 상향 (최고가가 +1.2% 이상 도달 후 본절선 하회 시 손실 전환 원천 차단)
         if highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
-            breakeven_price = buy_price * 1.0025  # 제세공과금/슬리피지 0.25% 보전
+            breakeven_price = buy_price * (1.0 + self.breakeven_buffer_pct)  # 제세공과금/슬리피지 보전
             if current_price <= breakeven_price:
                 return "SELL_ALL", f"본절스탑_손실전환방어(최고{int(highest_p):,}원→현재{int(current_price):,}원, {profit_rate:.2%})"
 
@@ -245,7 +254,7 @@ class AdaptiveVolatilityBreakoutStrategy:
             if atr14 > 0:
                 chandelier_stop = highest_p - (self.atr_trailing_stop_mult * atr14)
                 if sell_stage >= 1 or highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
-                    chandelier_stop = max(buy_price * 1.0025, chandelier_stop)
+                    chandelier_stop = max(buy_price * (1.0 + self.breakeven_buffer_pct), chandelier_stop)
 
                 if current_price <= chandelier_stop and highest_p >= buy_price * 1.015:
                     return "SELL_ALL", f"샹들리에_트레일링스탑_최고{int(highest_p):,}원→스탑{int(chandelier_stop):,}원({profit_rate:.2%})"

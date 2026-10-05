@@ -34,3 +34,33 @@ export function getWsUrl(endpoint: string): string {
   const cleanEndpoint = endpoint.startsWith('/') ? endpoint : `/${endpoint}`;
   return `${wsProto}//${wsHost}${getWsBase()}${cleanEndpoint}`;
 }
+
+// ===== 변경성 API(주문·봇 제어·파라미터) 인증 =====
+// 서버에 API_AUTH_TOKEN이 설정되면 X-API-Token 헤더가 필요하다. 401을 받으면 토큰을 한 번 입력받아
+// 이 브라우저에만 저장하고 재시도한다. (서버 미설정이면 헤더가 무시되어 기존과 동일)
+const TOKEN_KEY = 'kiwoom_api_token';
+
+function readToken(): string {
+  try { return window.localStorage.getItem(TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+function saveToken(token: string): void {
+  try { window.localStorage.setItem(TOKEN_KEY, token); } catch { /* 저장 불가 환경이면 이번 요청에만 사용 */ }
+}
+
+export async function postApi(endpoint: string, body?: unknown): Promise<Response> {
+  const send = (token: string) => fetch(getApiUrl(endpoint), {
+    method: 'POST',
+    headers: {
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+      ...(token ? { 'X-API-Token': token } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  const res = await send(readToken());
+  if (res.status !== 401) return res;
+  const entered = window.prompt('API 인증 토큰을 입력하세요 (이 브라우저에 저장됩니다)');
+  if (!entered) return res;
+  saveToken(entered.trim());
+  return send(entered.trim());
+}

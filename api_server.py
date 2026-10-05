@@ -6,13 +6,16 @@ Gate Info:
 - User's verbatim instruction: "진행해줘"
 """
 import asyncio
+import calendar
 import json
+import re
 import os
+import secrets
 import time
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter, Depends, Header
 from fastapi.responses import RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -334,11 +337,22 @@ async def portfolio_broadcast_loop():
             print(f"WS Broadcast Error: {e}")
         await asyncio.sleep(1.0)
 
+def _account_sync_interval() -> float:
+    """장중(평일·휴장일 아님·09:00~15:30) ACCOUNT_SYNC_MARKET_SEC(기본 30초), 그 외 ACCOUNT_SYNC_IDLE_SEC(기본 300초)
+    - 동기화 1회에 잔고·예수금 TR이 최대 11회 호출되므로 5초 고정 주기는 요청 한도 초과를 유발
+    - 주문·청산 직후 동기화는 각 경로에서 즉시 호출되므로 주기를 늘려도 반영 지연 없음"""
+    now = get_kst_now()
+    in_session = (now.weekday() < 5 and not AsyncTradingBot.is_korean_market_holiday(now)
+                  and (9, 0) <= (now.hour, now.minute) <= (15, 30))
+    key, default = ("ACCOUNT_SYNC_MARKET_SEC", "30") if in_session else ("ACCOUNT_SYNC_IDLE_SEC", "300")
+    return float(os.getenv(key, default))
+
+
 async def account_sync_background_loop():
-    """5초 주기로 키움 OpenAPI 4대 TR을 스캔하여 MTS 앱의 5대 보유 종목을 실시간 동기화"""
+    """장중/장외 주기로 키움 계좌 잔고·보유 종목 동기화"""
     while True:
         try:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(_account_sync_interval())
             if ctx.bot:
                 await ctx.bot._sync_account_balance()
         except asyncio.CancelledError:
@@ -370,6 +384,12 @@ async def lifespan(app: FastAPI):
                 ctx.portfolio.initial_capital = float(db_bal.get('total_asset', 10_000_000))
                 ctx.portfolio.total_asset = float(db_bal.get('total_asset', 10_000_000))
                 ctx.portfolio.current_capital = float(db_bal.get('deposit', 10_000_000))
+
+            # 재시작해도 켈리 비중이 기본값(1/N)으로 돌아가지 않도록 청산 수익률 이력 복원
+            if hasattr(ctx.db, 'get_recent_trade_returns'):
+                restored_returns = await ctx.db.get_recent_trade_returns(limit=ctx.portfolio.trade_returns.maxlen)
+                ctx.portfolio.trade_returns.extend(restored_returns)
+                print(f"✅ [API Server] 켈리 계산용 청산 수익률 {len(restored_returns)}건 복원")
 
             if hasattr(ctx.db, 'get_portfolio_positions'):
                 db_pos = await ctx.db.get_portfolio_positions()
@@ -434,13 +454,23 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+# CORS 허용 도메인: CORS_ORIGINS(쉼표 구분)로 제한. 미설정 시 기존처럼 전체 허용하되 쿠키 자격증명은 끈다.
+_cors_origins = [o.strip() for o in os.getenv("CORS_ORIGINS", "").split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins or ["*"],
+    allow_credentials=bool(_cors_origins),
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+async def require_api_token(x_api_token: Optional[str] = Header(default=None)):
+    """변경성(주문/제어) API 인증: API_AUTH_TOKEN이 설정된 경우 X-API-Token 헤더가 일치해야 한다."""
+    expected = os.getenv("API_AUTH_TOKEN", "")
+    if not expected:
+        return
+    if not x_api_token or not secrets.compare_digest(x_api_token, expected):
+        raise HTTPException(status_code=401, detail="인증 토큰이 유효하지 않습니다.")
 
 # ================= REST 엔드포인트 라우터 정의 =================
 api_router = APIRouter()
@@ -485,8 +515,41 @@ async def get_bot_status():
         "active_positions_count": len(ctx.portfolio.positions) if ctx.portfolio else 0,
         "circuit_breaker_open": circuit_open,
         "mdd_shutdown": getattr(ctx.bot, 'mdd_shutdown', False),
-        "daily_circuit_breaker": getattr(ctx.bot, 'daily_circuit_breaker', False)
+        "daily_circuit_breaker": getattr(ctx.bot, 'daily_circuit_breaker', False),
+        "strategy_params": _strategy_params()
     }
+
+
+def _strategy_params() -> Dict[str, Any]:
+    """화면 표시용 실제 전략·리스크 파라미터 (봇 인스턴스 값 그대로)"""
+    st = getattr(ctx.bot, 'strategy', None)
+    pf = ctx.portfolio
+    return {
+        "hard_stop_loss_pct": round(getattr(st, 'hard_stop_loss_rate', 0) * 100, 2) if st else None,
+        "atr_hard_stop_mult": getattr(st, 'atr_hard_stop_mult', None),
+        "trailing_stop_drop_pct": round(getattr(st, 'trailing_stop_drop_rate', 0) * 100, 2) if st else None,
+        "atr_trailing_stop_mult": getattr(st, 'atr_trailing_stop_mult', None),
+        "trailing_activation_pct": round(getattr(st, 'trailing_activation_pct', 0) * 100, 2) if st else None,
+        "breakeven_trigger_pct": round(getattr(st, 'breakeven_trigger_pct', 0) * 100, 2) if st else None,
+        "use_trailing_stop_only": getattr(st, 'use_trailing_stop_only', None),
+        "max_stocks": getattr(pf, 'max_stocks', None) if pf else None,
+        "daily_loss_limit_pct": round(getattr(ctx.bot, 'daily_loss_limit_rate', 0) * 100, 2),
+    }
+
+
+@api_router.get("/orders/pending")
+async def get_pending_orders():
+    """봇이 추적 중인 미체결 주문 목록 (OrderTimeoutManager 메모리 기준)"""
+    mgr = getattr(ctx.bot, 'order_timeout_mgr', None) if ctx.bot else None
+    if not mgr:
+        return {"orders": [], "timeout_seconds": None}
+    now_ts = time.time()
+    orders = [
+        {**{k: info.get(k) for k in ("order_no", "code", "name", "side", "qty", "unfilled_qty", "price")},
+         "elapsed_sec": int(now_ts - info.get('timestamp', now_ts))}
+        for info in list(mgr.tracked_orders.values()) if info.get('unfilled_qty', 0) > 0
+    ]
+    return {"orders": orders, "timeout_seconds": mgr.timeout_seconds}
 
 @api_router.get("/portfolio")
 async def get_portfolio():
@@ -499,20 +562,7 @@ async def get_quant_performance():
     """퀀트 핵심 성과 지표(KPI) 조회 (일일/누적 수익률, 승률, MDD, 손익비 등)"""
     if ctx.db and hasattr(ctx.db, 'get_quant_performance_metrics'):
         return await ctx.db.get_quant_performance_metrics()
-    return {
-        "daily_return_pct": 0.0,
-        "cumulative_return_pct": 0.0,
-        "win_rate_pct": 0.0,
-        "total_trades": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "mdd_pct": 0.0,
-        "profit_factor": 0.0,
-        "total_profit": 0.0,
-        "total_loss": 0.0,
-        "recent_closed_trades": [],
-        "equity_history": []
-    }
+    return DatabaseManager._empty_quant_metrics()
 
 
 @api_router.get("/quant/status")
@@ -545,15 +595,17 @@ async def get_quant_status(code: Optional[str] = None):
 
     # 2. Micro Orderbook & Volume Indicators
     target_code = code or "005930"
-    imbalance = {"imbalance_ratio": 0.25, "total_bid_qty": 250000.0, "total_ask_qty": 150000.0, "bid_ask_spread": 100.0}
-    volume_power = 128.5
+    imbalance = None      # 호가 응답을 해석하지 못하면 None (가짜 기본값 금지)
+    volume_power = None   # 체결강도 실데이터 수집 경로 없음 → None
 
     # 실시간 호가/체결 데이터 조회 시도
     if ctx.client and hasattr(ctx.client, 'get_orderbook'):
         try:
             ob = await ctx.client.get_orderbook(target_code, priority=RequestPriority.LOW)
             if ob:
-                imbalance = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+                parsed = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+                if (parsed.get('total_bid_qty', 0) or 0) + (parsed.get('total_ask_qty', 0) or 0) > 0:
+                    imbalance = parsed
         except Exception:
             pass
 
@@ -615,6 +667,18 @@ async def get_watchlist():
     }
 
 
+def _chart_time(dt_str: str, daily: bool = False):
+    """'YYYY-MM-DD HH:MM:SS' / 'YYYYMMDDHHMMSS' / 'YYYYMMDD' 모두 처리.
+    분봉은 KST 벽시계를 UTC로 간주한 초(차트가 KST 시각 그대로 표시), 일봉은 'YYYY-MM-DD'. 실패 시 None"""
+    digits = re.sub(r'\D', '', str(dt_str or ''))
+    try:
+        if daily:
+            return datetime.strptime(digits[:8], '%Y%m%d').strftime('%Y-%m-%d')
+        return calendar.timegm(datetime.strptime(digits[:12].ljust(14, '0'), '%Y%m%d%H%M%S').timetuple())
+    except ValueError:
+        return None
+
+
 @api_router.get("/chart/{code}")
 async def get_stock_chart_data(code: str, period: str = "1m"):
     """
@@ -643,9 +707,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
         fib_618 = float(w_item.get('fib_618', 0))
     elif ctx.portfolio:
         pos = ctx.portfolio.positions.get(clean_code)
-        if pos:
-            stock_name = pos.name
-            current_price = float(pos.current_price or pos.buy_price)
+        if pos:  # 포지션은 dict (속성 접근 시 AttributeError → 500)
+            stock_name = pos.get('name') or clean_code
+            current_price = float(pos.get('current_price') or pos.get('buy_price') or 0)
 
     # 2. 인메모리 링버퍼에서 분봉 조회 (1m/5m)
     if period != 'D' and ctx.bot and hasattr(ctx.bot, 'buffer') and ctx.bot.buffer:
@@ -653,14 +717,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
             df = ctx.bot.buffer.get_dataframe(clean_code, limit=60)
             if not df.empty:
                 for row in df.itertuples():
-                    dt_val = str(getattr(row, 'datetime', ''))
-                    try:
-                        t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:%S').timestamp())
-                    except Exception:
-                        try:
-                            t_sec = int(datetime.strptime(dt_val, '%Y-%m-%d %H:%M:00').timestamp())
-                        except Exception:
-                            t_sec = int(time.time())
+                    t_sec = _chart_time(getattr(row, 'datetime', ''))
+                    if t_sec is None:
+                        continue  # 시각 해석 불가 봉은 제외 (현재 시각으로 채우지 않음)
                     candles.append({
                         "time": t_sec,
                         "open": float(getattr(row, 'open', 0)),
@@ -681,15 +740,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
             if db_candles:
                 candles = []
                 for c in db_candles:
-                    dt_str = str(c.get('datetime', ''))
-                    if period == 'D':
-                        t_val = dt_str[:10]
-                    else:
-                        try:
-                            t_sec = int(datetime.strptime(dt_str, '%Y-%m-%d %H:%M:%S').timestamp())
-                        except Exception:
-                            t_sec = int(time.time())
-                        t_val = t_sec
+                    t_val = _chart_time(c.get('datetime', ''), daily=(period == 'D'))
+                    if t_val is None:
+                        continue  # 시각 해석 불가 봉은 제외
                     candles.append({
                         "time": t_val,
                         "open": float(c.get('open', 0)),
@@ -722,7 +775,7 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
                         "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
                         "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
                         "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
-                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                        "volume": abs(float(str(item.get('trde_qty') or item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
                     })
         else:
             minute_res, _ = await ctx.client.get_minute_chart(clean_code, base_dt=today_str, priority=RequestPriority.LOW)
@@ -744,8 +797,11 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
                         "high": abs(float(str(item.get('high_pric') or item.get('hgpr') or 0).replace(',', ''))),
                         "low": abs(float(str(item.get('low_pric') or item.get('lwpr') or 0).replace(',', ''))),
                         "close": abs(float(str(item.get('cur_prc') or item.get('clpr') or item.get('stck_clpr') or 0).replace(',', ''))),
-                        "volume": abs(float(str(item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
+                        "volume": abs(float(str(item.get('trde_qty') or item.get('acml_vol') or item.get('vol') or 0).replace(',', '')))
                     })
+
+    # 차트 라이브러리는 시간 오름차순·중복 없는 데이터만 허용 → 같은 시각은 마지막 값 사용
+    candles = sorted({c["time"]: c for c in candles}.values(), key=lambda c: c["time"])
 
     # 5. 캔들 기반 피보나치 및 가격 보정
     if candles:
@@ -784,7 +840,7 @@ async def get_recent_logs_endpoint(limit: int = 100):
     return {"logs": [], "count": 0}
 
 
-@api_router.post("/order/manual")
+@api_router.post("/order/manual", dependencies=[Depends(require_api_token)])
 async def create_manual_order(req: ManualOrderRequest):
     """대시보드 수동 주문 접수 (HIGH 우선순위 발주)"""
     if not ctx.bot or not ctx.client:
@@ -850,7 +906,7 @@ async def create_manual_order(req: ManualOrderRequest):
         "response": res
     }
 
-@api_router.post("/bot/control")
+@api_router.post("/bot/control", dependencies=[Depends(require_api_token)])
 async def control_bot(req: BotControlRequest):
     """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)"""
     if not ctx.bot:
@@ -891,7 +947,7 @@ async def control_bot(req: BotControlRequest):
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
 
-@api_router.post("/bot/reset-circuit-breaker")
+@api_router.post("/bot/reset-circuit-breaker", dependencies=[Depends(require_api_token)])
 async def reset_circuit_breaker_endpoint():
     """
     🔓 서킷 브레이커 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션
@@ -919,7 +975,7 @@ async def reset_circuit_breaker_endpoint():
     })
     return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}
 
-@api_router.post("/bot/emergency-stop")
+@api_router.post("/bot/emergency-stop", dependencies=[Depends(require_api_token)])
 async def emergency_kill_switch():
     """
     🚨 긴급 비상 킬스위치 (Emergency Kill-Switch)
@@ -975,7 +1031,7 @@ async def emergency_kill_switch():
         "orders": executed_orders
     }
 
-@api_router.post("/bot/params")
+@api_router.post("/bot/params", dependencies=[Depends(require_api_token)])
 async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fraction: Optional[float] = None):
     """런타임 무중단 매매 파라미터 동적 조정"""
     if not ctx.bot:

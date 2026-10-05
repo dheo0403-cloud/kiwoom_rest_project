@@ -22,6 +22,17 @@ jobs:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
 
+      - name: 1-1. Set up Python 3.11 for Tests
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 1-2. Run Backend Unit Tests (실패 시 배포 중단)
+        run: |
+          pip install -r requirements.txt pytest-asyncio==1.4.0 httpx==0.28.1  # 테스트 전용 의존성 (asyncio_mode=auto, FastAPI TestClient)
+          python -m pytest -q
+
       - name: 2. Set up Node.js 20 for Frontend Build
         uses: actions/setup-node@v4
         with:
@@ -45,7 +56,7 @@ jobs:
           mkdir -p ./dist
 
           # 1) 루트 핵심 소스코드 및 설정 파일 복사
-          cp -f Dockerfile requirements.txt .dockerignore start.py ./dist/ 2>/dev/null || true
+          cp -f Dockerfile requirements.txt .dockerignore start.py krx_holidays.json ./dist/ 2>/dev/null || true
           cp -f *.py ./dist/ 2>/dev/null || true
 
           # 2) 프론트엔드 빌드 산출물 복사

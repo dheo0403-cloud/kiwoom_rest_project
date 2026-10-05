@@ -44,20 +44,37 @@ class TestCircularCandleBuffer(unittest.TestCase):
         self.assertEqual(df.iloc[-1]['close'], 70050 + 14)
 
     def test_tick_update_and_minute_assembly(self):
-        """틱 수신 시 분봉 롤링 조립 검증"""
-        # 1분차 틱 3개
-        self.buffer.update_tick(70000, 100, "2026-09-04 09:00:00")
-        self.buffer.update_tick(70500, 200, "2026-09-04 09:00:00")
-        self.buffer.update_tick(69800, 300, "2026-09-04 09:00:00")
+        """틱 수신 시 분봉 롤링 조립 검증 (volume은 당일 누적 거래량, 분봉은 누적 차분)"""
+        # 1분차 틱 3개 (누적 1000 → 1200 → 1500)
+        self.buffer.update_tick(70000, 1000, "2026-09-04 09:00:00")
+        self.buffer.update_tick(70500, 1200, "2026-09-04 09:00:00")
+        self.buffer.update_tick(69800, 1500, "2026-09-04 09:00:00")
 
-        # 2분차 틱 유입 -> 1분차 분봉 완성 반환
-        completed = self.buffer.update_tick(70200, 400, "2026-09-04 09:01:00")
+        # 2분차 틱 유입 -> 1분차 분봉 완성 반환 (기동 후 첫 관측 1000부터 집계 → 500)
+        completed = self.buffer.update_tick(70200, 1600, "2026-09-04 09:01:00")
         self.assertIsNotNone(completed)
         self.assertEqual(completed['open'], 70000)
         self.assertEqual(completed['high'], 70500)
         self.assertEqual(completed['low'], 69800)
         self.assertEqual(completed['close'], 69800)
+        self.assertEqual(completed['volume'], 500)
+
+        # 2분차: 직전 분 마지막 누적 1500 기준 → 1600, 1900이면 400
+        self.buffer.update_tick(70300, 1900, "2026-09-04 09:01:00")
+        completed = self.buffer.update_tick(70300, 1950, "2026-09-04 09:02:00")
+        self.assertEqual(completed['volume'], 400)
+
+    def test_cumulative_volume_zero_ignored_and_day_reset(self):
+        """누적 거래량 0(필드 누락)은 무시하고, 누적 감소(날 바뀜) 시 기준을 리셋"""
+        self.buffer.update_tick(70000, 5000, "2026-09-04 15:29:00")
+        self.buffer.update_tick(70000, 0, "2026-09-04 15:29:00")      # 누락 틱 → 무시
+        self.buffer.update_tick(70000, 5300, "2026-09-04 15:29:00")
+        completed = self.buffer.update_tick(71000, 200, "2026-09-05 09:00:00")  # 다음 날 누적 리셋
         self.assertEqual(completed['volume'], 300)
+        completed = self.buffer.update_tick(71000, 260, "2026-09-05 09:01:00")
+        self.assertEqual(completed['volume'], 0)  # 리셋 직후 첫 관측 200부터 집계
+        completed = self.buffer.update_tick(71000, 300, "2026-09-05 09:02:00")
+        self.assertEqual(completed['volume'], 60)
 
     def test_highest_lowest_calculations(self):
         """최고가 및 최저가 초고속 산출 검증"""

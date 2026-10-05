@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Sliders, X, Check, RotateCcw } from 'lucide-react';
-import { getApiUrl } from '../utils/apiConfig';
+import { postApi } from '../utils/apiConfig';
 
 interface ParamsModalProps {
   isOpen: boolean;
@@ -20,9 +20,7 @@ export const ParamsModal: React.FC<ParamsModalProps> = ({ isOpen, onClose, onRef
     setIsSaving(true);
     setMsg(null);
     try {
-      const res = await fetch(getApiUrl(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`), {
-        method: 'POST'
-      });
+      const res = await postApi(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`);
       if (res.ok) {
         setMsg("✅ 퀀트 파라미터가 실시간 데몬에 반영되었습니다.");
         setTimeout(() => {

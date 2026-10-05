@@ -195,12 +195,12 @@ class MockDatabaseManager:
     async def get_quant_performance_metrics(self) -> Dict[str, Any]:
         return {
             "daily_return_pct": 1.25,
-            "cumulative_return_pct": 8.45,
+            "cumulative_realized_pnl": 326000.0,
             "win_rate_pct": 65.5,
             "total_trades": 20,
             "winning_trades": 13,
             "losing_trades": 7,
-            "mdd_pct": -2.15,
+            "realized_mdd_amount": -45000.0,
             "profit_factor": 2.45,
             "total_profit": 550000.0,
             "total_loss": 224000.0,

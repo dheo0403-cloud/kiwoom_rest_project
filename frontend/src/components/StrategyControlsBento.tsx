@@ -12,7 +12,7 @@ import {
   Activity
 } from 'lucide-react';
 import { BotStatus } from '../types';
-import { getApiUrl } from '../utils/apiConfig';
+import { postApi } from '../utils/apiConfig';
 
 interface StrategyControlsBentoProps {
   botStatus: BotStatus;
@@ -30,9 +30,7 @@ export const StrategyControlsBento: React.FC<StrategyControlsBentoProps> = ({ bo
     setIsApplying(true);
     setApplyResult(null);
     try {
-      const res = await fetch(getApiUrl(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`), {
-        method: 'POST'
-      });
+      const res = await postApi(`/bot/params?k_breakout=${kVal}&kelly_fraction=${kellyVal}`);
       if (res.ok) {
         setApplyResult(`✅ 적용 완료: k=${kVal}, Kelly=${kellyVal}`);
       } else {
@@ -50,11 +48,7 @@ export const StrategyControlsBento: React.FC<StrategyControlsBentoProps> = ({ bo
   const handleControlBot = async (action: 'START' | 'STOP' | 'REFRESH' | 'RESET_CIRCUIT_BREAKER') => {
     setIsControlling(true);
     try {
-      const res = await fetch(getApiUrl('/bot/control'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action })
-      });
+      const res = await postApi('/bot/control', { action });
       if (res.ok) {
         if (onRefresh) onRefresh();
       } else {

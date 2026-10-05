@@ -206,9 +206,9 @@ def test_api_server_endpoints():
     assert perf_res.status_code == 200
     perf_data = perf_res.json()
     assert perf_data["win_rate_pct"] == 65.5
-    assert perf_data["mdd_pct"] == -2.15
+    assert perf_data["realized_mdd_amount"] == -45000.0
     assert perf_data["profit_factor"] == 2.45
-    print(f"  ✅ /api/quant/performance 정상 응답 (승률: {perf_data['win_rate_pct']}%, MDD: {perf_data['mdd_pct']}%, PF: {perf_data['profit_factor']})")
+    print(f"  ✅ /api/quant/performance 정상 응답 (승률: {perf_data['win_rate_pct']}%, 실현MDD: {perf_data['realized_mdd_amount']}원, PF: {perf_data['profit_factor']})")
 
     status_res = client.get("/api/quant/status")
     assert status_res.status_code == 200

@@ -1,7 +1,7 @@
 import React, { useState, memo, useCallback } from 'react';
 import { Package, TrendingUp, TrendingDown, Layers, ArrowUpRight, AlertCircle, CheckCircle2 } from 'lucide-react';
-import { Position } from '../types';
-import { getApiUrl } from '../utils/apiConfig';
+import { Position, StrategyParams } from '../types';
+import { postApi } from '../utils/apiConfig';
 
 interface PositionCardItemProps {
   pos: Position;
@@ -10,6 +10,7 @@ interface PositionCardItemProps {
   onSelect: (code: string) => void;
   onManualSell: (code: string, qty: number, side?: string) => void;
   isLoading: boolean;
+  strategyParams?: StrategyParams;
 }
 
 // 개별 종목 카드 React.memo 분리 (해당 종목의 데이터가 변하지 않으면 리렌더링 건너뜀 -> 깜빡임 100% 차단)
@@ -19,7 +20,8 @@ const PositionCardItem = memo<PositionCardItemProps>(({
   isSelected,
   onSelect,
   onManualSell,
-  isLoading
+  isLoading,
+  strategyParams
 }) => {
   const rawBuyPrice = typeof pos.buy_price === 'number' ? pos.buy_price : parseFloat(String(pos.buy_price || 0));
   const rawCurPrice = typeof pos.current_price === 'number' ? pos.current_price : parseFloat(String(pos.current_price || 0));
@@ -80,7 +82,13 @@ const PositionCardItem = memo<PositionCardItemProps>(({
 
       {/* Bottom Row: Stage Progress & Quick Actions */}
       <div className="flex items-center justify-between mt-2.5 pt-2 border-t border-white/5 text-xs">
-        {/* Stage Badges */}
+        {/* Stage Badges: 실제 청산 모드에 맞춰 표시 (트레일링 전용 모드면 분할 익절 단계 없음) */}
+        {strategyParams?.use_trailing_stop_only ? (
+          <div className="text-[10px] text-slate-400">
+            트레일링: <strong className="text-amber-400">+{strategyParams.trailing_activation_pct}%</strong> 도달 후
+            고점 <strong className="text-amber-400">{strategyParams.trailing_stop_drop_pct}%</strong> 하락 시 청산
+          </div>
+        ) : (
         <div className="flex items-center gap-1.5 text-[10px]">
           <span className={`px-1.5 py-0.5 rounded font-medium ${
             stage >= 0 ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'bg-slate-800 text-slate-500'
@@ -100,6 +108,7 @@ const PositionCardItem = memo<PositionCardItemProps>(({
             2차(+5%)
           </span>
         </div>
+        )}
 
         {/* Quick Action Buttons */}
         <div className="flex items-center gap-1.5">
@@ -107,12 +116,12 @@ const PositionCardItem = memo<PositionCardItemProps>(({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                onManualSell(pos.code, Math.max(1, Math.floor(qty * 0.33)));
+                onManualSell(pos.code, Math.max(1, Math.floor(qty * 0.5)));
               }}
               disabled={isLoading}
               className="px-2 py-0.5 text-[10px] font-semibold rounded bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition"
             >
-              33% 익절
+              50% 매도
             </button>
           )}
           <button
@@ -139,6 +148,7 @@ interface ActivePositionsBentoProps {
   onSelectStock: (code: string) => void;
   selectedStockCode: string;
   onRefresh: () => void;
+  strategyParams?: StrategyParams;
 }
 
 export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
@@ -146,7 +156,8 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
   colorMode,
   onSelectStock,
   selectedStockCode,
-  onRefresh
+  onRefresh,
+  strategyParams
 }) => {
   const [loadingCode, setLoadingCode] = useState<string | null>(null);
 
@@ -156,11 +167,7 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
     }
     setLoadingCode(code);
     try {
-      const res = await fetch(getApiUrl('/order/manual'), {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, side, qty, price: 0 })
-      });
+      const res = await postApi('/order/manual', { code, side, qty, price: 0 });
       if (res.ok) {
         alert(`✅ ${code} ${qty}주 시장가 매도 주문이 접수되었습니다.`);
         onRefresh();
@@ -194,7 +201,9 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
             </h2>
           </div>
         </div>
-        <span className="text-[11px] text-slate-400">실시간 PnL 감시 및 3단계 분할 익절</span>
+        <span className="text-[11px] text-slate-400">
+          {strategyParams?.use_trailing_stop_only === false ? '실시간 PnL 감시 및 분할 익절' : '실시간 PnL 감시 및 트레일링 스탑'}
+        </span>
       </div>
 
       {/* Positions List */}
@@ -215,6 +224,7 @@ export const ActivePositionsBento: React.FC<ActivePositionsBentoProps> = memo(({
               onSelect={onSelectStock}
               onManualSell={handleManualSell}
               isLoading={loadingCode === pos.code}
+              strategyParams={strategyParams}
             />
           ))
         )}
