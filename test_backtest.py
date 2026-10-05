@@ -309,3 +309,17 @@ class TestUnconditionalBaseline(unittest.TestCase):
         bt.strategy.k_breakout = 0.0
         t = simulate_daily(pd.DataFrame(rows), bt).set_index("date").loc["20260201"]
         self.assertTrue(t["stopped"])
+
+
+class TestMaxHoldDays(unittest.TestCase):
+    def test_eod_exit_respects_hold_days(self):
+        """기본(0)은 15:15 당일 청산, max_hold_days=3이면 보유 3일째에만 청산"""
+        import asyncio
+        from datetime import datetime
+        from strategy import AdaptiveVolatilityBreakoutStrategy
+        ind = {"now": datetime(2026, 9, 1, 15, 20), "atr14": 0.0}
+        sell = lambda s, held: asyncio.run(s.check_sell_signal("A", 10000.0, 10000.0, dict(ind, hold_days=held)))
+        self.assertTrue(sell(AdaptiveVolatilityBreakoutStrategy(), 1)[1].startswith("장마감_"))
+        held3 = AdaptiveVolatilityBreakoutStrategy(max_hold_days=3)
+        self.assertEqual(sell(held3, 2)[0], "WAIT")
+        self.assertTrue(sell(held3, 3)[1].startswith("보유기간_만료"))

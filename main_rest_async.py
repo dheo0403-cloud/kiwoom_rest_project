@@ -23,6 +23,7 @@ from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
+from collect_history import collect_after_close
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -244,6 +245,8 @@ class AsyncTradingBot:
         # 감시 종목 리스트 (코드, 이름, 피보나치 레벨 정보)
         self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
         self.watchlist: Dict[str, Dict[str, Any]] = {}
+        self.history_collected_on = None  # 장 마감 후 시세 수집을 마친 날짜 (하루 1회)
+        self.history_collect_hour = int(os.getenv("HISTORY_COLLECT_HOUR", "16"))  # KST, 종가 확정 뒤
 
         # 분할 익절 단계 목표치 (1차 전체의 50%, 2차 잔여 물량의 50%, 3차 나머지 전량 100%)
         self.take_profit_stages = [
@@ -1740,6 +1743,20 @@ class AsyncTradingBot:
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    async def collect_market_history(self):
+        """장 마감 후 시세 수집: 종목 정보·일봉(관심·보유·EXTRA_DAILY_CODES)·당일 1분봉(관심·보유). 실패해도 데몬은 계속"""
+        self.history_collected_on = get_kst_now().date()  # 실패해도 같은 날 반복 호출 방지
+        watch = sorted(set(self.watchlist) | set(self.portfolio.positions))
+        extra = [c.strip() for c in os.getenv("EXTRA_DAILY_CODES", "").split(",") if c.strip()]
+        try:
+            stats = await collect_after_close(self.client, self.db, watch, extra)
+            msg = f"장 마감 후 시세 수집 완료: 종목정보 {stats['master']:,}건, 일봉 {stats['daily']:,}행, 1분봉 {stats['minute']:,}행"
+            print(f"🗄️ [수집] {msg}")
+            await self.db.log_message("SYSTEM", msg)
+        except Exception as e:
+            print(f"❌ [수집 오류] {e}")
+            await self.db.log_message("ERROR", f"장 마감 후 시세 수집 오류: {e}")
+
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
         await self.initialize()
@@ -1789,8 +1806,13 @@ class AsyncTradingBot:
                     await self.trading_loop()
                     continue
 
-                # 6. 장 마감 후(15:30 이후): 다음 영업일 08:50까지 안전 휴면 대기
+                # 6. 장 마감 후(15:30 이후): 수집 시각(기본 16:00)에 시세 수집 1회 → 다음 영업일 08:50까지 안전 휴면 대기
                 if now_time.hour > 15 or (now_time.hour == 15 and now_time.minute >= 30):
+                    if self.history_collected_on != now.date():
+                        if now_time.hour < self.history_collect_hour:
+                            await asyncio.sleep(30.0)
+                            continue
+                        await self.collect_market_history()
                     await self.wait_until_next_market_open(8, 50)
                     continue
 

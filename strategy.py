@@ -46,7 +46,8 @@ class AdaptiveVolatilityBreakoutStrategy:
                  trailing_activation_pct: float = 0.015,
                  use_trailing_stop_only: bool = True,
                  breakeven_buffer_pct: float = 0.0025,
-                 disabled_filters=()):
+                 disabled_filters=(),
+                 max_hold_days: int = 0):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
@@ -62,6 +63,7 @@ class AdaptiveVolatilityBreakoutStrategy:
         if unknown:
             raise ValueError(f"알 수 없는 필터: {sorted(unknown)}")
         self.disabled_filters = set(disabled_filters)            # 실험용으로 끈 매수 필터 (기본: 모두 사용)
+        self.max_hold_days = max_hold_days                      # 0 = 당일 청산(실거래 기본), N = 보유 N거래일째 15:15 청산(백테스트 실험)
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -244,7 +246,12 @@ class AdaptiveVolatilityBreakoutStrategy:
         if not skip_time_filter:
             now = (ind.get('now') if ind else None) or get_kst_now()  # 백테스트는 봉 시각을 주입
             if now.hour == 15 and now.minute >= 15:
-                return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.2%})"
+                # 보유 일수(ind['hold_days'], 진입일 = 1)는 백테스트만 넘김 → 실거래는 항상 당일 청산
+                held = int(ind.get('hold_days', 0)) if ind else 0
+                if self.max_hold_days <= 0:
+                    return "SELL_ALL", f"장마감_오버나잇방지_강제청산({profit_rate:.2%})"
+                if held >= self.max_hold_days:
+                    return "SELL_ALL", f"보유기간_만료_청산({held}일, {profit_rate:.2%})"
 
         # 3. 🛡️ [Risk-Free Guard] 본절선 상향 (최고가가 +1.2% 이상 도달 후 본절선 하회 시 손실 전환 원천 차단)
         if highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):

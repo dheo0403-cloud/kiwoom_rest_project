@@ -135,6 +135,57 @@ class DatabaseManager:
         except Exception as e:
             print(f"DB Daily OHLCV Error: {e}")
 
+    async def _executemany(self, sql: str, rows: list, label: str) -> None:
+        """튜플 리스트 일괄 실행 (수집기 공용)"""
+        if not self.pool or not rows: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.executemany(sql, rows)
+                await conn.commit()
+        except Exception as e:
+            print(f"DB {label} Error: {e}")
+
+    async def upsert_daily_rows(self, rows: list):
+        """(code, date, open, high, low, close, volume, value) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO daily_ohlcv (code, date, open, high, low, close, volume, value)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE open=VALUES(open), high=VALUES(high), low=VALUES(low),
+            close=VALUES(close), volume=VALUES(volume), value=VALUES(value)''', rows, "Daily Rows")
+
+    async def upsert_minute_rows(self, rows: list):
+        """(code, datetime14, open, high, low, close, volume) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO minute_ohlcv (code, datetime, open, high, low, close, volume)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE open=VALUES(open), high=VALUES(high), low=VALUES(low),
+            close=VALUES(close), volume=VALUES(volume)''', rows, "Minute Rows")
+
+    async def ensure_stock_master(self):
+        """종목 정보 테이블 (ka10099: 코드·이름·시장·ETF 여부) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS stock_master (
+                            code VARCHAR(10) NOT NULL PRIMARY KEY,
+                            name VARCHAR(100) NOT NULL,
+                            market VARCHAR(10) NOT NULL,
+                            is_etf TINYINT(1) NOT NULL DEFAULT 0,
+                            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB stock_master 생성 Error: {e}")
+
+    async def upsert_stock_master(self, rows: list):
+        """(code, name, market, is_etf) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO stock_master (code, name, market, is_etf) VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), is_etf=VALUES(is_etf)''', rows, "Stock Master")
+
     async def batch_upsert_minute_candles(self, candle_list):
         """튜플/딕셔너리 리스트 형태의 분봉 데이터 비동기 벌크 저장"""
         if not self.pool or not candle_list: return

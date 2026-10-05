@@ -38,6 +38,7 @@ class BacktestTrade:
     return_pct: Optional[float] = None
     exit_reason: Optional[str] = None
     fee_tax_paid: float = 0.0
+    entry_day_idx: int = 0     # 진입 거래일 순번 (보유 일수 계산용)
 
 
 class HighFidelityBacktester:
@@ -171,6 +172,7 @@ class HighFidelityBacktester:
             # 1. 보유 포지션 청산 판정 (봉 저가 기준 비관적 체결)
             if pos is not None:
                 pos.highest_high = max(pos.highest_high, high_p)
+                ind['hold_days'] = day_index[cur_day] - pos.entry_day_idx + 1
                 action, reason = await self.strategy.check_sell_signal(
                     code=code, buy_price=pos.entry_price, current_price=low_p,
                     ind=ind, sell_stage=pos.sell_stage, highest_price=pos.highest_high
@@ -210,7 +212,7 @@ class HighFidelityBacktester:
                         cash -= buy_val + buy_fee
                         pos = BacktestTrade(code=code, entry_date=now, entry_price=entry_price, shares=shares,
                                             cost_basis=buy_val + buy_fee, highest_high=entry_price,
-                                            fee_tax_paid=buy_fee)
+                                            fee_tax_paid=buy_fee, entry_day_idx=day_index[cur_day])
 
             # 3. 자산 곡선 (Equity Curve) 기록
             pos_val = (pos.shares * close_p) if pos else 0.0

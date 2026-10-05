@@ -10,6 +10,8 @@
 - 시장 국면(전일 기준): KODEX200 종가 > MA20, 전 종목 중 MA20 위 비율 > 50%. 종목 선정: 전일 거래대금 상위 N(실거래 WATCHLIST_SIZE).
 - 보유 기간(hold_days>1): 진입일 손절이 없으면 이후 날마다 저가가 손절가에 닿는지 확인(갭하락이면 시가 청산), 마지막 날 종가 청산.
   신호마다 독립 거래로 계산(보유 중 재진입 허용) — 신호의 기대값 비교용.
+- 포트폴리오: 초기 자금·최대 보유 종목 수 제약. 같은 날 신호는 전일 거래대금 순으로 빈 자리만 채우고, 종목당 (당시 평가 자산 / 최대 종목 수).
+  평가는 종가 기준(진입가 대비), 체결·비용은 거래 수익률(ret)에 이미 반영. 소수 주식 허용(금액 단위).
 - 상대 모멘텀: 매월 첫 거래일 시가에 직전 LOOKBACK일(최근 SKIP일 제외) 수익률 상위 TOP_FRAC 동일 비중 매수, 다음 달 첫 거래일 시가 교체.
 - SPO 반등(별도 진입 가설): SPO가 −1 아래에서 상승 전환한 다음 날 시가 매수, 같은 손절, SPO > 0 또는 보유 N일째 종가 청산.
 """
@@ -28,7 +30,7 @@ UNIVERSE_TOP_N = int(os.getenv("WATCHLIST_SIZE", "30"))  # 실거래 관심종�
 SPO_THRESHOLD = 1.0  # SPO 원문 과매도 기준
 SPO_HOLD_DAYS = 5
 MOM_LOOKBACK, MOM_SKIP, MOM_TOP_FRAC = 60, 5, 0.10
-# 지수·레버리지·인버스 ETF (DB에 종목명이 없어 확인된 코드만 제외 — 상대 모멘텀 종목 선택 대상 아님)
+# 지수·레버리지·인버스 ETF — stock_master(ka10099)가 비어 있을 때만 쓰는 대체 목록 (확인된 코드)
 KNOWN_ETF_CODES = {"069500", "102110", "114800", "122630", "229200", "233740", "252670"}
 
 
@@ -56,6 +58,7 @@ def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None, hold_day
     stopped = after_entry_low <= stop
     raw_exit = stop.where(stopped, t['close'])
     keep = pd.Series(True, index=t.index)
+    exit_idx = pd.Series(t.index, index=t.index)
     if hold_days > 1:
         o, lo, c, jumps, n = d['open'].to_numpy(), d['low'].to_numpy(), d['close'].to_numpy(), jump.to_numpy(), len(d)
         for idx in t.index:
@@ -65,10 +68,10 @@ def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None, hold_day
                 continue
             if stopped[idx]:
                 continue
-            raw_exit[idx] = c[last]
+            raw_exit[idx], exit_idx[idx] = c[last], last
             for j in range(idx + 1, last + 1):
                 if lo[j] <= stop[idx]:
-                    raw_exit[idx], stopped[idx] = min(o[j], stop[idx]), True
+                    raw_exit[idx], stopped[idx], exit_idx[idx] = min(o[j], stop[idx]), True, j
                     break
     buy = raw_entry * (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate)
     sell = raw_exit * (1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate)
@@ -80,10 +83,54 @@ def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None, hold_day
     t['atr_pct'] = (atr / prev_close)[hit]
     t['price'] = prev_close[hit]
     t['ret20'] = (prev_close / d['close'].shift(21) - 1)[hit]  # 직전 20일 수익률
-    return t.loc[keep, ['date', 'ret', 'stopped', 'hypothesis', 'spo_up', 'atr_pct', 'price', 'ret20']]
+    t['exit_date'] = d['date'].to_numpy()[exit_idx.to_numpy()]
+    t['entry_px'] = raw_entry
+    return t.loc[keep, ['date', 'ret', 'stopped', 'hypothesis', 'spo_up', 'atr_pct', 'price', 'ret20', 'exit_date', 'entry_px']]
 
 
-def simulate_momentum(raw: pd.DataFrame, bt: HighFidelityBacktester = None) -> pd.DataFrame:
+def simulate_portfolio(trades: pd.DataFrame, raw: pd.DataFrame, capital: float, max_stocks: int) -> pd.DataFrame:
+    """돌파 거래 목록(code, date, exit_date, ret, entry_px, value_prev) → 일별 자산 곡선 (자금·보유 종목 수 제약)"""
+    close = raw.pivot(index='date', columns='code', values='close').sort_index().ffill()
+    by_date = {d: g.sort_values('value_prev', ascending=False) for d, g in trades.groupby('date')}
+    cash, held, rows = capital, [], []
+    for d in close.index:
+        px = close.loc[d]
+        if d in by_date:
+            for tr in by_date[d].itertuples(index=False):
+                if len(held) >= max_stocks:
+                    break
+                if any(h['code'] == tr.code for h in held):
+                    continue
+                equity = cash + sum(h['value'] for h in held)
+                alloc = min(equity / max_stocks, cash)
+                if alloc <= 0:
+                    break
+                cash -= alloc
+                held.append({'code': tr.code, 'exit': tr.exit_date, 'alloc': alloc, 'ret': tr.ret,
+                             'entry_px': tr.entry_px, 'value': alloc})
+        still = []
+        for h in held:
+            if h['exit'] == d:
+                cash += h['alloc'] * (1 + h['ret'])
+            else:
+                h['value'] = h['alloc'] * px[h['code']] / h['entry_px']  # 종가 평가 (매도 비용 미차감)
+                still.append(h)
+        held = still
+        invested = sum(h['value'] for h in held)
+        rows.append({'date': d, 'equity': cash + invested, 'n_held': len(held)})
+    return pd.DataFrame(rows)
+
+
+def equity_stats(equity: pd.Series, dates: pd.Series) -> dict:
+    years = len(equity) / 245  # KRX 연간 거래일 근사
+    total = equity.iloc[-1] / equity.iloc[0]
+    return {'누적%': round((total - 1) * 100, 1), '연환산%': round((total ** (1 / years) - 1) * 100, 1),
+            'MDD%': round(((equity / equity.cummax()).min() - 1) * 100, 1),
+            **{f'{y}%': round((g.iloc[-1] / g.iloc[0] - 1) * 100, 1)
+               for y, g in equity.groupby(dates.str[:4].to_numpy()) if len(g) > 1}}
+
+
+def simulate_momentum(raw: pd.DataFrame, bt: HighFidelityBacktester = None, etf_codes=KNOWN_ETF_CODES) -> pd.DataFrame:
     """월별 상대 모멘텀 포트폴리오 vs 전 종목 동일 비중 vs KODEX200 (구간 수익률, 모멘텀만 매매 비용 차감)"""
     bt = bt or HighFidelityBacktester()
     r = raw[raw['volume'] > 0]
@@ -94,7 +141,7 @@ def simulate_momentum(raw: pd.DataFrame, bt: HighFidelityBacktester = None) -> p
     dates = close.index
     months = pd.Series(dates.str[:6], index=dates)
     rebal = list(dates[months.ne(months.shift())])
-    stocks = [c for c in close.columns if c not in KNOWN_ETF_CODES]
+    stocks = [c for c in close.columns if c not in etf_codes]
     cost = (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate) / ((1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate))
     rows = []
     for d0, d1 in zip(rebal[:-1], rebal[1:]):
@@ -168,18 +215,37 @@ def market_context(raw: pd.DataFrame) -> pd.DataFrame:
     r['breadth_up'] = prev.map(breadth).astype('boolean')
     r['value_prev'] = r.groupby('code')['value'].shift(1)
     r['top_value'] = r.groupby('date')['value_prev'].rank(ascending=False, method='first') <= UNIVERSE_TOP_N
-    return r[['code', 'date', 'kodex_up', 'breadth_up', 'top_value']]
+    return r[['code', 'date', 'kodex_up', 'breadth_up', 'top_value', 'value_prev']]
+
+
+def _connect():
+    import pymysql
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
+    return pymysql.connect(host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "3306")),
+                           user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
+                           database=os.getenv("DB_NAME"), connect_timeout=10)
+
+
+def load_etf_codes() -> set:
+    """stock_master의 ETF 코드 (테이블이 없거나 비어 있으면 KNOWN_ETF_CODES)"""
+    try:
+        con = _connect()
+        try:
+            with con.cursor() as cur:
+                cur.execute("SELECT code FROM stock_master WHERE is_etf = 1")
+                codes = {r[0] for r in cur.fetchall()}
+        finally:
+            con.close()
+    except Exception as e:  # 테이블 미생성 등
+        print(f"[ETF] stock_master 조회 불가 → 대체 목록 사용 ({type(e).__name__})")
+        return set(KNOWN_ETF_CODES)
+    return codes or set(KNOWN_ETF_CODES)
 
 
 def load_daily_from_db(codes=None) -> pd.DataFrame:
     """DB daily_ohlcv 조회 (조회 전용)"""
-    import os
-    import pymysql
-    from dotenv import load_dotenv
-    load_dotenv(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
-    con = pymysql.connect(host=os.getenv("DB_HOST"), port=int(os.getenv("DB_PORT", "3306")),
-                          user=os.getenv("DB_USER"), password=os.getenv("DB_PASSWORD"),
-                          database=os.getenv("DB_NAME"), connect_timeout=10)
+    con = _connect()
     try:
         with con.cursor() as cur:
             # 6자리 종목코드만: '_AL' 등 거래소 접미사 코드(34개)는 같은 종목의 중복 시세
@@ -218,13 +284,17 @@ if __name__ == "__main__":
     parser.add_argument("--codes", nargs="*", help="대상 종목 (생략 시 전체)")
     parser.add_argument("--start", help="시작일 YYYYMMDD (지표 계산은 전체 기간, 집계만 제한)")
     parser.add_argument("--end", help="종료일 YYYYMMDD")
-    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo", "hold", "momentum"], default="trend")
+    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo", "hold", "momentum", "portfolio"], default="trend")
+    parser.add_argument("--capital", type=float, default=HighFidelityBacktester().initial_capital)
+    parser.add_argument("--max-stocks", type=int, default=HighFidelityBacktester().max_stocks)
+    parser.add_argument("--exclude-etf", action="store_true", help="포트폴리오 후보에서 지수·레버리지·인버스 ETF 제외")
     args = parser.parse_args()
 
     raw = load_daily_from_db(args.codes)
+    etf_codes = load_etf_codes()
     bt = HighFidelityBacktester()
     if args.report == "momentum":
-        m = simulate_momentum(raw, bt)
+        m = simulate_momentum(raw, bt, etf_codes)
         m = m[(m['date'] >= (args.start or '')) & (m['date'] <= (args.end or '99999999'))]
         missing = m['kodex200'].isna().sum()
         m = m.dropna(subset=['kodex200'])  # KODEX200 일봉이 없는 달은 세 비교 모두에서 제외 (같은 기간 비교)
@@ -243,6 +313,24 @@ if __name__ == "__main__":
     t = t.merge(market_context(raw), on=['code', 'date'], how='left')
     print(f"[데이터] {raw['code'].nunique()}종목, {raw['date'].min()} ~ {raw['date'].max()}, 돌파 거래 {len(t):,}건")
 
+    if args.report == "portfolio":
+        ctx = market_context(raw)
+        rng = lambda x: x[(x['date'] >= (args.start or '')) & (x['date'] <= (args.end or '99999999'))]
+        stats = {}
+        for n in (1, 5, 10):
+            tr = pd.concat([simulate_daily(g, bt, hold_days=n).assign(code=c) for c, g in raw.groupby('code')], ignore_index=True)
+            tr = rng(tr.merge(ctx[['code', 'date', 'value_prev']], on=['code', 'date'], how='left'))
+            if args.exclude_etf:
+                tr = tr[~tr['code'].isin(etf_codes)]
+            curve = simulate_portfolio(tr, rng(raw), args.capital, args.max_stocks)
+            stats[f'돌파 {n}일'] = {**equity_stats(curve['equity'], curve['date']),
+                                   '평균 보유 종목': round(curve['n_held'].mean(), 2)}
+        k = rng(raw[raw['code'] == MARKET_PROXY]).sort_values('date')
+        stats['KODEX200 보유'] = equity_stats(k['close'].reset_index(drop=True), k['date'].reset_index(drop=True))
+        print(f"[포트폴리오] 자금 {args.capital:,.0f}원, 최대 {args.max_stocks}종목, 같은 날 신호는 전일 거래대금 순 "
+              f"(KODEX200은 {k['date'].min()}~{k['date'].max()})")
+        print(pd.DataFrame(stats).T.to_string())
+        raise SystemExit
     if args.report == "hold":
         bt0 = HighFidelityBacktester()
         bt0.strategy.k_breakout = 0.0  # 기준선: 돌파 조건 없이 매일 시가 진입(같은 손절·청산) → 시장 상승분과 신호 효과 분리
