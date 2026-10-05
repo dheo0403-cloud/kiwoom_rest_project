@@ -8,6 +8,9 @@
 - 손절이 없으면 당일 종가 청산(데이트레이딩). 트레일링 익절은 일봉으로 재현할 수 없어 제외.
 - 가설 그룹: 전일 종가 > MA20 이고 전일 종가 >= 최근 20일 고점 × 0.95.
 - 시장 국면(전일 기준): KODEX200 종가 > MA20, 전 종목 중 MA20 위 비율 > 50%. 종목 선정: 전일 거래대금 상위 N(실거래 WATCHLIST_SIZE).
+- 보유 기간(hold_days>1): 진입일 손절이 없으면 이후 날마다 저가가 손절가에 닿는지 확인(갭하락이면 시가 청산), 마지막 날 종가 청산.
+  신호마다 독립 거래로 계산(보유 중 재진입 허용) — 신호의 기대값 비교용.
+- 상대 모멘텀: 매월 첫 거래일 시가에 직전 LOOKBACK일(최근 SKIP일 제외) 수익률 상위 TOP_FRAC 동일 비중 매수, 다음 달 첫 거래일 시가 교체.
 - SPO 반등(별도 진입 가설): SPO가 −1 아래에서 상승 전환한 다음 날 시가 매수, 같은 손절, SPO > 0 또는 보유 N일째 종가 청산.
 """
 import os
@@ -24,9 +27,12 @@ MARKET_PROXY = "069500"  # KODEX 200 — 지수 테이블이 없어 ETF 일봉�
 UNIVERSE_TOP_N = int(os.getenv("WATCHLIST_SIZE", "30"))  # 실거래 관심종목 수와 동일
 SPO_THRESHOLD = 1.0  # SPO 원문 과매도 기준
 SPO_HOLD_DAYS = 5
+MOM_LOOKBACK, MOM_SKIP, MOM_TOP_FRAC = 60, 5, 0.10
+# 지수·레버리지·인버스 ETF (DB에 종목명이 없어 확인된 코드만 제외 — 상대 모멘텀 종목 선택 대상 아님)
+KNOWN_ETF_CODES = {"069500", "102110", "114800", "122630", "229200", "233740", "252670"}
 
 
-def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None) -> pd.DataFrame:
+def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None, hold_days: int = 1) -> pd.DataFrame:
     """한 종목 일봉(date, open, high, low, close, volume 오름차순) → 돌파 거래 목록 (가설 여부 컬럼 포함)"""
     bt = bt or HighFidelityBacktester()
     s = bt.strategy
@@ -45,9 +51,25 @@ def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None) -> pd.Da
     raw_entry = level[hit]
     stop = (raw_entry - s.atr_hard_stop_mult * atr[hit]).combine(raw_entry * (1 + s.hard_stop_loss_rate), max)
     low_first = (t['open'] - t['low']) < (t['high'] - t['open'])
-    after_entry_low = t['close'].where(low_first, t['low'])
+    # 저가 먼저 경로라도 진입가가 시가와 같으면(k=0 무조건 진입) 저가는 진입 후에 온다
+    after_entry_low = t['close'].where(low_first & (raw_entry > t['open']), t['low'])
     stopped = after_entry_low <= stop
     raw_exit = stop.where(stopped, t['close'])
+    keep = pd.Series(True, index=t.index)
+    if hold_days > 1:
+        o, lo, c, jumps, n = d['open'].to_numpy(), d['low'].to_numpy(), d['close'].to_numpy(), jump.to_numpy(), len(d)
+        for idx in t.index:
+            last = idx + hold_days - 1
+            if last >= n or jumps[idx + 1:last + 1].any():  # 보유 기간이 데이터 끝을 넘거나 수정주가 의심 → 제외
+                keep[idx] = False
+                continue
+            if stopped[idx]:
+                continue
+            raw_exit[idx] = c[last]
+            for j in range(idx + 1, last + 1):
+                if lo[j] <= stop[idx]:
+                    raw_exit[idx], stopped[idx] = min(o[j], stop[idx]), True
+                    break
     buy = raw_entry * (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate)
     sell = raw_exit * (1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate)
     t['ret'] = sell / buy - 1
@@ -58,7 +80,46 @@ def simulate_daily(df: pd.DataFrame, bt: HighFidelityBacktester = None) -> pd.Da
     t['atr_pct'] = (atr / prev_close)[hit]
     t['price'] = prev_close[hit]
     t['ret20'] = (prev_close / d['close'].shift(21) - 1)[hit]  # 직전 20일 수익률
-    return t[['date', 'ret', 'stopped', 'hypothesis', 'spo_up', 'atr_pct', 'price', 'ret20']]
+    return t.loc[keep, ['date', 'ret', 'stopped', 'hypothesis', 'spo_up', 'atr_pct', 'price', 'ret20']]
+
+
+def simulate_momentum(raw: pd.DataFrame, bt: HighFidelityBacktester = None) -> pd.DataFrame:
+    """월별 상대 모멘텀 포트폴리오 vs 전 종목 동일 비중 vs KODEX200 (구간 수익률, 모멘텀만 매매 비용 차감)"""
+    bt = bt or HighFidelityBacktester()
+    r = raw[raw['volume'] > 0]
+    close = r.pivot(index='date', columns='code', values='close').sort_index()
+    opn = r.pivot(index='date', columns='code', values='open').sort_index()
+    jump = close.pct_change(fill_method=None).abs() > MAX_DAILY_MOVE
+    score = close.shift(MOM_SKIP + 1) / close.shift(MOM_SKIP + 1 + MOM_LOOKBACK) - 1  # 리밸런싱 전일 기준
+    dates = close.index
+    months = pd.Series(dates.str[:6], index=dates)
+    rebal = list(dates[months.ne(months.shift())])
+    stocks = [c for c in close.columns if c not in KNOWN_ETF_CODES]
+    cost = (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate) / ((1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate))
+    rows = []
+    for d0, d1 in zip(rebal[:-1], rebal[1:]):
+        window = jump.loc[(dates > dates[max(0, dates.get_loc(d0) - MOM_SKIP - 1 - MOM_LOOKBACK)]) & (dates <= d1), stocks].any()
+        ok = [c for c in stocks if not window[c] and opn.at[d0, c] >= MIN_STOCK_PRICE and pd.notna(opn.at[d1, c])
+              and pd.notna(score.at[d0, c])]
+        if not ok:
+            continue
+        ret = opn.loc[d1, ok] / opn.loc[d0, ok] - 1
+        top = score.loc[d0, ok].nlargest(max(1, int(len(ok) * MOM_TOP_FRAC))).index
+        rows.append({'date': d0, 'momentum': (1 + ret[top].mean()) / cost - 1, 'equal_weight': ret.mean(),
+                     'kodex200': opn.at[d1, MARKET_PROXY] / opn.at[d0, MARKET_PROXY] - 1, 'n': len(ok), 'picks': list(top)})
+    return pd.DataFrame(rows)
+
+
+def summarize_periods(p: pd.DataFrame, cols) -> pd.DataFrame:
+    """월 수익률 → 월평균·연환산·최대낙폭·수익 월 비율"""
+    out = {}
+    for col in cols:
+        x = p[col]
+        equity = (1 + x).cumprod()
+        out[col] = {'월평균%': x.mean() * 100, '연환산%': (equity.iloc[-1] ** (12 / len(x)) - 1) * 100,
+                    '누적%': (equity.iloc[-1] - 1) * 100, 'MDD%': ((equity / equity.cummax()).min() - 1) * 100,
+                    '수익월%': (x > 0).mean() * 100}
+    return pd.DataFrame(out).round(2)
 
 
 def simulate_spo_reversion(df: pd.DataFrame, bt: HighFidelityBacktester = None, hold_days: int = SPO_HOLD_DAYS) -> pd.DataFrame:
@@ -121,9 +182,10 @@ def load_daily_from_db(codes=None) -> pd.DataFrame:
                           database=os.getenv("DB_NAME"), connect_timeout=10)
     try:
         with con.cursor() as cur:
-            sql = "SELECT code, date, open, high, low, close, volume, value FROM daily_ohlcv"
+            # 6자리 종목코드만: '_AL' 등 거래소 접미사 코드(34개)는 같은 종목의 중복 시세
+            sql = "SELECT code, date, open, high, low, close, volume, value FROM daily_ohlcv WHERE code REGEXP '^[0-9]{6}$'"
             if codes:
-                sql += " WHERE code IN (" + ",".join(["%s"] * len(codes)) + ")"
+                sql += " AND code IN (" + ",".join(["%s"] * len(codes)) + ")"
             cur.execute(sql + " ORDER BY code, date", tuple(codes or ()))
             rows = cur.fetchall()
     finally:
@@ -156,17 +218,39 @@ if __name__ == "__main__":
     parser.add_argument("--codes", nargs="*", help="대상 종목 (생략 시 전체)")
     parser.add_argument("--start", help="시작일 YYYYMMDD (지표 계산은 전체 기간, 집계만 제한)")
     parser.add_argument("--end", help="종료일 YYYYMMDD")
-    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo"], default="trend")
+    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo", "hold", "momentum"], default="trend")
     args = parser.parse_args()
 
     raw = load_daily_from_db(args.codes)
     bt = HighFidelityBacktester()
+    if args.report == "momentum":
+        m = simulate_momentum(raw, bt)
+        m = m[(m['date'] >= (args.start or '')) & (m['date'] <= (args.end or '99999999'))]
+        missing = m['kodex200'].isna().sum()
+        m = m.dropna(subset=['kodex200'])  # KODEX200 일봉이 없는 달은 세 비교 모두에서 제외 (같은 기간 비교)
+        if missing:
+            print(f"[주의] KODEX200 일봉 없는 {missing}개월 제외")
+        print(f"[상대 모멘텀] {len(m)}개월 ({m['date'].min()} ~ {m['date'].max()}), 평균 대상 {m['n'].mean():.0f}종목, "
+              f"상위 {MOM_TOP_FRAC:.0%} 보유, 직전 {MOM_LOOKBACK}일(최근 {MOM_SKIP}일 제외)")
+        cols = ['momentum', 'equal_weight', 'kodex200']
+        print(summarize_periods(m, cols).to_string())
+        for year, g in m.groupby(m['date'].str[:4]):
+            print(f"[{year}] " + "  ".join(f"{c} {((1 + g[c]).prod() - 1) * 100:+.1f}%" for c in cols) + f"  ({len(g)}개월)")
+        print("[자주 뽑힌 종목]", pd.Series([c for p in m['picks'] for c in p]).value_counts().head(10).to_dict())
+        raise SystemExit
     t = pd.concat([simulate_daily(g, bt).assign(code=c) for c, g in raw.groupby('code')], ignore_index=True)
     t['hypothesis'] = t['hypothesis'].astype(bool)  # 빈 결과와 합쳐지며 object로 바뀌는 것 방지
     t = t.merge(market_context(raw), on=['code', 'date'], how='left')
     print(f"[데이터] {raw['code'].nunique()}종목, {raw['date'].min()} ~ {raw['date'].max()}, 돌파 거래 {len(t):,}건")
 
-    if args.report == "trend":
+    if args.report == "hold":
+        bt0 = HighFidelityBacktester()
+        bt0.strategy.k_breakout = 0.0  # 기준선: 돌파 조건 없이 매일 시가 진입(같은 손절·청산) → 시장 상승분과 신호 효과 분리
+        groups = {}
+        for n in (1, 3, 5, 10):
+            groups[f'돌파 {n}일'] = pd.concat([simulate_daily(g, bt, hold_days=n) for _, g in raw.groupby('code')], ignore_index=True)
+            groups[f'무조건 {n}일'] = pd.concat([simulate_daily(g, bt0, hold_days=n) for _, g in raw.groupby('code')], ignore_index=True)
+    elif args.report == "trend":
         groups = {'A 기준': t, 'B 가설': t[t['hypothesis']], 'C 반대': t[~t['hypothesis']]}
     elif args.report == "regime":
         k, b = t['kodex_up'].fillna(False).astype(bool), t['breadth_up'].fillna(False).astype(bool)

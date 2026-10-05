@@ -253,3 +253,59 @@ class TestDailyContextAndSpo(unittest.TestCase):
         trades, cost = self._reversion({22: dict(open=9650, high=9700, low=9600, close=9650)})
         self.assertTrue(trades.iloc[0]['stopped'])
         self.assertAlmostEqual(trades.iloc[0]['ret'], cost(10000, 9650))
+
+
+class TestHoldAndMomentum(unittest.TestCase):
+    """N일 보유 청산·보유 중 갭하락 손절, 상대 모멘텀은 리밸런싱 전일까지 데이터로만 선택"""
+
+    @staticmethod
+    def _hold(after):
+        from daily_backtest import simulate_daily
+        rows = [dict(date=f"2026{i:04d}", open=10000, high=10100, low=9900, close=10000, volume=1000) for i in range(101, 126)]
+        rows.append(dict(date="20260201", open=10000, high=10200, low=10050, close=10150, volume=1000))  # 돌파 진입 10100
+        rows += [dict(date=f"2026020{k + 2}", volume=1000, **bar) for k, bar in enumerate(after)]
+        bt = HighFidelityBacktester()
+        t = simulate_daily(pd.DataFrame(rows), bt, hold_days=3).set_index('date').loc["20260201"]
+        cost = lambda e, x: x * (1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate) / (e * (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate)) - 1
+        return t, cost
+
+    def test_hold_exit_at_last_close(self):
+        t, cost = self._hold([dict(open=10150, high=10200, low=10100, close=10180),
+                              dict(open=10180, high=10350, low=10150, close=10300)])
+        self.assertFalse(t['stopped'])
+        self.assertAlmostEqual(t['ret'], cost(10100, 10300))
+
+    def test_hold_gap_down_stop_at_open(self):
+        """손절가 9800(10100 − 1.5×200), 다음 날 시가 9700 갭하락 → 시가 청산"""
+        t, cost = self._hold([dict(open=9700, high=9750, low=9600, close=9700),
+                              dict(open=9700, high=9800, low=9650, close=9750)])
+        self.assertTrue(t['stopped'])
+        self.assertAlmostEqual(t['ret'], cost(10100, 9700))
+
+    def test_momentum_uses_prior_data_only(self):
+        """상승 종목(000010)만 과거 점수가 높고, 000020은 리밸런싱 당일부터 급등 → 선택되면 안 됨"""
+        import daily_backtest as db
+        dates = pd.date_range("2026-01-01", periods=130, freq="B").strftime("%Y%m%d")
+        first_rebal = next(d for i, d in enumerate(dates) if i > 0 and d[:6] != dates[i - 1][:6] and i > 70)
+        rows = []
+        for i, d in enumerate(dates):
+            late = d >= first_rebal
+            for code, px in (("000010", 10000 + 20 * i), ("000020", 10000 + (500 * i if late else 0)),
+                             ("000030", 20000 - 20 * i), (db.MARKET_PROXY, 30000)):
+                rows.append(dict(code=code, date=d, open=px, high=px, low=px, close=px, volume=1000))
+        m = db.simulate_momentum(pd.DataFrame(rows))
+        first = m.set_index('date').loc[first_rebal]
+        self.assertEqual(first['picks'], ["000010"])
+        self.assertAlmostEqual(first['kodex200'], 0.0)
+
+
+class TestUnconditionalBaseline(unittest.TestCase):
+    def test_open_entry_sees_low_after_entry(self):
+        """k=0(시가 진입)이면 저가 먼저 경로라도 저가는 진입 후 → 손절가(9700)에 닿으면 손절"""
+        from daily_backtest import simulate_daily
+        rows = [dict(date=f"2026{i:04d}", open=10000, high=10100, low=9900, close=10000, volume=1000) for i in range(101, 126)]
+        rows.append(dict(date="20260201", open=10000, high=10400, low=9700, close=10200, volume=1000))
+        bt = HighFidelityBacktester()
+        bt.strategy.k_breakout = 0.0
+        t = simulate_daily(pd.DataFrame(rows), bt).set_index("date").loc["20260201"]
+        self.assertTrue(t["stopped"])
