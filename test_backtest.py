@@ -193,3 +193,63 @@ class TestDailyBacktest(unittest.TestCase):
         """돌파선은 당일 시가 기준: 시가 10300이면 돌파선 10400에 진입"""
         t, cost = self._run(dict(open=10300, high=10400, low=10250, close=10350))
         self.assertAlmostEqual(t['ret'], cost(10400, 10350))
+
+
+class TestDailyContextAndSpo(unittest.TestCase):
+    """SPO 미래 누출 없음, 시장 국면·거래대금 상위는 전일 기준, SPO 반등 진입·청산 규칙"""
+
+    def test_spo_no_lookahead(self):
+        close = pd.Series(10000 + np.cumsum(np.random.default_rng(0).normal(0, 50, 300)))
+        changed = close.copy()
+        changed.iloc[250:] += 3000
+        a = TechnicalIndicators.calculate_spo(close).iloc[:250]
+        b = TechnicalIndicators.calculate_spo(changed).iloc[:250]
+        self.assertTrue(a.notna().any())
+        pd.testing.assert_series_equal(a, b)
+
+    def test_market_context_uses_previous_day(self):
+        import daily_backtest as db
+        dates = [f"2026{i:04d}" for i in range(101, 126)]
+        proxy = [100] * 22 + [200, 200, 200]  # 23번째 날(인덱스 22) 처음 MA20 위
+        other_value = [50] * 25
+        other_value[22] = 1000                # 인덱스 22에 거래대금 급증 → 다음 날 상위
+        rows = [dict(code=db.MARKET_PROXY, date=d, close=p, value=100) for d, p in zip(dates, proxy)]
+        rows += [dict(code="000001", date=d, close=100, value=v) for d, v in zip(dates, other_value)]
+        orig = db.UNIVERSE_TOP_N
+        db.UNIVERSE_TOP_N = 1
+        try:
+            ctx = db.market_context(pd.DataFrame(rows)).set_index(['code', 'date'])
+        finally:
+            db.UNIVERSE_TOP_N = orig
+        self.assertFalse(ctx.loc[("000001", dates[22]), 'kodex_up'])
+        self.assertTrue(ctx.loc[("000001", dates[23]), 'kodex_up'])
+        self.assertFalse(ctx.loc[("000001", dates[22]), 'top_value'])
+        self.assertTrue(ctx.loc[("000001", dates[23]), 'top_value'])
+
+    def _reversion(self, bars):
+        from unittest import mock
+        import daily_backtest as db
+        spo = [0.5] * 30
+        spo[19], spo[20] = -2.0, -1.5          # 인덱스 20: −1 아래에서 상승 전환 → 21일 시가 진입
+        spo[21] = spo[22] = -0.5
+        spo[23] = 0.5                          # 23일 SPO > 0 → 종가 청산
+        rows = [dict(date=f"2026{i:04d}", open=10000, high=10100, low=9900, close=10000, volume=1000) for i in range(101, 131)]
+        for idx, bar in bars.items():
+            rows[idx].update(bar)
+        bt = HighFidelityBacktester()
+        with mock.patch.object(db.TechnicalIndicators, 'calculate_spo', return_value=pd.Series(spo)):
+            trades = db.simulate_spo_reversion(pd.DataFrame(rows), bt)
+        cost = lambda e, x: x * (1 - bt.slippage_rate) * (1 - bt.sell_fee_rate - bt.sell_tax_rate) / (e * (1 + bt.slippage_rate) * (1 + bt.buy_fee_rate)) - 1
+        return trades, cost
+
+    def test_spo_reversion_exit_on_zero_cross(self):
+        trades, cost = self._reversion({23: dict(close=10050)})
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades.iloc[0]['days'], 3)
+        self.assertAlmostEqual(trades.iloc[0]['ret'], cost(10000, 10050))
+
+    def test_spo_reversion_gap_down_stop(self):
+        """손절가 9700(= max(10000 − 1.5×200, 10000×0.97)), 다음 날 시가 9650 갭하락 → 시가 청산"""
+        trades, cost = self._reversion({22: dict(open=9650, high=9700, low=9600, close=9650)})
+        self.assertTrue(trades.iloc[0]['stopped'])
+        self.assertAlmostEqual(trades.iloc[0]['ret'], cost(10000, 9650))

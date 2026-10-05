@@ -311,6 +311,38 @@ class TechnicalIndicators:
             'momentum_increasing': momentum > momentum.shift(1).fillna(0)
         }, index=df_std.index)
 
+    @staticmethod
+    def _wma(series: pd.Series, period: int) -> pd.Series:
+        weights = np.arange(1, period + 1, dtype=float)
+        return series.rolling(period).apply(lambda w: np.dot(w, weights) / weights.sum(), raw=True)
+
+    @staticmethod
+    def calculate_spo(close: pd.Series, len_smooth: int = 20, len_std: int = 50, hull_len: int = 30) -> pd.Series:
+        """
+        Smooth Price Oscillator (SPO, ProRealCode 공개본 기준) — 평균회귀형 정규화 오실레이터
+        - 종가에 Ehlers SuperSmoother(2차 저역필터)를 짧은 기간(len_smooth)·긴 기간(2×len_smooth)으로 적용한 차이
+        - 차이 / 최근 len_std 표준편차의 len_std 최댓값 → Hull MA(hull_len)로 평활
+        - 신호(원문): −1 아래에서 상승 전환 = 과매도 반등, +1 위에서 하락 전환 = 과매수
+        - 과거 값만 사용(재귀 필터·롤링) → 미래 데이터 누출 없음
+        """
+        x = close.astype(float).to_numpy()
+
+        def supersmoother(period: float) -> np.ndarray:
+            # 원문 cos(...*180/π)는 각도 단위 플랫폼용 변환 → 라디안 기준 cos(√2·π/period)
+            a = np.exp(-np.sqrt(2) * np.pi / period)
+            c2, c3 = 2 * a * np.cos(np.sqrt(2) * np.pi / period), -a * a
+            c1 = 1 - c2 - c3
+            y = x.copy()
+            for i in range(2, len(x)):
+                y[i] = c1 * (x[i] + x[i - 1]) / 2 + c2 * y[i - 1] + c3 * y[i - 2]
+            return y
+
+        osc = pd.Series(supersmoother(len_smooth) - supersmoother(2 * len_smooth), index=close.index)
+        max_std = osc.rolling(len_std).std().rolling(len_std).max()
+        norm = osc / max_std.replace(0, np.nan)
+        wma = TechnicalIndicators._wma
+        return wma(2 * wma(norm, hull_len // 2) - wma(norm, hull_len), int(np.sqrt(hull_len)))
+
     @classmethod
     def compute_all_indicators(cls, df: pd.DataFrame) -> pd.DataFrame:
         """
