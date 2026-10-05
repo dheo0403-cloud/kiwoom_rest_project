@@ -12,6 +12,7 @@
   신호마다 독립 거래로 계산(보유 중 재진입 허용) — 신호의 기대값 비교용.
 - 포트폴리오: 초기 자금·최대 보유 종목 수 제약. 같은 날 신호는 전일 거래대금 순으로 빈 자리만 채우고, 종목당 (당시 평가 자산 / 최대 종목 수).
   평가는 종가 기준(진입가 대비), 체결·비용은 거래 수익률(ret)에 이미 반영. 소수 주식 허용(금액 단위).
+- 미국 야간(overnight): 국내 거래일 d에 대해 d보다 이른 가장 최근 미국 거래일(현지 날짜)의 등락률·VIX를 붙여 구간별 비교.
 - 상대 모멘텀: 매월 첫 거래일 시가에 직전 LOOKBACK일(최근 SKIP일 제외) 수익률 상위 TOP_FRAC 동일 비중 매수, 다음 달 첫 거래일 시가 교체.
 - SPO 반등(별도 진입 가설): SPO가 −1 아래에서 상승 전환한 다음 날 시가 매수, 같은 손절, SPO > 0 또는 보유 N일째 종가 청산.
 """
@@ -22,6 +23,7 @@ import pandas as pd
 from backtest import HighFidelityBacktester
 from indicators import TechnicalIndicators
 from strategy import MIN_STOCK_PRICE
+from macro_regime_filter import MacroRegimeFilter
 
 MAX_DAILY_MOVE = 0.30  # KRX 가격제한폭 초과 변동 = 액면분할 등 수정주가 미반영 의심 → 그날 제외
 NEAR_HIGH_RATIO = 0.95
@@ -243,6 +245,35 @@ def load_etf_codes() -> set:
     return codes or set(KNOWN_ETF_CODES)
 
 
+def load_us_daily() -> pd.DataFrame:
+    """us_daily (us_market.py가 적재) → symbol, date, close"""
+    con = _connect()
+    try:
+        with con.cursor() as cur:
+            cur.execute("SELECT symbol, date, close FROM us_daily ORDER BY symbol, date")
+            rows = cur.fetchall()
+    finally:
+        con.close()
+    return pd.DataFrame(rows, columns=['symbol', 'date', 'close'])
+
+
+def overnight_features(us: pd.DataFrame, kr_dates) -> pd.DataFrame:
+    """국내 거래일별 직전 미국 거래일(국내 날짜보다 이른 날)의 심볼별 등락률(%)과 VIX 종가"""
+    feats = []
+    for sym, g in us.groupby('symbol'):
+        g = g.sort_values('date')
+        col = 'vix' if sym == '^VIX' else sym.strip('^').lower() + '_chg'
+        val = g['close'] if sym == '^VIX' else g['close'].pct_change() * 100
+        feats.append(pd.DataFrame({'us_date': g['date'].astype(int).to_numpy(), col: val.to_numpy()}))
+    kr = pd.DataFrame({'date': sorted(set(kr_dates))})
+    kr['key'] = kr['date'].astype(int) - 1  # 같은 날짜(국내 장 마감 뒤 열리는 미국장) 제외 → 엄격히 이전 날짜
+    out = kr
+    for f in feats:
+        out = pd.merge_asof(out.sort_values('key'), f.sort_values('us_date'), left_on='key', right_on='us_date',
+                            direction='backward').drop(columns='us_date')
+    return out.drop(columns='key')
+
+
 def load_daily_from_db(codes=None) -> pd.DataFrame:
     """DB daily_ohlcv 조회 (조회 전용)"""
     con = _connect()
@@ -284,7 +315,7 @@ if __name__ == "__main__":
     parser.add_argument("--codes", nargs="*", help="대상 종목 (생략 시 전체)")
     parser.add_argument("--start", help="시작일 YYYYMMDD (지표 계산은 전체 기간, 집계만 제한)")
     parser.add_argument("--end", help="종료일 YYYYMMDD")
-    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo", "hold", "momentum", "portfolio"], default="trend")
+    parser.add_argument("--report", choices=["trend", "regime", "universe", "spo", "hold", "momentum", "portfolio", "overnight"], default="trend")
     parser.add_argument("--capital", type=float, default=HighFidelityBacktester().initial_capital)
     parser.add_argument("--max-stocks", type=int, default=HighFidelityBacktester().max_stocks)
     parser.add_argument("--exclude-etf", action="store_true", help="포트폴리오 후보에서 지수·레버리지·인버스 ETF 제외")
@@ -331,7 +362,22 @@ if __name__ == "__main__":
               f"(KODEX200은 {k['date'].min()}~{k['date'].max()})")
         print(pd.DataFrame(stats).T.to_string())
         raise SystemExit
-    if args.report == "hold":
+    if args.report == "overnight":
+        feat = overnight_features(load_us_daily(), raw['date'])
+        bt0 = HighFidelityBacktester()
+        bt0.strategy.k_breakout = 0.0
+        base = pd.concat([simulate_daily(g, bt0).assign(code=c) for c, g in raw.groupby('code')], ignore_index=True)
+        t, base = t.merge(feat, on='date', how='left'), base.merge(feat, on='date', how='left')
+        print(f"[미국 야간] 지표 있는 거래 {t['ixic_chg'].notna().sum():,}/{len(t):,}건 (나스닥 등락률·VIX는 국내일 직전 미국 거래일)")
+        vix_th = MacroRegimeFilter().vix_panic_threshold  # 실거래 매크로 필터와 같은 기준
+        groups = {}
+        for name, df in (('돌파', t), ('무조건', base)):
+            n = df['ixic_chg']
+            groups[f'{name} 나스닥≤−1%'] = df[n <= -1]
+            groups[f'{name} 나스닥 −1~+1%'] = df[(n > -1) & (n < 1)]
+            groups[f'{name} 나스닥≥+1%'] = df[n >= 1]
+            groups[f'{name} VIX≥{vix_th:g}'] = df[df['vix'] >= vix_th]
+    elif args.report == "hold":
         bt0 = HighFidelityBacktester()
         bt0.strategy.k_breakout = 0.0  # 기준선: 돌파 조건 없이 매일 시가 진입(같은 손절·청산) → 시장 상승분과 신호 효과 분리
         groups = {}

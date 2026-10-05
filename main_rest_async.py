@@ -24,6 +24,7 @@ from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
 from collect_history import collect_after_close
+from us_market import refresh_us_daily, summarize as summarize_us
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -257,6 +258,14 @@ class AsyncTradingBot:
         self.stop_loss_rate = -0.03  # -3.0% 타이트한 하드 스탑로스 (CRITICAL 긴급 매도)
         self.trailing_stop_drop = 0.020  # 최고점 대비 2.0% 반락 시 트레일링 스탑 매도
         self.realtime_stream_task: Optional[asyncio.Task] = None
+        # 미국 시장 야간 데이터: 매 국내 거래일 새벽(기본 06:30 KST) 수집 → 08:50 장전 준비에서 요약 기록
+        self.us_market_task: Optional[asyncio.Task] = None
+        self.us_overnight: Dict[str, Dict[str, Any]] = {}
+        self.us_market_fetched_on = None
+        self.us_fetch_hour, self.us_fetch_minute = (int(x) for x in os.getenv("US_MARKET_FETCH_TIME", "06:30").split(":"))
+        # 매크로 필터에 VIX·원달러 주입 여부 (기본 꺼짐: 2.8년 검증에서 일관된 개선 근거 없음 → 켜려면 별도 승인)
+        self.us_macro_filter_enabled = os.getenv("US_MACRO_FILTER_ENABLED", "false").lower() in ("1", "true", "yes")
+        self.us_data_max_age_days = int(os.getenv("US_DATA_MAX_AGE_DAYS", "4"))  # 이보다 오래된 미국 데이터는 사용 안 함
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -440,6 +449,8 @@ class AsyncTradingBot:
 
         await self._sync_account_balance()
         self.is_running = True
+        if not self.us_market_task or self.us_market_task.done():
+            self.us_market_task = asyncio.create_task(self._us_market_worker())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -970,8 +981,8 @@ class AsyncTradingBot:
             fluct_rate = float(fluct_rate_str)
             self.kodex200_change_rate = fluct_rate
 
-            # 거시 시장 레짐 평가
-            regime, desc = self.macro_filter.evaluate_regime(kodex200_change_pct=fluct_rate)
+            # 거시 시장 레짐 평가 (미국 야간 지표는 US_MACRO_FILTER_ENABLED일 때만)
+            regime, desc = self.macro_filter.evaluate_regime(kodex200_change_pct=fluct_rate, **self._us_macro_inputs())
             if regime == MarketRegime.PANIC_CRASH:
                 if self.market_filter_passed:
                     self.market_filter_passed = False
@@ -1743,6 +1754,51 @@ class AsyncTradingBot:
                 except (asyncio.CancelledError, Exception):
                     pass
 
+    def _us_macro_inputs(self) -> Dict[str, Any]:
+        """매크로 필터용 미국 지표 (꺼져 있거나 데이터가 오래되면 빈 dict → 기존 동작)"""
+        if not self.us_macro_filter_enabled:
+            return {}
+        out = {}
+        today = get_kst_now().date()
+        for sym, key, field in (("^VIX", "vix_value", "close"), ("KRW=X", "usdkrw_change_pct", "change_pct"),
+                                ("^IXIC", "us_futures_change_pct", "change_pct")):
+            v = self.us_overnight.get(sym)
+            if not v or v.get(field) is None:
+                continue
+            age = (today - datetime.strptime(v["date"], "%Y%m%d").date()).days
+            if age <= self.us_data_max_age_days:
+                out[key] = float(v[field])
+        return out
+
+    async def refresh_us_overnight(self):
+        """미국 시장 일봉 갱신 + 최신 요약 (실패해도 매매에는 영향 없음)"""
+        self.us_market_fetched_on = get_kst_now().date()
+        try:
+            n = await refresh_us_daily(self.db)
+            self.us_overnight = summarize_us(await self.db.get_recent_us_daily())
+            parts = [f"{sym} {v['close']:,.2f}" + (f"({v['change_pct']:+.2f}%)" if v['change_pct'] is not None else "")
+                     for sym, v in self.us_overnight.items()]
+            msg = f"미국 시장 야간 데이터 {n}행 갱신: " + ", ".join(parts)
+            print(f"🌎 [미국시장] {msg}")
+            await self.db.log_message("SYSTEM", msg)
+        except Exception as e:
+            print(f"❌ [미국시장 오류] {e}")
+            await self.db.log_message("ERROR", f"미국 시장 데이터 갱신 오류: {e}")
+
+    async def _us_market_worker(self):
+        """매 국내 거래일 US_MARKET_FETCH_TIME(KST)에 미국 시장 데이터 갱신 (트레이딩 루프와 독립)"""
+        while not self.is_shutdown:
+            now = get_kst_now()
+            target = now.replace(hour=self.us_fetch_hour, minute=self.us_fetch_minute, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            while self.is_korean_market_holiday(target):
+                target += timedelta(days=1)
+            while not self.is_shutdown and get_kst_now() < target:
+                await asyncio.sleep(min(60.0, max(1.0, (target - get_kst_now()).total_seconds())))
+            if not self.is_shutdown:
+                await self.refresh_us_overnight()
+
     async def collect_market_history(self):
         """장 마감 후 시세 수집: 종목 정보·일봉(관심·보유·EXTRA_DAILY_CODES)·당일 1분봉(관심·보유). 실패해도 데몬은 계속"""
         self.history_collected_on = get_kst_now().date()  # 실패해도 같은 날 반복 호출 방지
@@ -1794,6 +1850,8 @@ class AsyncTradingBot:
                     print("🌅 [08:50 장전 준비] 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석...")
                     self.mdd_shutdown = False
                     self.market_filter_passed = True
+                    if self.us_market_fetched_on != now.date():  # 새벽 수집을 못 했으면(재시작 등) 지금 갱신
+                        await self.refresh_us_overnight()
                     await self._sync_account_balance()
                     await self.update_watchlist()
                     target_0900 = now.replace(hour=9, minute=0, second=0, microsecond=0)
@@ -1830,6 +1888,8 @@ class AsyncTradingBot:
         print("🛑 [AsyncTradingBot] 데몬 종료 및 자원 반환 중...")
         if self.realtime_stream_task and not self.realtime_stream_task.done():
             self.realtime_stream_task.cancel()
+        if self.us_market_task and not self.us_market_task.done():
+            self.us_market_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

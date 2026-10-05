@@ -186,6 +186,44 @@ class DatabaseManager:
             INSERT INTO stock_master (code, name, market, is_etf) VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), is_etf=VALUES(is_etf)''', rows, "Stock Master")
 
+    async def ensure_us_daily(self):
+        """미국 시장 일봉 테이블 (us_market.py: 심볼·현지 날짜·종가) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS us_daily (
+                            symbol VARCHAR(20) NOT NULL,
+                            date VARCHAR(8) NOT NULL,
+                            close DOUBLE NOT NULL,
+                            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            PRIMARY KEY (symbol, date)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB us_daily 생성 Error: {e}")
+
+    async def upsert_us_daily(self, rows: list):
+        """(symbol, date, close) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO us_daily (symbol, date, close) VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE close=VALUES(close)''', rows, "US Daily")
+
+    async def get_recent_us_daily(self, days: int = 10) -> list:
+        """심볼별 최근 거래일 행 (summarize용) — 테이블이 없으면 빈 목록"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT symbol, date, close FROM us_daily
+                        WHERE date >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL %s DAY), '%%Y%%m%%d')''', (days,))
+                    return [dict(r) for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB us_daily 조회 Error: {e}")
+            return []
+
     async def batch_upsert_minute_candles(self, candle_list):
         """튜플/딕셔너리 리스트 형태의 분봉 데이터 비동기 벌크 저장"""
         if not self.pool or not candle_list: return
