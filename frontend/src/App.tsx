@@ -6,6 +6,8 @@ import { ActivePositionsBento } from './components/ActivePositionsBento';
 import { LogViewer } from './components/LogViewer';
 import { WatchlistBento } from './components/WatchlistBento';
 import { StrategyControlsBento } from './components/StrategyControlsBento';
+import { TradingViewChartBento } from './components/TradingViewChartBento';
+import { AccountSideBento } from './components/AccountSideBento';
 import { EmergencyModal } from './components/EmergencyModal';
 import { ParamsModal } from './components/ParamsModal';
 import { useTradingWebSocket } from './hooks/useWebSocket';
@@ -132,7 +134,7 @@ export function App() {
       {/* Main Cockpit Container */}
       <main className="flex-1 p-2.5 sm:p-4 max-w-[1920px] w-full mx-auto flex flex-col">
         {/* 1. 4-Card Top Bento KPI Metrics */}
-        <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} />
+        <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} strategyParams={botStatus.strategy_params} />
 
         {/* 2. 퀀트 전략 성과 & 실시간 시장 국면 (Quant Performance & Macro Regime) */}
         <QuantPerformanceBento
@@ -140,6 +142,23 @@ export function App() {
           macroStatus={macroStatus}
           colorMode={colorMode}
         />
+
+        {/* 2-1. 선택 종목 차트 (보유/감시 종목 클릭 시 전환) & 자산 추이·미체결 주문 */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 mb-3.5">
+          <div className="lg:col-span-8 h-[420px]">
+            <TradingViewChartBento
+              selectedStockCode={selectedStockCode}
+              selectedStockName={selectedStockName}
+              watchlist={watchlist}
+              positions={portfolio.positions}
+              colorMode={colorMode}
+              onSelectStock={handleSelectStock}
+            />
+          </div>
+          <div className="lg:col-span-4 h-[420px]">
+            <AccountSideBento equityHistory={quantPerformance?.equity_history || []} />
+          </div>
+        </div>
 
         {/* 3. Main Bento Grid Cockpit (2-Column Asymmetric Layout) */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5 flex-1">
@@ -149,7 +168,6 @@ export function App() {
             <div className="h-[380px] lg:h-[420px]">
               <LogViewer
                 logs={logs}
-                portfolio={displayPortfolio}
                 onClearLogs={clearLogs}
               />
             </div>
@@ -175,6 +193,7 @@ export function App() {
                 onSelectStock={handleSelectStock}
                 selectedStockCode={selectedStockCode}
                 onRefresh={refreshData}
+                strategyParams={botStatus.strategy_params}
               />
             </div>
 

@@ -51,13 +51,8 @@ export function useTradingWebSocket() {
     kelly_multiplier: 1.0,
     is_buy_allowed: true,
     target_code: '005930',
-    orderbook_imbalance: {
-      imbalance_ratio: 0.25,
-      total_bid_qty: 250000,
-      total_ask_qty: 150000,
-      bid_ask_spread: 100
-    },
-    volume_power: 128.5
+    orderbook_imbalance: null,  // 수신 전에는 데이터 없음 (가짜 초기값 금지)
+    volume_power: null
   });
 
   const [lastDisplaySyncTime, setLastDisplaySyncTime] = useState<string>('');
@@ -255,12 +250,8 @@ export function useTradingWebSocket() {
 
       if (statusRes.status === 'fulfilled' && statusRes.value.ok) {
         const statusData = await statusRes.value.json();
-        setBotStatus(prev => {
-          if (prev.running === statusData.running && prev.circuit_breaker_open === statusData.circuit_breaker_open) {
-            return prev;
-          }
-          return statusData;
-        });
+        // 전략 파라미터 등 다른 필드 변경도 반영되도록 전체 비교 (작은 객체라 비용 무시 가능)
+        setBotStatus(prev => (JSON.stringify(prev) === JSON.stringify(statusData) ? prev : statusData));
       }
 
       if (logsRes.status === 'fulfilled' && logsRes.value.ok) {

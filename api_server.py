@@ -496,8 +496,41 @@ async def get_bot_status():
         "active_positions_count": len(ctx.portfolio.positions) if ctx.portfolio else 0,
         "circuit_breaker_open": circuit_open,
         "mdd_shutdown": getattr(ctx.bot, 'mdd_shutdown', False),
-        "daily_circuit_breaker": getattr(ctx.bot, 'daily_circuit_breaker', False)
+        "daily_circuit_breaker": getattr(ctx.bot, 'daily_circuit_breaker', False),
+        "strategy_params": _strategy_params()
     }
+
+
+def _strategy_params() -> Dict[str, Any]:
+    """화면 표시용 실제 전략·리스크 파라미터 (봇 인스턴스 값 그대로)"""
+    st = getattr(ctx.bot, 'strategy', None)
+    pf = ctx.portfolio
+    return {
+        "hard_stop_loss_pct": round(getattr(st, 'hard_stop_loss_rate', 0) * 100, 2) if st else None,
+        "atr_hard_stop_mult": getattr(st, 'atr_hard_stop_mult', None),
+        "trailing_stop_drop_pct": round(getattr(st, 'trailing_stop_drop_rate', 0) * 100, 2) if st else None,
+        "atr_trailing_stop_mult": getattr(st, 'atr_trailing_stop_mult', None),
+        "trailing_activation_pct": round(getattr(st, 'trailing_activation_pct', 0) * 100, 2) if st else None,
+        "breakeven_trigger_pct": round(getattr(st, 'breakeven_trigger_pct', 0) * 100, 2) if st else None,
+        "use_trailing_stop_only": getattr(st, 'use_trailing_stop_only', None),
+        "max_stocks": getattr(pf, 'max_stocks', None) if pf else None,
+        "daily_loss_limit_pct": round(getattr(ctx.bot, 'daily_loss_limit_rate', 0) * 100, 2),
+    }
+
+
+@api_router.get("/orders/pending")
+async def get_pending_orders():
+    """봇이 추적 중인 미체결 주문 목록 (OrderTimeoutManager 메모리 기준)"""
+    mgr = getattr(ctx.bot, 'order_timeout_mgr', None) if ctx.bot else None
+    if not mgr:
+        return {"orders": [], "timeout_seconds": None}
+    now_ts = time.time()
+    orders = [
+        {**{k: info.get(k) for k in ("order_no", "code", "name", "side", "qty", "unfilled_qty", "price")},
+         "elapsed_sec": int(now_ts - info.get('timestamp', now_ts))}
+        for info in list(mgr.tracked_orders.values()) if info.get('unfilled_qty', 0) > 0
+    ]
+    return {"orders": orders, "timeout_seconds": mgr.timeout_seconds}
 
 @api_router.get("/portfolio")
 async def get_portfolio():
@@ -556,15 +589,17 @@ async def get_quant_status(code: Optional[str] = None):
 
     # 2. Micro Orderbook & Volume Indicators
     target_code = code or "005930"
-    imbalance = {"imbalance_ratio": 0.25, "total_bid_qty": 250000.0, "total_ask_qty": 150000.0, "bid_ask_spread": 100.0}
-    volume_power = 128.5
+    imbalance = None      # 호가 응답을 해석하지 못하면 None (가짜 기본값 금지)
+    volume_power = None   # 체결강도 실데이터 수집 경로 없음 → None
 
     # 실시간 호가/체결 데이터 조회 시도
     if ctx.client and hasattr(ctx.client, 'get_orderbook'):
         try:
             ob = await ctx.client.get_orderbook(target_code, priority=RequestPriority.LOW)
             if ob:
-                imbalance = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+                parsed = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+                if (parsed.get('total_bid_qty', 0) or 0) + (parsed.get('total_ask_qty', 0) or 0) > 0:
+                    imbalance = parsed
         except Exception:
             pass
 
@@ -654,9 +689,9 @@ async def get_stock_chart_data(code: str, period: str = "1m"):
         fib_618 = float(w_item.get('fib_618', 0))
     elif ctx.portfolio:
         pos = ctx.portfolio.positions.get(clean_code)
-        if pos:
-            stock_name = pos.name
-            current_price = float(pos.current_price or pos.buy_price)
+        if pos:  # 포지션은 dict (속성 접근 시 AttributeError → 500)
+            stock_name = pos.get('name') or clean_code
+            current_price = float(pos.get('current_price') or pos.get('buy_price') or 0)
 
     # 2. 인메모리 링버퍼에서 분봉 조회 (1m/5m)
     if period != 'D' and ctx.bot and hasattr(ctx.bot, 'buffer') and ctx.bot.buffer:

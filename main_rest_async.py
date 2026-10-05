@@ -1488,14 +1488,15 @@ class AsyncTradingBot:
             else:
                 status_desc = f"타점 대기 중 (현재가: {int(cur_price):,}원 / Fib 38.2%: {int(fib_382):,}원)"
 
-            # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회 또는 괴리율 0.5%p 이상 변동 시에만 콘솔/DB/웹 출력)
+            # 실시간 감시 로그 쓰로틀링 (종목당 5초에 1회, 괴리율 0.5%p 이상 변동 시에도 최소 2초 간격)
+            # - 저가주는 1호가 변동만으로 괴리율이 0.5%p를 넘어 같은 종목 로그가 초당 여러 번 찍히던 문제 방지
             now_ts = time.time()
             last_time = self._last_watch_log_time.get(code, 0.0)
             last_diff = self._last_watch_diff_pct.get(code, -999.0)
             time_elapsed = now_ts - last_time
             diff_changed = abs(diff_pct - last_diff) >= 0.5
 
-            if time_elapsed >= 5.0 or diff_changed:
+            if time_elapsed >= 5.0 or (diff_changed and time_elapsed >= 2.0):
                 self._last_watch_log_time[code] = now_ts
                 self._last_watch_diff_pct[code] = diff_pct
                 print(f"⏱ [실시간 감시] {name}({code}) - 현재가: {int(cur_price):,}원 / {status_desc}")

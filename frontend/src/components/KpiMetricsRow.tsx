@@ -1,13 +1,17 @@
 import React from 'react';
 import { Wallet, TrendingUp, TrendingDown, DollarSign, PieChart, ShieldCheck } from 'lucide-react';
-import { PortfolioSnapshot } from '../types';
+import { PortfolioSnapshot, StrategyParams } from '../types';
 
 interface KpiMetricsRowProps {
   portfolio: PortfolioSnapshot;
   colorMode: 'KRX' | 'GLOBAL';
+  strategyParams?: StrategyParams;
 }
 
-const KpiMetricsRowComponent: React.FC<KpiMetricsRowProps> = ({ portfolio, colorMode }) => {
+// 파라미터 미수신 시 '-' 표시 (고정 문자열 사용 금지)
+const fmt = (v: number | null | undefined, suffix = '') => (v === null || v === undefined ? '-' : `${v}${suffix}`);
+
+const KpiMetricsRowComponent: React.FC<KpiMetricsRowProps> = ({ portfolio, colorMode, strategyParams }) => {
   const totalAsset = portfolio.total_asset || 0;
   const currentCapital = portfolio.current_capital || 0;
   const investedCapital = portfolio.invested_capital || (totalAsset - currentCapital);
@@ -44,12 +48,6 @@ const KpiMetricsRowComponent: React.FC<KpiMetricsRowProps> = ({ portfolio, color
           <div className="text-2xl font-black tracking-tight text-white font-mono tabular-nums">
             {Math.round(totalAsset).toLocaleString()}
             <span className="text-sm font-semibold text-slate-400 ml-1">원</span>
-          </div>
-          <div className="flex items-center gap-2 mt-1.5 text-xs">
-            <span className="text-slate-400 text-[11px]">기초 원금:</span>
-            <span className="text-slate-300 font-mono text-[11px]">
-              {Math.round(currentCapital + investedCapital).toLocaleString()}원
-            </span>
           </div>
         </div>
         <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-2xl group-hover:bg-blue-500/10 transition" />
@@ -121,21 +119,18 @@ const KpiMetricsRowComponent: React.FC<KpiMetricsRowProps> = ({ portfolio, color
             리스크 관리 & 포지션 한도
           </span>
           <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-400 border border-indigo-500/20">
-            MDD -5% 한도
+            일일 손실한도 {fmt(strategyParams?.daily_loss_limit_pct, '%')}
           </span>
         </div>
         <div className="mt-2.5">
           <div className="flex items-baseline justify-between">
             <div className="text-2xl font-black tracking-tight text-white font-mono tabular-nums">
-              {stockCount} <span className="text-sm font-normal text-slate-400">/ 5종목</span>
-            </div>
-            <div className="text-xs font-semibold text-slate-300">
-              최대 20% 분산
+              {stockCount} <span className="text-sm font-normal text-slate-400">/ {fmt(strategyParams?.max_stocks)}종목</span>
             </div>
           </div>
           <div className="flex items-center justify-between mt-2 text-[11px] text-slate-400">
-            <span>하드 스탑로스: <strong className="text-rose-400">-4.0%</strong></span>
-            <span>트레일링: <strong className="text-amber-400">2.5 ATR</strong></span>
+            <span>하드 스탑: <strong className="text-rose-400">{fmt(strategyParams?.hard_stop_loss_pct, '%')} / {fmt(strategyParams?.atr_hard_stop_mult)} ATR</strong></span>
+            <span>트레일링: <strong className="text-amber-400">고점 {fmt(strategyParams?.trailing_stop_drop_pct, '%')} / {fmt(strategyParams?.atr_trailing_stop_mult)} ATR</strong></span>
           </div>
         </div>
       </div>
@@ -150,7 +145,8 @@ export const KpiMetricsRow = React.memo(KpiMetricsRowComponent, (prev, next) => 
     prev.portfolio.unrealized_pnl === next.portfolio.unrealized_pnl &&
     prev.portfolio.total_yield_rate === next.portfolio.total_yield_rate &&
     (prev.portfolio.positions?.length || 0) === (next.portfolio.positions?.length || 0) &&
-    prev.colorMode === next.colorMode
+    prev.colorMode === next.colorMode &&
+    prev.strategyParams === next.strategyParams
   );
 });
 KpiMetricsRow.displayName = 'KpiMetricsRow';

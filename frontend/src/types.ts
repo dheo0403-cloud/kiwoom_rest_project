@@ -59,8 +59,8 @@ export interface MacroStatus {
     total_bid_qty: number;
     total_ask_qty: number;
     bid_ask_spread: number;
-  };
-  volume_power?: number;
+  } | null;
+  volume_power?: number | null;
   evaluated_at?: string;
 }
 
@@ -109,6 +109,31 @@ export interface BotStatus {
   watchlist_count: number;
   active_positions_count: number;
   circuit_breaker_open: boolean;
+  strategy_params?: StrategyParams;
+}
+
+// 봇 인스턴스의 실제 전략·리스크 파라미터 (/api/status)
+export interface StrategyParams {
+  hard_stop_loss_pct: number | null;
+  atr_hard_stop_mult: number | null;
+  trailing_stop_drop_pct: number | null;
+  atr_trailing_stop_mult: number | null;
+  trailing_activation_pct: number | null;
+  breakeven_trigger_pct: number | null;
+  use_trailing_stop_only: boolean | null;
+  max_stocks: number | null;
+  daily_loss_limit_pct: number | null;
+}
+
+export interface PendingOrder {
+  order_no: string;
+  code: string;
+  name: string;
+  side: string;
+  qty: number;
+  unfilled_qty: number;
+  price: number;
+  elapsed_sec: number;
 }
 
 export interface CandleData {

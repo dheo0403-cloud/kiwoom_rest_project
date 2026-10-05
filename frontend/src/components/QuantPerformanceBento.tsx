@@ -53,13 +53,8 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
     kelly_multiplier: 1.0,
     is_buy_allowed: true,
     target_code: '005930',
-    orderbook_imbalance: {
-      imbalance_ratio: 0.25,
-      total_bid_qty: 250000,
-      total_ask_qty: 150000,
-      bid_ask_spread: 100
-    },
-    volume_power: 120.0
+    orderbook_imbalance: null,
+    volume_power: null
   };
 
   const isDailyProfit = (safePerf.daily_return_pct ?? 0) >= 0;
@@ -93,19 +88,17 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   }
 
   // Micro Indicators (호가 불균형 & 체결강도)
-  const ob = safeMacro.orderbook_imbalance || {
-    imbalance_ratio: 0.25,
-    total_bid_qty: 250000,
-    total_ask_qty: 150000,
-    bid_ask_spread: 100
-  };
-  const totalDepth = (ob.total_bid_qty + ob.total_ask_qty) || 1;
-  const bidRatio = Math.min(100, Math.max(0, (ob.total_bid_qty / totalDepth) * 100));
-  const askRatio = 100 - bidRatio;
-  const isBidDominant = (ob.imbalance_ratio ?? 0) >= 0;
+  // 실데이터가 없으면 '데이터 없음' 표시 (가짜 기본값 사용 금지)
+  const ob = safeMacro.orderbook_imbalance ?? null;
+  const totalDepth = ob ? (ob.total_bid_qty || 0) + (ob.total_ask_qty || 0) : 0;
+  const hasOrderbook = !!ob && totalDepth > 0;
+  const bidRatio = hasOrderbook ? Math.min(100, Math.max(0, (ob!.total_bid_qty / totalDepth) * 100)) : 0;
+  const askRatio = hasOrderbook ? 100 - bidRatio : 0;
+  const isBidDominant = (ob?.imbalance_ratio ?? 0) >= 0;
 
-  const volumePower = safeMacro.volume_power ?? 100.0;
-  const isStrongVolume = volumePower >= 120.0;
+  const volumePower = safeMacro.volume_power ?? null;
+  const isStrongVolume = volumePower !== null && volumePower >= 120.0;
+  const netRealizedPnl = (safePerf.total_profit || 0) - (safePerf.total_loss || 0);
 
   const recentTrades: ClosedTrade[] = safePerf.recent_closed_trades || [];
 
@@ -268,14 +261,15 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               <Gauge className="w-3.5 h-3.5 text-cyan-400" />
               실시간 호가 잔량 불균형 & 체결강도
             </span>
-            <span className="text-[10px] text-slate-400">
-              KODEX 200: <strong className={(safeMacro.kodex200_change_rate ?? 0) >= 0 ? 'text-rose-400' : 'text-blue-400'}>
-                {(safeMacro.kodex200_change_rate ?? 0) >= 0 ? '+' : ''}{(safeMacro.kodex200_change_rate ?? 0).toFixed(2)}%
-              </strong>
-            </span>
+            {safeMacro.target_code && (
+              <span className="text-[10px] text-slate-400 font-mono">대상: {safeMacro.target_code}</span>
+            )}
           </div>
 
           {/* Orderbook Imbalance Bar */}
+          {!hasOrderbook ? (
+            <div className="text-[11px] text-slate-500 py-2">호가 잔량 데이터 없음 (호가 응답 미수신 또는 해석 불가)</div>
+          ) : (
           <div>
             <div className="flex justify-between text-[11px] mb-1">
               <span className="text-slate-400">
@@ -301,6 +295,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               />
             </div>
           </div>
+          )}
 
           {/* Volume Power Indicator */}
           <div className="flex items-center justify-between pt-1 text-xs">
@@ -308,12 +303,14 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               <Zap className="w-3.5 h-3.5 text-amber-400" />
               실시간 체결강도:
               <strong className={`ml-1 font-mono text-xs ${isStrongVolume ? 'text-amber-300 font-extrabold' : 'text-slate-200'}`}>
-                {volumePower.toFixed(1)}%
+                {volumePower !== null ? `${volumePower.toFixed(1)}%` : '데이터 없음'}
               </strong>
             </span>
-            <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${isStrongVolume ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-400'}`}>
-              {isStrongVolume ? '🔥 수급 모멘텀 급증' : '보통 수급'}
-            </span>
+            {volumePower !== null && (
+              <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${isStrongVolume ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-400'}`}>
+                {isStrongVolume ? '🔥 수급 모멘텀 급증' : '보통 수급'}
+              </span>
+            )}
           </div>
         </div>
 
@@ -325,7 +322,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
               최근 퀀트 청산 타점 성과 (Recent Closed Trades)
             </span>
             <span className="text-[10px] text-slate-400 font-mono">
-              누적 이익: <strong className="text-rose-400">+{Math.round(safePerf.total_profit || 0).toLocaleString()}원</strong>
+              누적 실현손익: <strong className={netRealizedPnl >= 0 ? 'text-rose-400' : 'text-blue-400'}>{netRealizedPnl >= 0 ? '+' : ''}{Math.round(netRealizedPnl).toLocaleString()}원</strong>
             </span>
           </div>
 
