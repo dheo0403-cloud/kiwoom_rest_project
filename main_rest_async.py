@@ -284,6 +284,11 @@ class AsyncTradingBot:
         self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
         self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
         self._buy_inflight: set = set()  # 매수 판단/발주 진행 중인 종목 (동시 중복 진입 차단)
+        # 과매매 방지: 같은 종목 하루 1회 진입, 하루 신규 진입 상한(0이면 제한 없음)
+        self.one_entry_per_day = os.getenv("ONE_ENTRY_PER_STOCK_PER_DAY", "true").lower() in ("true", "1", "yes")
+        self.max_daily_entries = int(os.getenv("MAX_DAILY_ENTRIES", "10"))
+        self._entry_day = None
+        self._entered_today: set = set()
 
     @property
     def running(self) -> bool:
@@ -1063,6 +1068,9 @@ class AsyncTradingBot:
 
         for pos in positions:
             code = pos['code']
+            # 매수 접수만 되고 잔고로 확인되지 않은 종목은 청산 판단 제외 (0주 매도 800033 반복 방지)
+            if pos.get('unconfirmed'):
+                continue
             name = pos['name']
             qty = pos['qty']
             buy_price = pos['buy_price']
@@ -1366,6 +1374,19 @@ class AsyncTradingBot:
         finally:
             self._buy_inflight.discard(code)
 
+    def _entry_allowed_today(self, code: str) -> bool:
+        """KST 날짜가 바뀌면 진입 기록을 비우고, 같은 종목 재진입·하루 상한을 검사한다."""
+        today = get_kst_now().date()
+        if getattr(self, '_entry_day', None) != today:
+            self._entry_day = today
+            self._entered_today = set()
+        if getattr(self, 'one_entry_per_day', False) and code in self._entered_today:
+            return False
+        max_entries = getattr(self, 'max_daily_entries', 0)
+        if max_entries > 0 and len(self._entered_today) >= max_entries:
+            return False
+        return True
+
     async def _evaluate_buy_condition_impl(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
         """
         실시간 피보나치 눌림목 및 ATR 변동성 돌파 매수 조건 평가 함수
@@ -1404,6 +1425,10 @@ class AsyncTradingBot:
 
         # 3. 30초 취소 쿨다운 체크 (단기 주문 핑퐁 차단)
         if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and self.order_timeout_mgr.is_in_cooldown(code):
+            return
+
+        # 3-1. 당일 진입 제한 (같은 종목 재진입·하루 진입 상한)
+        if not self._entry_allowed_today(code):
             return
 
         # 4. 미체결 증거금 락을 차감한 '실제 가용 주문가능금액' 산출
@@ -1637,7 +1662,9 @@ class AsyncTradingBot:
             ord_no = str((res or {}).get('ord_no') or (res or {}).get('odno') or (res or {}).get('order_no') or '').strip()
             if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
                 await self.order_timeout_mgr.track_order(ord_no, code, name, "BUY", qty, buy_price, order_type="00")
-            await self.portfolio.add_position(code, name, qty, buy_price)
+            await self.portfolio.add_position(code, name, qty, buy_price, confirmed=False)
+            self._entry_allowed_today(code)  # 날짜 경계 갱신
+            self._entered_today.add(code)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
             await self.db.log_message("INFO", f"🔥 [매수 주문 접수] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
             self.notifier.notify_order_filled("BUY", name, code, qty, buy_price, reason=reason)

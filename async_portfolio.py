@@ -482,8 +482,8 @@ class AsyncPortfolioManager:
                 self.positions = restored
                 print(f"🛡️ [Portfolio restore_positions_from_db] DB로부터 {len(restored)}개 포지션 안전 복원 완료: {[p['name'] for p in restored.values()]}")
 
-    async def add_position(self, code: str, name: str, qty: int, buy_price: float):
-        """신규 포지션 편입"""
+    async def add_position(self, code: str, name: str, qty: int, buy_price: float, confirmed: bool = True):
+        """신규 포지션 편입. confirmed=False는 주문 접수만 된 상태로, 다음 잔고 동기화(sync_positions)가 실제 보유로 교체한다."""
         async with self._lock:
             self.positions[code] = {
                 'name': name,
@@ -493,6 +493,8 @@ class AsyncPortfolioManager:
                 'highest_price': float(buy_price),
                 'sell_stage': 0
             }
+            if not confirmed:
+                self.positions[code]['unconfirmed'] = True
             self.current_capital = max(0.0, self.current_capital - (qty * buy_price))
 
     async def remove_position(self, code: str, sell_price: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -613,6 +615,7 @@ class AsyncPortfolioManager:
                     'current_price': pos.get('current_price', pos.get('buy_price', 0)),
                     'highest_price': pos.get('highest_price', pos.get('current_price', pos.get('buy_price', 0))),
                     'sell_stage': pos.get('sell_stage', 0),
+                    'unconfirmed': pos.get('unconfirmed', False),
                     'eval_amt': eval_amt,
                     'pnl': pnl,
                     'yield_rate': yield_rate

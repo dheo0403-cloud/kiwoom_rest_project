@@ -46,6 +46,47 @@ async def test_concurrent_buy_evaluation_places_single_order():
     assert len(calls) == 2
 
 
+async def test_pending_buy_position_is_not_sold():
+    """잔고로 확인되지 않은(접수만 된) 매수 종목은 손절가 아래여도 매도하지 않고, 잔고 동기화 후에는 정상 손절한다"""
+    client = MockKiwoomClient()
+    portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=client, db=MockDatabaseManager(), portfolio=portfolio)
+    await portfolio.add_position("035420", "NAVER", qty=100, buy_price=50000.0, confirmed=False)
+    client.prices["035420"] = 47000.0  # -6%: 체결된 보유라면 손절 대상
+    await bot.monitor_positions_and_exit()
+    assert not [o for o in client.sent_orders if o["side"] == "SELL"]
+    assert "035420" in portfolio.positions
+
+    client.holdings["035420"] = {"name": "NAVER", "qty": 100, "buy_price": 50000.0}  # 체결되어 잔고에 반영
+    await bot._sync_account_balance()
+    assert not portfolio.positions["035420"].get("unconfirmed")
+    await bot.monitor_positions_and_exit()
+    assert [o for o in client.sent_orders if o["side"] == "SELL"]
+
+
+def test_daily_entry_limits(monkeypatch):
+    """같은 종목 하루 1회, 하루 진입 상한, 날짜가 바뀌면 초기화"""
+    import main_rest_async
+    from datetime import datetime
+    from database import KST
+    day = {"d": datetime(2026, 10, 6, 10, 0, tzinfo=KST)}
+    monkeypatch.setattr(main_rest_async, "get_kst_now", lambda: day["d"])
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=MockDatabaseManager(),
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    bot.one_entry_per_day, bot.max_daily_entries = True, 2
+    assert bot._entry_allowed_today("A")
+    bot._entered_today.add("A")
+    assert not bot._entry_allowed_today("A")  # 같은 종목 재진입 차단
+    assert bot._entry_allowed_today("B")
+    bot._entered_today.add("B")
+    assert not bot._entry_allowed_today("C")  # 상한 2 도달
+    day["d"] = datetime(2026, 10, 7, 9, 30, tzinfo=KST)
+    assert bot._entry_allowed_today("A")  # 다음 날 초기화
+    bot.one_entry_per_day, bot.max_daily_entries = False, 0
+    bot._entered_today.update({"A", "B", "C"})
+    assert bot._entry_allowed_today("A")  # 둘 다 끄면 기존 동작
+
+
 async def test_buy_held_when_core_indicators_missing(monkeypatch):
     """ADX/VWAP 미산출(0)이면 진입 보류, 시간필터 skip 모드(데모/테스트)는 기존 동작"""
     import strategy
