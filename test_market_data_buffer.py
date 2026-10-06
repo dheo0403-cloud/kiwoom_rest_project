@@ -123,5 +123,35 @@ class TestMarketDataBufferAsync(unittest.IsolatedAsyncioTestCase):
         self.assertIn("035420", saved_codes)
 
 
+class TestMinuteSaveKey(unittest.IsolatedAsyncioTestCase):
+    async def test_realtime_candle_saved_with_14_digit_key(self):
+        """실시간 분봉은 공식 분봉(ka10080)과 같은 14자리 키로 저장 → 두 형식 중복 저장 방지"""
+        from database import DatabaseManager
+        captured = []
+
+        class Cur:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def executemany(self, sql, data): captured.extend(data)
+
+        class Conn:
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            def cursor(self): return Cur()
+            async def commit(self): pass
+
+        class Pool:
+            def acquire(self): return Conn()
+
+        db = DatabaseManager.__new__(DatabaseManager)
+        db.pool = Pool()
+        await db.batch_upsert_minute_candles([
+            {'code': '005930', 'datetime': '2026-10-06 10:00:00', 'open': 1, 'high': 2, 'low': 1, 'close': 2, 'volume': 10},
+            ('000660', '2026-10-06 10:01:00', 1, 2, 1, 2, 5),
+            ('069500', '20261006100200', 1, 2, 1, 2, 7),
+        ])
+        self.assertEqual([r[1] for r in captured], ['20261006100000', '20261006100100', '20261006100200'])
+
+
 if __name__ == '__main__':
     unittest.main()

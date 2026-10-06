@@ -7,6 +7,7 @@ Gate Info:
 """
 import aiomysql
 import os
+import re
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
@@ -291,13 +292,15 @@ class DatabaseManager:
                         open=VALUES(open), high=VALUES(high), low=VALUES(low),
                         close=VALUES(close), volume=VALUES(volume)
                     '''
+                    # 저장 키를 공식 분봉(ka10080)과 같은 14자리(YYYYMMDDHHMMSS)로 통일 → 장 마감 후 공식 분봉이 같은 행을 덮어씀
+                    to_key = lambda dt: re.sub(r'\D', '', str(dt))[:14]
                     data = []
                     for c in candle_list:
                         if isinstance(c, (list, tuple)):
-                            data.append(c)
+                            data.append((c[0], to_key(c[1]), *c[2:]))
                         elif isinstance(c, dict):
                             data.append((
-                                c.get('code'), c.get('datetime'),
+                                c.get('code'), to_key(c.get('datetime')),
                                 c.get('open'), c.get('high'), c.get('low'), c.get('close'),
                                 c.get('volume', 0)
                             ))

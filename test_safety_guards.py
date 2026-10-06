@@ -178,6 +178,32 @@ async def test_total_asset_uses_estimated_deposit_asset():
     assert snap["total_asset"] == 112073 + 31440
 
 
+async def test_order_cash_uses_d2_only_and_keeps_sign():
+    """주문가능은 D+2 추정예수금(d2_entra/entr_d2)만 사용: 주문가능현금(ord_alowa)과 섞지 않고, 미수(음수)는 0으로 본다"""
+    client = MockKiwoomClient()
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=client, db=MockDatabaseManager(), portfolio=portfolio)
+    balance = {"return_code": 0, "prsm_dpst_aset_amt": "000000107480", "output2": []}
+
+    async def fake_balance(priority=None):
+        return dict(balance)
+
+    async def fake_deposit(priority=None):  # 10/6 15:55 운영 로그 값
+        return {"return_code": 0, "ord_alowa": "000000000469", "d2_entra": "000000107480", "entr": "000000036712"}
+
+    client.get_account_balance = fake_balance
+    client.get_deposit_info = fake_deposit
+    await bot._sync_account_balance()
+    assert portfolio.current_capital == 107480  # ord_alowa(469)가 아님
+
+    async def minus_deposit(priority=None):  # 미수: 이전 파서는 '-'를 지워 +50,000원으로 읽었음
+        return {"return_code": 0, "ord_alowa": "000000000000", "d2_entra": "-00000050000", "entr": "000000001000"}
+
+    client.get_deposit_info = minus_deposit
+    await bot._sync_account_balance()
+    assert portfolio.current_capital == 0
+
+
 async def test_account_balance_merges_only_ok_responses(monkeypatch):
     """정상 TR이 하나라도 있으면 그 응답만 병합 (오류 TR의 return_code가 섞이지 않음)"""
     client = AsyncKiwoomClient(is_demo=True)

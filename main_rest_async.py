@@ -30,6 +30,14 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
 load_dotenv(env_path, override=False)
 
+def _parse_amount(val) -> Optional[float]:
+    """키움 금액 문자열('-00000012345', '+1,000') → 부호 유지 숫자. 변환 실패 시 None."""
+    try:
+        return float(str(val).strip().replace(',', ''))
+    except (TypeError, ValueError):
+        return None
+
+
 def _load_krx_holidays() -> Dict[int, set]:
     """krx_holidays.json에서 연도별 휴장일 집합 로드 (파일 없음/파싱 오류 시 빈 값 -> 고정 휴일 로직 폴백)"""
     try:
@@ -527,15 +535,18 @@ class AsyncTradingBot:
             'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
-        # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 D+2 예수금: 82,819원)
-        # 중요: 키움 REST API에서 dnca_tot_amt는 당일 예수금(1,122원)으로 올 수 있으므로 진짜 D+2 키를 최우선 순위로 배치
+        # 2) D+2 추정예수금: 키움 공식 필드(kt00001 d2_entra, kt00005 entr_d2)가 있으면 그 값만 부호 그대로 사용.
+        # 주문가능현금(ord_alowa) 등 뜻이 다른 필드로 넘어가지 않도록, 공식 필드가 전혀 없을 때만 예전 별칭 사용
+        d2_official_keys = ['d2_entra', 'entr_d2']
         d2_deposit_keys = [
-            'd2_deposit', 'd2_entra', 'entr_d2', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
+            'd2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
             'd2_ccls_amt', 'd2_estm_amt', 'prvs_rcdl_excc_amt_smtl_amt',
             'd2_entr', 'd2_ord_psbl_amt', 'ord_psbl_cash', 'ord_psbl_amt',
-            'ord_alowa', 'd2_psbl_amt', 'D+2예수금', 'D+2추정예수금', '추정예수금',
+            'd2_psbl_amt', 'D+2예수금', 'D+2추정예수금', '추정예수금',
             '주문가능금액', '주문가능현금', 'dnca_tot_amt'
         ]
+        official_d2 = next((v for s in summary_candidates if isinstance(s, dict)
+                            for k in d2_official_keys if (v := _parse_amount(s.get(k))) is not None), None)
 
         # 3) 당일 단순 예수금 원금 / 인출가능금 키 목록 (1,122원)
         raw_entr_keys = [
@@ -562,59 +573,35 @@ class AsyncTradingBot:
             # (1) 총평가금액 (148,442원)
             if parsed_tot_evlu_amt is None:
                 for key in tot_evlu_keys:
-                    val = s_dict.get(key)
-                    if val is not None:
-                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
-                        try:
-                            f_val = float(val_clean)
-                            if f_val > 0:
-                                parsed_tot_evlu_amt = f_val
-                                parsed_tot_key = key
-                                break
-                        except ValueError:
-                            pass
+                    f_val = _parse_amount(s_dict.get(key))
+                    if f_val is not None and f_val > 0:
+                        parsed_tot_evlu_amt = f_val
+                        parsed_tot_key = key
+                        break
 
-            # (2) D+2 주문가능금액 / 추정예수금 (1,122원)
-            if parsed_d2_deposit is None:
+            # (2) D+2 추정예수금 (공식 필드가 없을 때만 예전 별칭 중 양수)
+            if parsed_d2_deposit is None and official_d2 is None:
                 for key in d2_deposit_keys:
-                    val = s_dict.get(key)
-                    if val is not None:
-                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
-                        try:
-                            f_val = float(val_clean)
-                            if f_val > 0:
-                                parsed_d2_deposit = f_val
-                                break
-                        except ValueError:
-                            pass
+                    f_val = _parse_amount(s_dict.get(key))
+                    if f_val is not None and f_val > 0:
+                        parsed_d2_deposit = f_val
+                        break
 
             # (3) 당일 단순 예수금 원금 (1,122원)
             if parsed_raw_entr is None:
                 for key in raw_entr_keys:
-                    val = s_dict.get(key)
-                    if val is not None:
-                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
-                        try:
-                            f_val = float(val_clean)
-                            if f_val > 0:
-                                parsed_raw_entr = f_val
-                                break
-                        except ValueError:
-                            pass
+                    f_val = _parse_amount(s_dict.get(key))
+                    if f_val is not None and f_val > 0:
+                        parsed_raw_entr = f_val
+                        break
 
             # (4) 대용금 (103,890원)
             if parsed_sub_amt is None:
                 for key in sub_amt_keys:
-                    val = s_dict.get(key)
-                    if val is not None:
-                        val_clean = str(val).strip().replace(',', '').replace('+', '').replace('-', '')
-                        try:
-                            f_val = float(val_clean)
-                            if f_val > 0:
-                                parsed_sub_amt = f_val
-                                break
-                        except ValueError:
-                            pass
+                    f_val = _parse_amount(s_dict.get(key))
+                    if f_val is not None and f_val > 0:
+                        parsed_sub_amt = f_val
+                        break
 
             # 미체결 수량/건수 탐색
             for u_key in ['uncl_cnt', 'uncl_qty', 'unclosed_count', 'uncl_amt', 'otst_qty', 'otst_cnt']:
@@ -646,7 +633,13 @@ class AsyncTradingBot:
 
         # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
         # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: MTS 화면의 'D+2 예수금'과 1:1 매칭)
-        available_cash = parsed_d2_deposit or parsed_raw_entr or self.portfolio.current_capital
+        # 공식 D+2가 0 이하(미수)면 매수 여력 0. D+2 값이 아예 없을 때만 예수금·기존값으로 폴백
+        if official_d2 is not None:
+            parsed_d2_deposit = official_d2
+        if parsed_d2_deposit is not None:
+            available_cash = max(parsed_d2_deposit, 0.0)
+        else:
+            available_cash = parsed_raw_entr or self.portfolio.current_capital
 
         # (2) 총 평가자산 (키움 API가 제공하는 '총평가금액(tot_evlu_amt)' 필드 단일 소스 원칙 반영)
         # 키움 API의 tot_evlu_amt는 이미 (D+2 예수금 + 보유주식 평가금액)이 합산된 계좌 총자산이므로 임의 중복 가산 금지
@@ -658,7 +651,9 @@ class AsyncTradingBot:
             final_total_asset = float(base_cash + invested_eval)
 
         # 키움 계좌 TR Raw Data 분석 로그 출력
+        # 100ord_alow_amt·ord_alow_amt 등은 주문가능금액 필드 결정(2단계)용 대조 로그
         preview_keys = ['prsm_dpst_aset_amt', 'tot_evlt_amt', 'tot_evlu_amt', 'd2_entra', 'entr_d2', 'ord_alowa',
+                        '100ord_alow_amt', 'ord_alow_amt', '100stk_ord_alow_amt', 'tot_re_buy_alowa', 'pymn_alow_amt',
                         'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']
         matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
         print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
