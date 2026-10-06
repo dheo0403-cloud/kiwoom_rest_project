@@ -273,8 +273,15 @@ async def test_fibonacci_pullback_entry():
     assert last_order["price"] == 75100, "매도 1호가(75,100원)로 스마트 매수 발주되어야 합니다."
     print(f"  ✅ 피보나치 매수 성공: {last_order['code']} {last_order['qty']}주 @ {last_order['price']}원 (Priority: HIGH)")
 
-async def test_three_stage_profit_taking():
+def _fix_market_hours(monkeypatch):
+    """시계를 장중(11:00 KST)으로 고정. 15:15 이후 실행하면 장마감 강제청산이 먼저 발동해 결과가 시각에 따라 달라지기 때문."""
+    import strategy
+    real_now = strategy.get_kst_now
+    monkeypatch.setattr(strategy, "get_kst_now", lambda: real_now().replace(hour=11, minute=0))
+
+async def test_three_stage_profit_taking(monkeypatch):
     """2. 스마트 3단계 분할 익절(+3%, +5%, +8%) 검증"""
+    _fix_market_hours(monkeypatch)
     print("▶ [Test 2] 스마트 3단계 분할 익절 시뮬레이션...")
     mock_client = MockKiwoomClient()
     mock_db = MockDatabaseManager()
@@ -708,8 +715,9 @@ async def test_actual_account_balance_and_4_holdings_sync():
 
     print("  ✅ 실제 키움 계좌 총자산(148,442원) / D+2예수금(1,122원) / 4개 보유 종목 정밀 파싱 완벽 검증 통과")
 
-async def test_dynamic_watchlist_and_full_quant_workflow():
+async def test_dynamic_watchlist_and_full_quant_workflow(monkeypatch):
     """11. 동적 감시 목록(20개 종목) 수집 및 전체 퀀트 매매 워크플로우(Buy -> Hold -> Sell) 시뮬레이션"""
+    _fix_market_hours(monkeypatch)
     print("▶ [Test 11] 동적 감시 목록 갱신 및 전체 매매 사이클(매수->보유->익절) 시뮬레이션...")
 
     class DynamicWatchlistMockClient(MockKiwoomClient):
@@ -1457,8 +1465,10 @@ async def main():
     print("=" * 65)
     print("🚀 [Phase 2 & Phase 15] 비동기 트레이딩 봇 매매 시뮬레이션 & 퀀트 전략 종합 검증")
     print("=" * 65)
+    import pytest
     await test_fibonacci_pullback_entry()
-    await test_three_stage_profit_taking()
+    with pytest.MonkeyPatch.context() as mp:  # 시계 고정은 해당 테스트 안에서만
+        await test_three_stage_profit_taking(mp)
     await test_hard_stop_loss_preemption()
     await test_trailing_stop()
     await test_market_filter_and_manual_orders()
@@ -1467,7 +1477,8 @@ async def main():
     await test_d2_deposit_unification_and_throttling()
     await test_kiwoom_real_balance_parsing_various_schemas()
     await test_actual_account_balance_and_4_holdings_sync()
-    await test_dynamic_watchlist_and_full_quant_workflow()
+    with pytest.MonkeyPatch.context() as mp:
+        await test_dynamic_watchlist_and_full_quant_workflow(mp)
     await test_actual_account_balance_with_images_data()
     await test_single_multi_record_split_and_zero_ccls_qty_handling()
     await test_korean_keys_parsing()
