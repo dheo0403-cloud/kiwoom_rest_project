@@ -147,6 +147,37 @@ async def test_account_balance_error_responses_keep_positions(monkeypatch):
     assert "018880" in pm.positions
 
 
+async def test_total_asset_uses_estimated_deposit_asset():
+    """총자산은 추정예탁자산(prsm_dpst_aset_amt)을 그대로 쓰고, 흔들리는 D+2 필드·주식평가금(tot_evlt_amt)과 섞지 않는다"""
+    client = MockKiwoomClient()
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=client, db=MockDatabaseManager(), portfolio=portfolio)
+
+    async def fake_balance(priority=None):  # 10/6 운영 로그 사례: 보유 31,440원인데 D+2가 매수 전 값 112,073원
+        return {"return_code": 0, "tot_evlt_amt": "31440", "prsm_dpst_aset_amt": "109500",
+                "d2_entra": "112073", "output2": [{"stk_cd": "232080", "stk_nm": "TIGER 코스닥150",
+                                                  "rmnd_qty": "2", "pur_pric": "15720", "cur_prc": "15720"}]}
+
+    async def fake_deposit(priority=None):
+        return {"return_code": 0, "entr": "36712"}
+
+    client.get_account_balance = fake_balance
+    client.get_deposit_info = fake_deposit
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+    assert snap["total_asset"] == 109500  # 이전 로직이면 112,073 + 31,440 = 143,513
+
+    async def no_prsm(priority=None):  # 필드가 없으면 기존 방식(예수금+평가금)으로 폴백
+        d = await fake_balance()
+        d.pop("prsm_dpst_aset_amt")
+        return d
+
+    client.get_account_balance = no_prsm
+    await bot._sync_account_balance()
+    snap = await portfolio.get_snapshot()
+    assert snap["total_asset"] == 112073 + 31440
+
+
 async def test_account_balance_merges_only_ok_responses(monkeypatch):
     """정상 TR이 하나라도 있으면 그 응답만 병합 (오류 TR의 return_code가 섞이지 않음)"""
     client = AsyncKiwoomClient(is_demo=True)

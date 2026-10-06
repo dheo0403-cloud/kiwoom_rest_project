@@ -29,17 +29,18 @@ class AsyncPortfolioManager:
         self.daily_realized_pnl: float = 0.0  # 당일 실현 손익 누적 (원)
         self._lock = asyncio.Lock()
 
-    async def sync_capital(self, available_cash: float, total_asset: Optional[float] = None):
+    async def sync_capital(self, available_cash: float, total_asset: Optional[float] = None, authoritative: bool = False):
         """주문가능 예수금(D+2) 및 총 평가자산 독립 동기화
-        - total_asset(총자산)은 항상 available_cash(D+2 예수금) 이상이어야 함
-        - 만약 total_asset < available_cash이면 총자산은 최소 available_cash로 보정
+        - authoritative=True: 키움 추정예탁자산(prsm_dpst_aset_amt)을 그대로 총자산으로 사용 (D+2 필드 흔들림과 무관)
+        - 그 외: total_asset < available_cash이면 총자산은 최소 available_cash로 보정
         """
         async with self._lock:
             self.current_capital = float(available_cash)
+            self.total_asset_authoritative = bool(authoritative and total_asset and float(total_asset) > 0)
             if total_asset is not None and float(total_asset) > 0:
                 new_total = float(total_asset)
                 # 안전 가드: total_asset이 available_cash보다 작으면 방어 보정
-                if new_total < float(available_cash):
+                if not self.total_asset_authoritative and new_total < float(available_cash):
                     print(f"⚠️ [Portfolio sync_capital] 총자산({int(new_total):,}원) < D+2예수금({int(available_cash):,}원) → 총자산 보정: {int(available_cash):,}원")
                     new_total = float(available_cash)
                 self.total_asset = new_total
@@ -624,7 +625,9 @@ class AsyncPortfolioManager:
             # 총 평가자산: 명시적 total_asset이 예수금 이상이면 우선 적용, 없으면 (예수금 + 주식평가액)
             # total_asset(총자산)은 항상 available_cash(D+2 예수금) 이상이어야 함 (원리: 예수금 + 보유주식평가액)
             # 만약 total_asset < current_capital + invested_eval이면 시장가 하락 등으로 갱신된 값 사용
-            if self.total_asset > 0:
+            if self.total_asset > 0 and getattr(self, 'total_asset_authoritative', False):
+                total_asset = self.total_asset  # 키움 추정예탁자산 그대로 (예수금+평가금 재계산 시 D+2 필드 흔들림이 섞임)
+            elif self.total_asset > 0:
                 calculated_total = self.current_capital + invested_eval
                 # 안전 가드: total_asset이 계산된 총자산보다 작으면 현재 시장 평가액 사용
                 total_asset = max(self.total_asset, calculated_total)

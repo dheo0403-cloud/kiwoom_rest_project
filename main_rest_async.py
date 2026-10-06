@@ -521,9 +521,10 @@ class AsyncTradingBot:
             print(f"📡 [TR 수신 상태] 잔고TR 키: {bal_keys} | 예수금TR 키: {dep_keys}")
 
         # 1) 총평가금액 / 총자산 키 목록 (키움 HTS 총평가: 148,442원 / 64,400원 주식평가 + 82,819원 D+2예수금)
+        # prsm_dpst_aset_amt(추정예탁자산 = 예수금 + 주식평가)를 최우선. tot_evlt_amt는 주식 평가금만이라 총자산 후보에서 제외
         tot_evlu_keys = [
-            'tot_evlu_amt', 'tot_evlt_amt', 'aset_evlt_amt', 'tot_est_amt', 'tot_asst_amt', 'asst_tot_amt',
-            'evlu_amt_tot', 'evlt_amt_tot', 'prsm_dpst_aset_amt', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
+            'prsm_dpst_aset_amt', 'tot_evlu_amt', 'aset_evlt_amt', 'tot_est_amt', 'tot_asst_amt', 'asst_tot_amt',
+            'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
         # 2) D+2 추정예수금 / 주문가능금액 키 목록 (실제 D+2 예수금: 82,819원)
@@ -548,6 +549,7 @@ class AsyncTradingBot:
         ]
 
         parsed_tot_evlu_amt: Optional[float] = None
+        parsed_tot_key: Optional[str] = None
         parsed_d2_deposit: Optional[float] = None
         parsed_raw_entr: Optional[float] = None
         parsed_sub_amt: Optional[float] = None
@@ -567,6 +569,7 @@ class AsyncTradingBot:
                             f_val = float(val_clean)
                             if f_val > 0:
                                 parsed_tot_evlu_amt = f_val
+                                parsed_tot_key = key
                                 break
                         except ValueError:
                             pass
@@ -655,7 +658,8 @@ class AsyncTradingBot:
             final_total_asset = float(base_cash + invested_eval)
 
         # 키움 계좌 TR Raw Data 분석 로그 출력
-        preview_keys = ['tot_evlu_amt', 'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']
+        preview_keys = ['prsm_dpst_aset_amt', 'tot_evlt_amt', 'tot_evlu_amt', 'd2_entra', 'entr_d2', 'ord_alowa',
+                        'prvs_rcdl_excc_amt', 'entr', 'deposit', 'dnca_tot_amt', 'd2_deposit', 'ord_psbl_cash', 'sub_amt']
         matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
         print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
         print(f"  ├─ 총평가금액(TR 원본): {int(parsed_tot_evlu_amt):,}원" if parsed_tot_evlu_amt else "  ├─ 총평가금액(TR 원본): None")
@@ -666,7 +670,8 @@ class AsyncTradingBot:
         print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
 
         # 포트폴리오 관리자에 독립 필드로 동기화
-        await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset)
+        await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset,
+                                          authoritative=(parsed_tot_key == 'prsm_dpst_aset_amt'))
 
         # 4. DB 저장 및 스냅샷 확인
         snap = await self.portfolio.get_snapshot()
