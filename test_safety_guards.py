@@ -179,7 +179,7 @@ async def test_total_asset_uses_estimated_deposit_asset():
 
 
 async def test_order_cash_uses_d2_only_and_keeps_sign():
-    """주문가능은 D+2 추정예수금(d2_entra/entr_d2)만 사용: 주문가능현금(ord_alowa)과 섞지 않고, 미수(음수)는 0으로 본다"""
+    """주문가능은 100% 주문가능금액, 없으면 D+2 추정예수금만 사용: 주문가능현금(ord_alowa)과 섞지 않고, 미수(음수)는 0으로 본다"""
     client = MockKiwoomClient()
     portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, client=client, db=MockDatabaseManager(), portfolio=portfolio)
@@ -195,6 +195,14 @@ async def test_order_cash_uses_d2_only_and_keeps_sign():
     client.get_deposit_info = fake_deposit
     await bot._sync_account_balance()
     assert portfolio.current_capital == 107480  # ord_alowa(469)가 아님
+
+    async def with_order_limit(priority=None):  # 10/7 15:40 운영 로그 값: MTS 주문가능금액 = 100stk_ord_alow_amt
+        return {"return_code": 0, "ord_alowa": "000000000469", "d2_entra": "000000104655",
+                "100stk_ord_alow_amt": "000000000104518", "entr": "000000036712"}
+
+    client.get_deposit_info = with_order_limit
+    await bot._sync_account_balance()
+    assert portfolio.current_capital == 104518  # D+2(104,655)보다 100% 주문가능금액 우선
 
     async def minus_deposit(priority=None):  # 미수: 이전 파서는 '-'를 지워 +50,000원으로 읽었음
         return {"return_code": 0, "ord_alowa": "000000000000", "d2_entra": "-00000050000", "entr": "000000001000"}

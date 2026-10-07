@@ -535,9 +535,10 @@ class AsyncTradingBot:
             'evlu_amt_tot', 'evlt_amt_tot', '총평가금액', '총자산금액', '자산평가금액', '예탁자산평가액'
         ]
 
-        # 2) D+2 추정예수금: 키움 공식 필드(kt00001 d2_entra, kt00005 entr_d2)가 있으면 그 값만 부호 그대로 사용.
+        # 2) 매수 한도(주문가능금액): MTS '주문가능금액'과 같은 증거금 100% 주문가능(kt00001 100stk_ord_alow_amt,
+        # kt00004 100ord_alow_amt)을 우선, 없으면 D+2 추정예수금(kt00001 d2_entra, kt00005 entr_d2). 부호 그대로 사용.
         # 주문가능현금(ord_alowa) 등 뜻이 다른 필드로 넘어가지 않도록, 공식 필드가 전혀 없을 때만 예전 별칭 사용
-        d2_official_keys = ['d2_entra', 'entr_d2']
+        d2_official_keys = ['100stk_ord_alow_amt', '100ord_alow_amt', 'd2_entra', 'entr_d2']
         d2_deposit_keys = [
             'd2_deposit', 'd2_auto_amt', 'd2_prvs_rcdl_amt', 'd2_prvs_rcdl_excc_amt',
             'd2_ccls_amt', 'd2_estm_amt', 'prvs_rcdl_excc_amt_smtl_amt',
@@ -545,8 +546,9 @@ class AsyncTradingBot:
             'd2_psbl_amt', 'D+2예수금', 'D+2추정예수금', '추정예수금',
             '주문가능금액', '주문가능현금', 'dnca_tot_amt'
         ]
-        official_d2 = next((v for s in summary_candidates if isinstance(s, dict)
-                            for k in d2_official_keys if (v := _parse_amount(s.get(k))) is not None), None)
+        # 필드 우선순위가 응답(잔고/예수금 TR) 순서보다 앞서도록 필드 → 응답 순으로 탐색
+        official_d2 = next((v for k in d2_official_keys for s in summary_candidates if isinstance(s, dict)
+                            if (v := _parse_amount(s.get(k))) is not None), None)
 
         # 3) 당일 단순 예수금 원금 / 인출가능금 키 목록 (1,122원)
         raw_entr_keys = [
@@ -632,8 +634,8 @@ class AsyncTradingBot:
         invested_eval = sum(pos['current_price'] * pos['qty'] for pos in self.portfolio.positions.values())
 
         # 3. 주문가능 현금(available_cash) 및 총 평가자산(final_total_asset) 독립 산출
-        # (1) 주문가능 현금 (D+2 정산 추정예수금 기준: MTS 화면의 'D+2 예수금'과 1:1 매칭)
-        # 공식 D+2가 0 이하(미수)면 매수 여력 0. D+2 값이 아예 없을 때만 예수금·기존값으로 폴백
+        # (1) 주문가능 현금 (MTS '주문가능금액'과 같은 100% 주문가능금액, 없으면 D+2 추정예수금)
+        # 공식 값이 0 이하(미수)면 매수 여력 0. 공식 값이 아예 없을 때만 예수금·기존값으로 폴백
         if official_d2 is not None:
             parsed_d2_deposit = official_d2
         if parsed_d2_deposit is not None:
@@ -658,11 +660,11 @@ class AsyncTradingBot:
         matched_raw = {k: raw_fields_debug[k] for k in preview_keys if k in raw_fields_debug}
         print(f"📊 [계좌 TR Raw Data] 키움 수신 필드: {matched_raw}")
         print(f"  ├─ 총평가금액(TR 원본): {int(parsed_tot_evlu_amt):,}원" if parsed_tot_evlu_amt else "  ├─ 총평가금액(TR 원본): None")
-        print(f"  ├─ D+2 추정예수금(주문가능): {int(parsed_d2_deposit):,}원" if parsed_d2_deposit else "  ├─ D+2 추정예수금: None")
+        print(f"  ├─ 주문가능금액(매수 한도): {int(parsed_d2_deposit):,}원" if parsed_d2_deposit else "  ├─ 주문가능금액: None")
         print(f"  ├─ 단순 예수금(원금): {int(parsed_raw_entr):,}원" if parsed_raw_entr else "  ├─ 단순 예수금(원금): None")
         print(f"  ├─ 대용금(보유주식담보): {int(parsed_sub_amt):,}원" if parsed_sub_amt else "  ├─ 대용금: None")
         print(f"  ├─ 보유주식 평가금: {int(invested_eval):,}원 ({len(self.portfolio.positions)}종목)")
-        print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | D+2 주문가능: {int(available_cash):,}원]")
+        print(f"  └─ 최종 산출: [총자산: {int(final_total_asset):,}원 | 주문가능: {int(available_cash):,}원]")
 
         # 포트폴리오 관리자에 독립 필드로 동기화
         await self.portfolio.sync_capital(available_cash=available_cash, total_asset=final_total_asset,
