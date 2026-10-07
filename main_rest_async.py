@@ -23,7 +23,7 @@ from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
-from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master
+from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor
 from us_market import refresh_us_daily, summarize as summarize_us
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -281,6 +281,11 @@ class AsyncTradingBot:
         self.backfill_window = tuple(tuple(int(x) for x in t.split(":")) for t in
                                      os.getenv("MINUTE_BACKFILL_WINDOW", "16:10-08:00").split("-"))
         self.minute_backfill_task: Optional[asyncio.Task] = None
+        # 종목별 외국인·기관·개인 일별 순매수(ka10060) 동기화: 확정치가 나온 뒤(기본 18시~08시·휴장일) 하루 1회
+        self.investor_sync_enabled = os.getenv("INVESTOR_SYNC_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.investor_backfill_years = float(os.getenv("INVESTOR_BACKFILL_YEARS", "3"))
+        self.investor_sync_hour = int(os.getenv("INVESTOR_SYNC_HOUR", "18"))
+        self.investor_sync_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -473,6 +478,8 @@ class AsyncTradingBot:
             self.us_market_task = asyncio.create_task(self._us_market_worker())
         if self.minute_backfill_enabled and (not self.minute_backfill_task or self.minute_backfill_task.done()):
             self.minute_backfill_task = asyncio.create_task(self._minute_backfill_worker())
+        if self.investor_sync_enabled and (not self.investor_sync_task or self.investor_sync_task.done()):
+            self.investor_sync_task = asyncio.create_task(self._investor_sync_worker())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -1908,6 +1915,51 @@ class AsyncTradingBot:
                 await self.db.log_message("ERROR", f"분봉 백필 오류: {e}")
                 await asyncio.sleep(60.0)
 
+    def _investor_sync_allowed(self, now: datetime) -> bool:
+        """투자자 순매수 동기화 시간: 휴장일 종일, 거래일은 INVESTOR_SYNC_HOUR(기본 18시) 이후 ~ 08시 전"""
+        return self.is_korean_market_holiday(now) or now.hour >= self.investor_sync_hour or now.hour < 8
+
+    async def _investor_sync_worker(self):
+        """보통주 전체 외국인·기관·개인 일별 순매수 동기화: 처음 보는 종목은 INVESTOR_BACKFILL_YEARS년 과거까지,
+        이미 있는 종목은 최근 1페이지. 하루 1라운드 (라운드 도중 시간이 끝나면 다음 날 이어서)"""
+        await self.db.ensure_investor_daily()
+        synced_on = None
+        while not self.is_shutdown:
+            try:
+                now = get_kst_now()
+                round_day = (now - timedelta(hours=8)).date()  # 18시~익일 08시를 같은 라운드로 묶음
+                if not self._investor_sync_allowed(now) or synced_on == round_day:
+                    await asyncio.sleep(300.0)
+                    continue
+                universe = await self.db.get_stock_universe()
+                if not universe:
+                    await asyncio.sleep(600.0)
+                    continue
+                coverage = await self.db.get_investor_coverage()
+                new_codes = sum(1 for c in universe if c not in coverage)
+                rows, done, empty = 0, 0, 0
+                for code in universe:
+                    if self.is_shutdown or not self._investor_sync_allowed(get_kst_now()):
+                        break
+                    n = await collect_investor(self.client, self.db, code,
+                                               self.investor_backfill_years if code not in coverage else 0.0)
+                    rows += n
+                    done += 1
+                    empty += (n == 0)
+                finished = done == len(universe)
+                if finished:
+                    synced_on = round_day
+                oldest = min((await self.db.get_investor_coverage()).values(), default=None)
+                await self.db.log_message("SYSTEM", f"투자자 순매수 동기화 {'완료' if finished else '중단(시간 종료)'}: "
+                                                    f"{done:,}/{len(universe):,}종목(신규 {new_codes:,}), {rows:,}행, "
+                                                    f"빈 응답 {empty:,}, 가장 오래된 날짜 {oldest}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ [투자자 순매수 동기화 오류] {e}")
+                await self.db.log_message("ERROR", f"투자자 순매수 동기화 오류: {e}")
+                await asyncio.sleep(600.0)
+
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
         await self.initialize()
@@ -1987,6 +2039,8 @@ class AsyncTradingBot:
             self.us_market_task.cancel()
         if self.minute_backfill_task and not self.minute_backfill_task.done():
             self.minute_backfill_task.cancel()
+        if self.investor_sync_task and not self.investor_sync_task.done():
+            self.investor_sync_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

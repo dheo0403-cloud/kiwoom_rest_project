@@ -89,6 +89,36 @@ async def collect_daily(client, db, code: str, years: float = 0.0, base_dt: Opti
     return len(rows)
 
 
+def _snum(v: Any) -> int:
+    """키움 숫자 문자열 → 부호 유지 정수 (순매수처럼 음수가 의미 있는 값)"""
+    try:
+        return int(float(str(v).replace(',', '').strip() or 0))
+    except ValueError:
+        return 0
+
+
+def parse_investor(code: str, items: List[Dict[str, Any]]) -> List[tuple]:
+    """ka10060 → (code, date, 외국인, 기관계, 개인) 순매수 금액(백만원)"""
+    out = []
+    for it in items:
+        dt = str(it.get('dt') or '').strip()
+        if len(dt) == 8 and dt.isdigit():
+            out.append((code, dt, _snum(it.get('frgnr_invsr')), _snum(it.get('orgn')), _snum(it.get('ind_invsr'))))
+    return out
+
+
+async def collect_investor(client, db, code: str, years: float = 0.0) -> int:
+    """종목별 투자자 일별 순매수(ka10060, 금액·백만원) 수집 (years=0이면 첫 페이지만)"""
+    cutoff = (get_kst_now() - timedelta(days=365 * years)).strftime('%Y%m%d') if years > 0 else None
+    stop = (lambda page: True) if not cutoff else (lambda page: min(str(p.get('dt', '99999999')) for p in page) <= cutoff)
+    items = await _paged(client, "ka10060", "/api/dostk/chart",
+                         {"dt": get_kst_now().strftime('%Y%m%d'), "stk_cd": code, "amt_qty_tp": "1", "trde_tp": "0",
+                          "unit_tp": "1000"}, "stk_invsr_orgn_chart", stop)
+    rows = [r for r in parse_investor(code, items) if not cutoff or r[1] >= cutoff]
+    await db.upsert_investor_rows(rows)
+    return len(rows)
+
+
 async def collect_minute(client, db, code: str, days: int = 1, base_dt: Optional[str] = None) -> int:
     """1분봉 수집: 최근 days거래일치 (휴장일 포함 달력일 기준 여유 있게 잘라냄)"""
     base_dt = base_dt or get_kst_now().strftime('%Y%m%d')

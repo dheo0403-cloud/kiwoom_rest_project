@@ -187,6 +187,43 @@ class DatabaseManager:
             INSERT INTO stock_master (code, name, market, is_etf) VALUES (%s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE name=VALUES(name), market=VALUES(market), is_etf=VALUES(is_etf)''', rows, "Stock Master")
 
+    async def ensure_investor_daily(self):
+        """종목별 투자자 일별 순매수 (ka10060 금액, 백만원) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS investor_daily (
+                            code VARCHAR(10) NOT NULL,
+                            date VARCHAR(8) NOT NULL,
+                            frgn BIGINT NOT NULL,
+                            orgn BIGINT NOT NULL,
+                            ind BIGINT NOT NULL,
+                            PRIMARY KEY (code, date)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB investor_daily 생성 Error: {e}")
+
+    async def upsert_investor_rows(self, rows: list):
+        """(code, date, frgn, orgn, ind) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO investor_daily (code, date, frgn, orgn, ind) VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE frgn=VALUES(frgn), orgn=VALUES(orgn), ind=VALUES(ind)''', rows, "Investor Rows")
+
+    async def get_investor_coverage(self) -> dict:
+        """code → 가장 오래된 날짜 (investor_daily에 행이 있는 종목만)"""
+        if not self.pool: return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT code, MIN(date) AS oldest FROM investor_daily GROUP BY code")
+                    return {r['code']: r['oldest'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB investor_daily 조회 Error: {e}")
+            return {}
+
     async def ensure_minute_backfill(self):
         """분봉 과거 백필 진행표 (종목별 가장 오래 받은 날짜·완료 여부) — 없으면 생성"""
         if not self.pool: return

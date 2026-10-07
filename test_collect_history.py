@@ -50,6 +50,26 @@ class TestCollectHistory(unittest.TestCase):
         self.assertEqual(n, 3)
         self.assertNotIn("20240101", [r[1] for r in db.daily])
 
+    def test_investor_keeps_sign_and_pages_until_cutoff(self):
+        """ka10060 순매수는 부호 유지(매도 우위 음수), 기준일(1년 전) 이전 행은 버리고 거기서 멈춤"""
+        def inv(dt, f):
+            return {"dt": dt, "frgnr_invsr": f, "orgn": "+1,200", "ind_invsr": "-3"}
+        pages = [({"stk_invsr_orgn_chart": [inv("20261007", "-61779"), inv("20260101", "5")]}, {"cont-yn": "Y", "next-key": "K1"}),
+                 ({"stk_invsr_orgn_chart": [inv("20251101", "0"), inv("20240101", "9")]}, {"cont-yn": "Y", "next-key": "K2"})]
+        client, db = FakeClient(pages), FakeDB()
+        db.investor = []
+
+        async def up(rows): db.investor += rows
+        db.upsert_investor_rows = up
+        with mock.patch.object(ch, "get_kst_now", return_value=__import__("datetime").datetime(2026, 10, 7, 18)):
+            n = asyncio.run(ch.collect_investor(client, db, "005930", years=1))
+        self.assertEqual(len(client.calls), 2)
+        self.assertEqual(client.calls[0][0], "ka10060")
+        self.assertEqual(client.calls[0][1]["dt"], "20261007")
+        self.assertEqual(n, 3)
+        self.assertEqual(db.investor[0], ("005930", "20261007", -61779, 1200, -3))
+        self.assertNotIn("20240101", [r[1] for r in db.investor])
+
     def test_minute_keeps_recent_trade_days_only(self):
         items = [{"cntr_tm": t, "open_pric": "1", "high_pric": "1", "low_pric": "1", "cur_prc": "1", "trde_qty": "7"}
                  for t in ("20260904153000", "20260904090000", "20260903153000", "bad")]
@@ -161,6 +181,18 @@ class TestMinuteBackfill(unittest.TestCase):
         self.assertTrue(bot._backfill_allowed(datetime(2026, 10, 7, 7, 59)))    # 수 개장 전
         self.assertFalse(bot._backfill_allowed(datetime(2026, 10, 7, 10, 0)))   # 수 장중
         self.assertTrue(bot._backfill_allowed(datetime(2026, 10, 10, 11, 0)))   # 토요일
+
+    def test_bot_investor_sync_window(self):
+        """투자자 순매수는 확정치가 나온 뒤(18시~익일 08시)와 휴장일에만 동기화"""
+        from datetime import datetime
+        from main_rest_async import AsyncTradingBot
+        bot = AsyncTradingBot.__new__(AsyncTradingBot)
+        bot.investor_sync_hour = 18
+        self.assertFalse(bot._investor_sync_allowed(datetime(2026, 10, 7, 16, 30)))  # 수 장 마감 직후(잠정치)
+        self.assertTrue(bot._investor_sync_allowed(datetime(2026, 10, 7, 18, 0)))
+        self.assertTrue(bot._investor_sync_allowed(datetime(2026, 10, 8, 7, 59)))
+        self.assertFalse(bot._investor_sync_allowed(datetime(2026, 10, 8, 10, 0)))   # 장중
+        self.assertTrue(bot._investor_sync_allowed(datetime(2026, 10, 10, 11, 0)))   # 토요일
 
 
 if __name__ == "__main__":
