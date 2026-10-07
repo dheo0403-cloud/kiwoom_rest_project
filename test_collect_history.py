@@ -136,13 +136,21 @@ class TestMinuteBackfill(unittest.TestCase):
             called.append(code)
             return 0
 
+        daily_called = []
+
+        async def fake_daily(client, db, code, **k):
+            daily_called.append(code)
+            return 0
+
         async def zero(*a, **k):
             return 0
-        with mock.patch.object(ch, "refresh_stock_master", zero), mock.patch.object(ch, "collect_daily", zero), \
+        with mock.patch.object(ch, "refresh_stock_master", zero), mock.patch.object(ch, "collect_daily", fake_daily), \
                 mock.patch.object(ch, "collect_minute", fake_minute):
-            stats = asyncio.run(ch.collect_after_close(client, db, ["111110"], [], "all"))
-        self.assertEqual(sorted(called), ["000020", "005930", "111110"])
+            stats = asyncio.run(ch.collect_after_close(client, db, ["111110"], ["069500"], "all"))
+        self.assertEqual(sorted(called), ["000020", "005930", "111110"])  # 분봉엔 추가 종목(ETF) 없음
         self.assertEqual(stats["minute_codes"], 3)
+        self.assertEqual(sorted(daily_called), ["000020", "005930", "069500", "111110"])  # 일봉은 전체 + 추가 종목
+        self.assertEqual(stats["daily_codes"], 4)
 
     def test_bot_backfill_window(self):
         from datetime import datetime

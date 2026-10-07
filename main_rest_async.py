@@ -1838,13 +1838,13 @@ class AsyncTradingBot:
                 await self.refresh_us_overnight()
 
     async def collect_market_history(self):
-        """장 마감 후 시세 수집: 종목 정보·일봉(관심·보유·EXTRA_DAILY_CODES)·당일 1분봉(관심·보유). 실패해도 데몬은 계속"""
+        """장 마감 후 시세 수집: 종목 정보·일봉(MINUTE_UNIVERSE 전체+관심·보유+EXTRA_DAILY_CODES)·당일 1분봉(전체+관심·보유). 실패해도 데몬은 계속"""
         self.history_collected_on = get_kst_now().date()  # 실패해도 같은 날 반복 호출 방지
         watch = sorted(set(self.watchlist) | set(self.portfolio.positions))
         extra = [c.strip() for c in os.getenv("EXTRA_DAILY_CODES", "").split(",") if c.strip()]
         try:
             stats = await collect_after_close(self.client, self.db, watch, extra, self.minute_universe)
-            msg = (f"장 마감 후 시세 수집 완료: 종목정보 {stats['master']:,}건, 일봉 {stats['daily']:,}행, "
+            msg = (f"장 마감 후 시세 수집 완료: 종목정보 {stats['master']:,}건, 일봉 {stats['daily']:,}행({stats['daily_codes']:,}종목), "
                    f"1분봉 {stats['minute']:,}행({stats['minute_codes']:,}종목)")
             print(f"🗄️ [수집] {msg}")
             await self.db.log_message("SYSTEM", msg)

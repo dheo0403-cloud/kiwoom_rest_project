@@ -163,16 +163,18 @@ async def refresh_stock_master(client, db) -> int:
 
 async def collect_after_close(client, db, watch_codes: List[str], extra_codes: List[str],
                               minute_universe: str = "watchlist") -> Dict[str, int]:
-    """장 마감 후 일일 수집: 종목 정보 갱신 + (관심·보유·추가 종목) 일봉 최신 페이지
-    + 당일 1분봉 (minute_universe='all'이면 stock_master 보통주 전체, 아니면 관심·보유)"""
-    stats = {"master": 0, "daily": 0, "minute": 0, "minute_codes": 0}
+    """장 마감 후 일일 수집: 종목 정보 갱신 + 일봉 최신 페이지 + 당일 1분봉
+    (minute_universe='all'이면 stock_master 보통주 전체, 일봉은 EXTRA_DAILY_CODES도 추가, 아니면 관심·보유)"""
+    stats = {"master": 0, "daily": 0, "daily_codes": 0, "minute": 0, "minute_codes": 0}
     await db.ensure_stock_master()
     stats["master"] = await refresh_stock_master(client, db)
-    for code in sorted(set(watch_codes) | set(extra_codes)):
+    # minute_universe='all'이면 일봉·분봉 모두 stock_master 보통주 전체 (장 마감 뒤엔 관심 목록이 비어 일봉 0행이던 문제)
+    universe = set(await db.get_stock_universe()) if minute_universe == "all" else set()
+    daily_codes = set(watch_codes) | set(extra_codes) | universe
+    stats["daily_codes"] = len(daily_codes)
+    for code in sorted(daily_codes):
         stats["daily"] += await collect_daily(client, db, code)
-    minute_codes = set(watch_codes)
-    if minute_universe == "all":
-        minute_codes |= set(await db.get_stock_universe())
+    minute_codes = set(watch_codes) | universe
     stats["minute_codes"] = len(minute_codes)
     for code in sorted(minute_codes):
         stats["minute"] += await collect_minute(client, db, code, days=1)
