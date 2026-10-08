@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
-from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority
+from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority, is_tr_ok, is_order_ok, is_token_invalid
 from async_portfolio import AsyncPortfolioManager
 from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
@@ -55,8 +55,7 @@ async def cancel_and_record(client, db, order_no: str, code: str, name: str, sid
     """주문 취소 후 성공(rt_cd 0)일 때만 order_history에 CANCEL_<side> 기록
     - 주문은 '접수' 시점에 order_history에 남으므로, 취소된 수량을 성과(승률/PF) 계산에서 차감하기 위함"""
     res = await client.cancel_order(order_no=order_no, code=code, qty=qty, priority=priority)
-    rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
-    if res and str(rt_cd) == '0' and db and side in ("BUY", "SELL"):
+    if is_order_ok(res) and db and side in ("BUY", "SELL"):
         await db.log_order(code, name, f"CANCEL_{side}", qty, 0)
     return res
 
@@ -76,6 +75,7 @@ class OrderTimeoutManager:
         self.timeout_seconds = timeout_seconds
         self.tracked_orders: Dict[str, Dict[str, Any]] = {}
         self.cancelled_cooldowns: Dict[str, float] = {}  # 취소된 종목코드 -> 쿨다운 만료 시각(timestamp)
+        self.cancel_failures: Dict[str, int] = {}  # 주문번호 -> 취소 거절 횟수 (3회면 재추적 중단, 무한 취소 반복 방지)
         self._lock = asyncio.Lock()
 
     def is_in_cooldown(self, code: str) -> bool:
@@ -152,6 +152,19 @@ class OrderTimeoutManager:
                     print(f"✅ [OrderTracker] 주문 체결/완료 확인 -> 추적 종료: 주문번호 {order_no} ({item['name']})")
                     del self.tracked_orders[order_no]
 
+    async def _record_cancel_failure(self, ord_no: str, name: str, side: str, res):
+        """증권사 거절 횟수 누적. 3회째에 ERROR 한 번 남기고 이후 이 주문은 자동 취소하지 않음(미체결로는 계속 집계)
+        - 응답 없음·토큰 무효·요청 한도 초과는 일시 장애라 세지 않음"""
+        msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '응답 없음'
+        if not res or is_token_invalid(res) or '요청 개수' in str(msg):
+            print(f"⚠️ [취소 일시 실패] 주문번호 {ord_no} ({side} {name}): {msg} → 다음 주기에 재시도")
+            return
+        n = self.cancel_failures.get(ord_no, 0) + 1
+        self.cancel_failures[ord_no] = n
+        print(f"⚠️ [취소 거절 {n}/3] 주문번호 {ord_no} ({side} {name}): {msg}")
+        if n == 3 and self.db:
+            await self.db.log_message("ERROR", f"❌ [취소 반복 실패] 주문번호 {ord_no} ({side} {name}) 3회 거절 → 자동 취소 중단, 수동 확인 필요: {msg}")
+
     async def check_and_resolve_timeouts(self):
         """설정된 타임아웃(N초) 경과 미체결 주문 검사 및 자동 취소/재발주 실행"""
         now = time.time()
@@ -160,6 +173,8 @@ class OrderTimeoutManager:
         async with self._lock:
             for ord_no, info in list(self.tracked_orders.items()):
                 elapsed = now - info['timestamp']
+                if self.cancel_failures.get(ord_no, 0) >= 3:
+                    continue  # 자동 취소 포기한 주문: 추적은 유지(미체결 증거금·종목 집계용), 취소는 안 함
                 if elapsed >= self.timeout_seconds and info['unfilled_qty'] > 0:
                     expired_orders.append(info.copy())
                     del self.tracked_orders[ord_no]
@@ -175,16 +190,23 @@ class OrderTimeoutManager:
 
             if side == "BUY":
                 # 미체결 매수 -> 취소하여 예수금 반환 및 30초 쿨다운 적용
-                self.cancelled_cooldowns[code] = time.time() + 30.0
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await cancel_and_record(self.client, self.db, ord_no, code, name, "BUY", uncl_qty, RequestPriority.HIGH)
-                    if self.db:
-                        await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 접수 -> D+2 예수금 증거금 즉시 반환 (30초 쿨다운)")
-                    print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환, 30초 쿨다운)")
+                    res = await cancel_and_record(self.client, self.db, ord_no, code, name, "BUY", uncl_qty, RequestPriority.HIGH)
+                    if is_order_ok(res):
+                        self.cancelled_cooldowns[code] = time.time() + 30.0
+                        if self.db:
+                            await self.db.log_message("WARNING", f"🛡️ [미체결 매수 취소] 주문번호 {ord_no} ({name} {uncl_qty}주) 취소 완료 -> D+2 예수금 증거금 반환 (30초 쿨다운)")
+                        print(f"🛡️ [미체결 매수 취소] {name}({code}) {uncl_qty}주 취소 완료 (예수금 반환, 30초 쿨다운)")
+                    else:
+                        await self._record_cancel_failure(ord_no, name, side, res)
             elif side == "SELL":
                 # 미체결 매도 -> 지정가 취소 후 KRX 락 해제 대기 및 즉시 긴급 시장가(03) CRITICAL 전량 재발주
                 if self.client and hasattr(self.client, 'cancel_order'):
-                    await cancel_and_record(self.client, self.db, ord_no, code, name, "SELL", uncl_qty, RequestPriority.HIGH)
+                    res = await cancel_and_record(self.client, self.db, ord_no, code, name, "SELL", uncl_qty, RequestPriority.HIGH)
+                    if not is_order_ok(res):
+                        # 취소가 안 되면 원 매도 주문이 수량을 잡고 있어 시장가 재발주는 800033으로 실패함 → 원 주문 유지
+                        await self._record_cancel_failure(ord_no, name, side, res)
+                        continue
                     await asyncio.sleep(0.2)  # KRX 매도가능수량 락 해제 비동기 대기
 
                 print(f"🚨 [미체결 매도 타임아웃] {name}({code}) 지정가 취소 후 즉시 긴급 시장가(03) CRITICAL 전량 청산 재발주!")
@@ -201,8 +223,12 @@ class OrderTimeoutManager:
                     new_ord_no = str((sell_res or {}).get('ord_no') or (sell_res or {}).get('odno') or '').strip()
                     if new_ord_no and new_ord_no != '0':
                         await self.track_order(new_ord_no, code, name, "SELL", uncl_qty, 0, order_type="03")
-                if self.db:
-                    await self.db.log_message("CRITICAL", f"🚨 [미체결 매도 대체] {name}({code}) {uncl_qty}주 긴급 시장가(03) 재청산 발주 완료!")
+                    if self.db:
+                        if is_order_ok(sell_res):
+                            await self.db.log_message("CRITICAL", f"🚨 [미체결 매도 대체] {name}({code}) {uncl_qty}주 긴급 시장가(03) 재청산 발주 완료!")
+                        else:
+                            err = (sell_res or {}).get('msg1') or (sell_res or {}).get('return_msg') or '응답 없음'
+                            await self.db.log_message("ERROR", f"🚨 [미체결 매도 대체 실패] {name}({code}) {uncl_qty}주 시장가 재발주 거절: {err}")
 
             if self.bot and hasattr(self.bot, '_sync_account_balance'):
                 await self.bot._sync_account_balance()
@@ -302,6 +328,7 @@ class AsyncTradingBot:
         self.max_daily_entries = int(os.getenv("MAX_DAILY_ENTRIES", "10"))
         self._entry_day = None
         self._entered_today: set = set()
+        self._blocked_today: set = set()  # 계좌 권한 문제(509247 파생 ETF 미신청)로 거부된 종목 — 당일 매수 제외
 
     @property
     def running(self) -> bool:
@@ -490,7 +517,12 @@ class AsyncTradingBot:
         # 2) kt00001 예수금상세현황 (당일 순수 예수금 원금, 전일예수금, D+2 추정예수금)
         deposit_data = await self.client.get_deposit_info(priority=RequestPriority.MEDIUM)
 
-        if not balance_data and not deposit_data:
+        # 업무 오류 응답(토큰 무효 등)은 값이 없는 것과 같음 → 메모리 값을 총자산으로 저장하지 않도록 제외
+        balance_data = balance_data if is_tr_ok(balance_data) else None
+        deposit_data = deposit_data if is_tr_ok(deposit_data) else None
+        # 잔고 TR이 없으면 보유 종목·총자산을 알 수 없음(메모리 값으로 계산하면 오기록) → 이번 동기화 건너뜀
+        if not balance_data:
+            print(f"⚠️ [계좌 싱크] 잔고 TR 오류 응답(예수금 TR {'정상' if deposit_data else '오류'}) → 이번 동기화 건너뜀(DB 미저장)")
             return
 
         # 1. 예수금 및 총평가금액 파싱 대상 수집 (balance_data 및 deposit_data)
@@ -1199,12 +1231,23 @@ class AsyncTradingBot:
             if not uncl_data:
                 return
 
-            for order in parse_unexecuted_orders(uncl_data):
+            open_orders = parse_unexecuted_orders(uncl_data)
+            mgr = getattr(self, 'order_timeout_mgr', None)
+            if mgr:
+                # 자동 취소를 포기한 주문은 증권사 미체결 목록에서 사라지면(체결·장 종료) 추적 해제
+                open_nos = {o['ord_no'] for o in open_orders}
+                async with mgr._lock:
+                    for ord_no in list(mgr.tracked_orders):
+                        if mgr.cancel_failures.get(ord_no, 0) >= 3 and ord_no not in open_nos:
+                            del mgr.tracked_orders[ord_no]
+
+            for order in open_orders:
                 order_no, code, uncl_qty = order['ord_no'], order['code'], order['qty']
                 side_str = order['side'] or "BUY"
 
                 if order_no and uncl_qty > 0:
-                    if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and order_no not in self.order_timeout_mgr.tracked_orders:
+                    # 취소 3회 거절 주문도 추적은 함(미체결 집계용). 자동 취소는 check_and_resolve_timeouts에서 건너뜀
+                    if mgr and order_no not in mgr.tracked_orders:
                         # 외부/미추적 미체결 주문 발견 시 트래커에 즉시 편입
                         name = self.watchlist.get(code, {}).get('name', code)
                         await self.order_timeout_mgr.track_order(order_no, code, name, side_str, uncl_qty, 0)
@@ -1383,12 +1426,23 @@ class AsyncTradingBot:
         finally:
             self._buy_inflight.discard(code)
 
-    def _entry_allowed_today(self, code: str) -> bool:
-        """KST 날짜가 바뀌면 진입 기록을 비우고, 같은 종목 재진입·하루 상한을 검사한다."""
+    def _roll_entry_day(self):
+        """KST 날짜가 바뀌면 당일 진입 기록·매수 제외 목록을 비운다."""
         today = get_kst_now().date()
         if getattr(self, '_entry_day', None) != today:
             self._entry_day = today
             self._entered_today = set()
+            self._blocked_today = set()
+            mgr = getattr(self, 'order_timeout_mgr', None)
+            if mgr:
+                mgr.cancel_failures.clear()  # 키움 주문번호는 거래일마다 다시 시작
+
+
+    def _entry_allowed_today(self, code: str) -> bool:
+        """매수 제외 종목, 같은 종목 재진입, 하루 진입 상한을 검사한다."""
+        self._roll_entry_day()
+        if code in self._blocked_today:
+            return False
         if getattr(self, 'one_entry_per_day', False) and code in self._entered_today:
             return False
         max_entries = getattr(self, 'max_daily_entries', 0)
@@ -1672,7 +1726,7 @@ class AsyncTradingBot:
             if ord_no and hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr:
                 await self.order_timeout_mgr.track_order(ord_no, code, name, "BUY", qty, buy_price, order_type="00")
             await self.portfolio.add_position(code, name, qty, buy_price, confirmed=False)
-            self._entry_allowed_today(code)  # 날짜 경계 갱신
+            self._roll_entry_day()
             self._entered_today.add(code)
             await self.db.log_order(code, name, "BUY", qty, buy_price)
             await self.db.log_message("INFO", f"🔥 [매수 주문 접수] {name}({code}) {qty}주 @ {buy_price:,}원 ({reason})")
@@ -1681,6 +1735,11 @@ class AsyncTradingBot:
         else:
             msg = (res or {}).get('msg1') or (res or {}).get('return_msg') or '주문 거절'
             await self.db.log_message("ERROR", f"매수 주문 실패: {name}({code}) - {msg}")
+            # 파생상품 ETF 거래신청 미등록: 당일 재시도해도 같은 거부 (msg1·return_msg 둘 다 확인)
+            if '509247' in f"{(res or {}).get('msg1')} {(res or {}).get('return_msg')}":
+                self._roll_entry_day()
+                self._blocked_today.add(code)
+                await self.db.log_message("WARNING", f"⛔ [매수 제외] {name}({code}) 파생상품 ETF 거래신청 미등록 → 오늘 매수 대상에서 제외")
 
     async def wait_until_next_market_open(self, wake_up_hour: int = 8, wake_up_minute: int = 50):
         """

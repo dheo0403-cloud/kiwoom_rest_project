@@ -9,6 +9,7 @@ import asyncio
 import os
 import time
 import dataclasses
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional, Tuple, List
 from enum import IntEnum
 import aiohttp
@@ -34,6 +35,7 @@ class QueuedRequest:
     headers_override: Optional[Dict[str, str]] = dataclasses.field(default=None, compare=False)
     future: asyncio.Future = dataclasses.field(default=None, compare=False)
     retries: int = dataclasses.field(default=3, compare=False)
+    reauthed: bool = dataclasses.field(default=False, compare=False)  # 토큰 무효(8005)로 재발급·재전송했는지
 
 class TokenBucketRateLimiter:
     """
@@ -113,6 +115,27 @@ def is_tr_ok(resp: Any) -> bool:
     return rc is None or str(rc).strip() in ('0', '')
 
 
+def is_order_ok(res: Any) -> bool:
+    """주문·취소 응답 성공 여부 (rt_cd 또는 return_code가 0)"""
+    if not isinstance(res, dict):
+        return False
+    rt_cd = res.get('rt_cd') if res.get('rt_cd') is not None else res.get('return_code')
+    return str(rt_cd) == '0'
+
+
+def _parse_expires(expires_dt: Any) -> Optional[float]:
+    """au10001 expires_dt('YYYYMMDDHHMMSS', KST) → epoch 초. 형식이 다르면 None(사전 재발급 안 함)"""
+    try:
+        return datetime.strptime(str(expires_dt), "%Y%m%d%H%M%S").replace(tzinfo=timezone(timedelta(hours=9))).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def is_token_invalid(resp: Any) -> bool:
+    """키움 토큰 무효 응답 여부 (return_msg 예: '인증에 실패했습니다[8005:Token이 유효하지 않습니다]')"""
+    return not is_tr_ok(resp) and isinstance(resp, dict) and '8005:' in str(resp.get('return_msg') or '')
+
+
 def parse_unexecuted_orders(data: Any) -> List[Dict[str, Any]]:
     """미체결 응답(ka10075 'oso' 목록 / kt00007 등) → [{ord_no, code, name, side('BUY'|'SELL'|None), qty}]
     - 수량: oso_qty(ka10075 미체결수량) 우선, side: io_tp_nm('+매수'/'-매도') 등에서 판별, 판별 불가면 None"""
@@ -176,6 +199,9 @@ class AsyncKiwoomClient:
         self.circuit_breaker = CircuitBreaker()
         self.queue: asyncio.PriorityQueue[QueuedRequest] = asyncio.PriorityQueue()
         self.access_token: Optional[str] = None
+        self._token_lock = asyncio.Lock()  # 동시 8005 응답에도 토큰 재발급은 한 번만
+        self._token_expires: Optional[float] = None  # 토큰 만료 시각(epoch, au10001 expires_dt)
+        self._next_token_try = 0.0  # 다음 재발급 시도 가능 시각(epoch)
         self.session: Optional[aiohttp.ClientSession] = None
         self._worker_task: Optional[asyncio.Task] = None
         self._running = False
@@ -220,13 +246,28 @@ class AsyncKiwoomClient:
             async with self.session.post(url, headers=headers, json=payload) as response:
                 response.raise_for_status()
                 data = await response.json()
-                self.access_token = data.get("access_token") or data.get("token")
-                if self.access_token:
-                    print(f"✅ [{self.mode}] OAuth2 토큰 갱신 완료")
+                token = data.get("access_token") or data.get("token")
+                if token:  # 토큰이 없는 응답이면 기존 토큰 유지(None으로 덮지 않음)
+                    self.access_token = token
+                    self._token_expires = _parse_expires(data.get("expires_dt"))
+                    print(f"✅ [{self.mode}] OAuth2 토큰 갱신 완료 (만료: {data.get('expires_dt')})")
                     return self.access_token
+                print(f"❌ [{self.mode}] 토큰 발급 응답에 토큰 없음: {data.get('return_msg')}")
         except Exception as e:
             print(f"❌ [{self.mode}] 토큰 발급 에러: {e}")
         return None
+
+    async def _refresh_token(self, stale_token: Optional[str]):
+        """무효가 된 토큰을 재발급. 다른 요청이 이미 바꿨으면(현재 토큰 ≠ 실패한 토큰) 다시 받지 않음"""
+        async with self._token_lock:
+            # 발급이 계속 실패해도 요청마다 토큰 API를 두드리지 않도록 30초 간격
+            if self.access_token == stale_token and time.time() >= self._next_token_try:
+                self._next_token_try = time.time() + 30
+                print(f"🔑 [{self.mode}] 토큰 무효·만료 임박·없음 → 재발급")
+                await self.get_access_token()
+                if self.access_token == stale_token:
+                    # 발급 실패 또는 키움이 같은 토큰을 돌려줌 → 만료 전 사전 재발급은 멈추고 8005 시 재발급에 맡김
+                    self._token_expires = None
 
     def _get_headers(self, api_id: str) -> Dict[str, str]:
         return {
@@ -263,9 +304,16 @@ class AsyncKiwoomClient:
 
     async def _execute_request(self, req: QueuedRequest):
         """실제 HTTP 요청 전송 및 에러/재시도 핸들링 (Raw JSON 에러 투명화)"""
-        if not self.access_token:
-            await self.get_access_token()
+        # 토큰이 없거나 만료 10분 전이면 미리 재발급 (잠금 안에서 한 번만)
+        if not self.access_token or (self._token_expires and time.time() > self._token_expires - 600):
+            await self._refresh_token(self.access_token)
+        if not self.access_token:  # 토큰 없이 'Bearer None'으로 보내지 않음 (발급 재시도는 30초 간격)
+            print(f"❌ [{self.mode}] 토큰 없음 → {req.api_id} 요청 보류")
+            if not req.future.done():
+                req.future.set_result((None, None))
+            return
 
+        used_token, resend, last = self.access_token, False, (None, None)
         headers = self._get_headers(req.api_id)
         if req.headers_override:
             headers.update(req.headers_override)
@@ -290,6 +338,13 @@ class AsyncKiwoomClient:
                     except Exception:
                         text_body = await response.text()
                         data = {"raw_text": text_body, "http_status": response.status}
+
+                    # 토큰 무효는 HTTP 200 + return_msg '[8005:...]'로 옴 → 재발급 후 같은 요청 1회 재전송
+                    # (인증 단계 거부라 주문도 접수되지 않은 상태)
+                    if not req.reauthed and is_token_invalid(data):
+                        req.reauthed = resend = True
+                        last = (data, response.headers)
+                        break  # 응답 연결을 닫은 뒤 아래에서 재발급·재전송
 
                     if response.status != 200:
                         msg = data.get('msg1') or data.get('return_msg') or data.get('raw_text') or 'HTTP Error'
@@ -318,6 +373,15 @@ class AsyncKiwoomClient:
                 if not req.future.done():
                     req.future.set_result((None, None))
                 return
+
+        if resend:
+            await self._refresh_token(used_token)
+            if self.access_token == used_token:  # 새 토큰을 못 받음(발급 실패·30초 간격) → 같은 토큰으로 재전송하지 않음
+                if not req.future.done():
+                    req.future.set_result(last)
+                return
+            await self.rate_limiter.acquire(tokens=1.0, is_priority=req.priority == RequestPriority.CRITICAL)
+            return await self._execute_request(req)
 
         if not req.future.done():
             req.future.set_result((None, None))
@@ -402,7 +466,9 @@ class AsyncKiwoomClient:
             "accNo": self.account,
             "accPwd": self.password,
             "stk_cd": clean_code,
-            "ord_qty": str(int(qty)),
+            # kt10003 필수 필드는 cncl_qty('0'=잔량 전부 취소). 9/18부터 ord_qty로 보내 모든 취소가 1511로 거절됐음
+            # 부분 체결된 주문도 남은 수량이 정확히 취소되도록 qty 대신 '0' 사용
+            "cncl_qty": "0",
             "orig_ord_no": str(order_no).strip(),
             "trde_tp": "00",
             "cond_uv": "0"
@@ -477,7 +543,7 @@ class AsyncKiwoomClient:
                 "qry_tp": q_tp
             }
             data, _ = await self.request("kt00001", url, payload, priority=priority)
-            if data and isinstance(data, dict):
+            if is_tr_ok(data):  # 오류 응답이 best_data가 되어 뒤의 정상 응답을 가리지 않도록
                 # 유의미한 D+2 예수금이나 복수 필드가 있는지 확인
                 if not best_data:
                     best_data = data

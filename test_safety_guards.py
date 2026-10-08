@@ -271,3 +271,223 @@ def test_orderbook_imbalance_ka10004_schema():
     r = TechnicalIndicators.calculate_orderbook_imbalance(ob)
     assert (r["total_bid_qty"], r["total_ask_qty"], r["bid_ask_spread"]) == (300.0, 100.0, 500.0)
     assert r["imbalance_ratio"] == 0.5
+
+
+class _FakeResp:
+    def __init__(self, data):
+        self.status, self._data, self.headers = 200, data, {}
+
+    async def json(self):
+        return self._data
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+
+class _FakeSession:
+    """Authorization 헤더가 'Bearer new'일 때만 정상, 아니면 8005 (10/8 운영 응답 형식)"""
+    closed = False
+
+    def __init__(self):
+        self.calls = []
+
+    def post(self, url, headers=None, json=None):
+        self.calls.append(headers["Authorization"])
+        if headers["Authorization"] == "Bearer new":
+            return _FakeResp({"return_code": 0, "ord_no": "1"})
+        return _FakeResp({"return_code": 3, "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"})
+
+
+async def test_token_invalid_reissues_once_and_resends():
+    """8005면 토큰을 한 번만 재발급하고 각 요청을 새 토큰으로 1회 재전송 (동시 요청 포함, 주문도 재시도 1회 설정과 무관)"""
+    from async_kiwoom_client import QueuedRequest, is_token_invalid
+    client = AsyncKiwoomClient(is_demo=True)
+    client.session, client.access_token = _FakeSession(), "old"
+    issued = []
+
+    async def fake_issue():
+        issued.append(1)
+        await asyncio.sleep(0.01)  # 발급 중 다른 요청이 잠금에서 기다리게
+        client.access_token = "new"
+        return "new"
+
+    client.get_access_token = fake_issue
+    loop = asyncio.get_running_loop()
+    reqs = [QueuedRequest(priority=1, timestamp=0, api_id=a, url="u", payload={}, future=loop.create_future(), retries=r)
+            for a, r in (("kt10000", 1), ("kt00018", 3))]
+    await asyncio.gather(*[client._execute_request(r) for r in reqs])
+    assert len(issued) == 1
+    assert [r.future.result()[0]["return_code"] for r in reqs] == [0, 0]
+    assert client.session.calls.count("Bearer new") == 2
+
+    # 재발급해도 새 토큰을 못 받으면 같은 토큰으로 재전송하지 않고 8005 응답을 돌려줌
+    client.access_token, client._next_token_try = "still-bad", 0
+    tries = []
+
+    async def failing_issue():
+        tries.append(1)
+
+    client.get_access_token = failing_issue
+    before = len(client.session.calls)
+    r = QueuedRequest(priority=1, timestamp=0, api_id="kt00018", url="u", payload={}, future=loop.create_future(), retries=1)
+    await client._execute_request(r)
+    assert is_token_invalid(r.future.result()[0])
+    assert len(tries) == 1 and len(client.session.calls) - before == 1  # 발급 1회 시도, 전송은 처음 1회뿐
+
+    # 토큰이 아예 없으면 'Bearer None'으로 보내지 않음
+    client.access_token, client._next_token_try = None, 0
+    r = QueuedRequest(priority=1, timestamp=0, api_id="kt10000", url="u", payload={}, future=loop.create_future(), retries=1)
+    await client._execute_request(r)
+    assert r.future.result() == (None, None) and "Bearer None" not in client.session.calls
+
+
+def test_token_invalid_detection_and_expiry_parse():
+    """정상 응답 문구 속 숫자(18005 등)는 토큰 무효가 아님, expires_dt는 KST로 해석"""
+    from async_kiwoom_client import is_token_invalid, _parse_expires
+    assert is_token_invalid({"return_code": 3, "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"})
+    assert not is_token_invalid({"return_code": 0, "return_msg": "매수주문 18005원 [8005:정상]"})
+    assert not is_token_invalid({"return_code": 5, "return_msg": "주문가능금액 18005원 부족"})
+    from datetime import datetime, timezone
+    assert _parse_expires("20261009183713") == datetime(2026, 10, 9, 9, 37, 13, tzinfo=timezone.utc).timestamp()  # KST 18:37 = UTC 09:37
+    assert _parse_expires(None) is None
+
+
+async def test_deposit_info_skips_error_response(monkeypatch):
+    """kt00001 첫 응답이 오류여도 뒤의 정상 응답을 쓴다"""
+    client = AsyncKiwoomClient(is_demo=True)
+
+    async def fake_request(api_id, url, payload, priority=None, headers_override=None, retries=3):
+        if payload["qry_tp"] == "3":
+            return {"return_code": 5, "return_msg": "오류"}, {}
+        return {"return_code": 0, "entr": "1000"}, {}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    assert (await client.get_deposit_info())["entr"] == "1000"
+
+
+async def test_cancel_order_sends_cncl_qty(monkeypatch):
+    """kt10003 취소는 필수 필드 cncl_qty('0'=잔량 전부)로 보낸다 (ord_qty로 보내 1511 거절되던 문제)"""
+    client = AsyncKiwoomClient(is_demo=True)
+    seen = {}
+
+    async def fake_request(api_id, url, payload, priority=None, headers_override=None, retries=3):
+        seen.update(payload)
+        return {"return_code": 0, "ord_no": "0000141"}, {}
+
+    monkeypatch.setattr(client, "request", fake_request)
+    await client.cancel_order("0173923", "058470", 1)
+    assert seen["cncl_qty"] == "0" and seen["orig_ord_no"] == "0173923" and "ord_qty" not in seen
+
+
+async def test_rejected_cancel_stops_after_three_and_no_market_resell():
+    """취소가 계속 거절되면 3회 뒤 재추적을 멈추고, 매도 취소 실패 시 시장가 재발주를 하지 않는다 (10/8 899회 반복·800033 사례)"""
+    client, db = MockKiwoomClient(), MockDatabaseManager()
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db,
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    mgr = bot.order_timeout_mgr
+
+    async def reject(order_no, code, qty, priority=None):
+        return {"return_code": 2, "return_msg": "입력 값 오류입니다[1511:필수입력 파라미터=cncl_qty]"}
+
+    async def still_open(code="", priority=None):
+        return {"return_code": 0, "oso": [{"ord_no": "0173923", "stk_cd": "058470", "oso_qty": "1", "io_tp_nm": "+매수"}]}
+
+    attempts = []
+
+    async def no_response(order_no, code, qty, priority=None):  # 일시 장애(응답 없음)는 거절 횟수에 안 셈
+        attempts.append(order_no)
+        return None
+
+    async def counted_reject(order_no, code, qty, priority=None):
+        attempts.append(order_no)
+        return await reject(order_no, code, qty)
+
+    async def cycle():
+        await bot.cleanup_unexecuted_orders()  # 미체결 목록에서 재추적
+        for info in mgr.tracked_orders.values():
+            info["timestamp"] -= 3600  # 타임아웃 경과로 만듦
+        await bot.cleanup_unexecuted_orders()  # 타임아웃 → 취소 시도
+
+    client.get_unexecuted_orders = still_open
+    client.cancel_order = no_response
+    await cycle()
+    assert mgr.cancel_failures.get("0173923", 0) == 0
+
+    client.cancel_order = counted_reject
+    for _ in range(5):
+        await cycle()
+    assert mgr.cancel_failures["0173923"] == 3
+    assert len(attempts) == 1 + 3  # 3회 거절 뒤에는 더 취소하지 않음
+    assert "058470" in mgr.get_pending_buy_codes()  # 살아 있는 주문이라 미체결로는 계속 집계
+    assert sum("취소 반복 실패" in l["message"] for l in db.logs) == 1
+    assert not any("취소 완료" in l["message"] for l in db.logs)
+
+    async def gone(code="", priority=None):  # 체결·장 종료로 미체결 목록에서 사라지면 추적 해제
+        return {"return_code": 0, "oso": []}
+
+    client.get_unexecuted_orders = gone
+    await bot.cleanup_unexecuted_orders()
+    assert "0173923" not in mgr.tracked_orders
+
+    await mgr.track_order("0200001", "005930", "삼성전자", "SELL", 1, 70000)
+    mgr.tracked_orders["0200001"]["timestamp"] -= 3600
+    sells_before = [o for o in client.sent_orders if o["side"] == "SELL"]
+    await mgr.check_and_resolve_timeouts()
+    assert [o for o in client.sent_orders if o["side"] == "SELL"] == sells_before  # 원 매도 주문 유지, 시장가 재발주 없음
+
+
+async def test_balance_not_saved_when_all_tr_error():
+    """잔고·예수금 TR이 모두 업무 오류면 DB 잔고를 저장하지 않고 기존 자산값 유지 (10/8 17,205원 오기록 사례)"""
+    client, db = MockKiwoomClient(), MockDatabaseManager()
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db, portfolio=portfolio)
+    saved = []
+
+    async def record(*a):
+        saved.append(a)
+
+    async def no_balance(priority=None):
+        return None
+
+    async def token_error(priority=None):
+        return {"return_code": 3, "return_msg": "인증에 실패했습니다[8005:Token이 유효하지 않습니다]"}
+
+    db.update_balance = record
+    client.get_account_balance, client.get_deposit_info = no_balance, token_error
+    before = (await portfolio.get_snapshot())["total_asset"]
+    await bot._sync_account_balance()
+    assert saved == []
+    assert (await portfolio.get_snapshot())["total_asset"] == before
+
+    async def deposit_ok(priority=None):  # 잔고 TR만 실패해도 메모리 포지션으로 총자산을 만들지 않음
+        return {"return_code": 0, "entr": "17205", "d2_entra": "17205"}
+
+    client.get_deposit_info = deposit_ok
+    await bot._sync_account_balance()
+    assert saved == []
+
+
+async def test_derivative_etf_rejection_blocks_code_for_today(monkeypatch):
+    """509247(파생상품 ETF 거래신청 미등록) 거부 종목은 당일 매수 제외, 다른 종목·다음 날은 허용"""
+    import main_rest_async
+    from datetime import datetime
+    from database import KST
+    day = {"d": datetime(2026, 10, 12, 10, 0, tzinfo=KST)}
+    monkeypatch.setattr(main_rest_async, "get_kst_now", lambda: day["d"])
+    client, db = MockKiwoomClient(), MockDatabaseManager()
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db,
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+
+    async def reject(*a, **k):
+        return {"return_code": 2000, "return_msg": "[2000](509247:파생상품 ETF 거래신청 등록 후 주문이 가능합니다.)"}
+
+    client.send_order = reject
+    await bot._execute_smart_buy("114800", "KODEX 인버스", 1, 5000.0)
+    assert not bot._entry_allowed_today("114800")
+    assert bot._entry_allowed_today("005930")
+    assert any("매수 제외" in l["message"] for l in db.logs)
+    day["d"] = datetime(2026, 10, 13, 9, 30, tzinfo=KST)
+    assert bot._entry_allowed_today("114800")
