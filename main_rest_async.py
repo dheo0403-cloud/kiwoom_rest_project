@@ -328,7 +328,12 @@ class AsyncTradingBot:
         self.max_daily_entries = int(os.getenv("MAX_DAILY_ENTRIES", "10"))
         self._entry_day = None
         self._entered_today: set = set()
-        self._blocked_today: set = set()  # 계좌 권한 문제(509247 파생 ETF 미신청)로 거부된 종목 — 당일 매수 제외
+        self._blocked_codes: set = set()  # 계좌 권한 문제(509247 파생 ETF 미신청)로 거부된 종목 — DB buy_blocklist와 같이 영구 제외
+        self._risk_day = get_kst_now().date()  # 하루 단위 상태(손실 한도 기준·타임컷 등)가 속한 KST 날짜 (생성 시점 = 오늘)
+        self._state_restored = False  # 오늘 손실 한도 기준을 DB(bot_state)에서 복원했는지
+        self._last_saved_state = None  # 마지막으로 저장한 bot_state 핵심값 (같으면 60초 간격으로만 다시 저장)
+        self._last_saved_at = 0.0
+        self._open_day = None  # 08:50 장전 준비를 마친 날짜
 
     @property
     def running(self) -> bool:
@@ -470,6 +475,40 @@ class AsyncTradingBot:
         """api_server.py 호환 감시 유니버스 갱신 별칭"""
         await self.update_watchlist()
 
+    async def _restore_today_state(self):
+        """장중 재시작 대비: 오늘 매수 종목(같은 종목 1회·하루 상한)과 하루 손실 한도 기준값을 DB에서 복원"""
+        self._risk_day = get_kst_now().date()  # 기동 시점 날짜 = 오늘 상태 (아래 복원값을 날짜 초기화가 지우지 않게)
+        try:
+            self._roll_entry_day()
+            if hasattr(self.db, 'get_today_buy_codes'):
+                codes = await self.db.get_today_buy_codes()
+                self._entered_today.update(codes)
+                if codes:
+                    print(f"🔁 [Bot Init] 오늘 매수 종목 {len(codes)}개 복원: {sorted(codes)}")
+            if hasattr(self.db, 'get_buy_blocklist'):
+                await self.db.ensure_buy_blocklist()
+                self._blocked_codes = await self.db.get_buy_blocklist()
+                if self._blocked_codes:
+                    print(f"⛔ [Bot Init] 매수 제외 종목 {len(self._blocked_codes)}개 로드: {sorted(self._blocked_codes)}")
+            if hasattr(self.db, 'ensure_bot_state'):
+                await self.db.ensure_bot_state()
+                st = await self.db.load_bot_state(get_kst_now().strftime('%Y-%m-%d'))
+                if st.get('daily_start_capital', 0) > 0:
+                    self.daily_start_capital = st['daily_start_capital']
+                    self.highest_total_asset = st.get('highest_total_asset', self.daily_start_capital)
+                    self.portfolio.daily_realized_pnl = st.get('daily_realized_pnl', 0.0)
+                    self.circuit_breaker_breach_count = int(st.get('breach_count', 0))
+                    if st.get('circuit_breaker', 0) >= 1:  # 재시작 전 손실 한도로 매수 차단 중이었으면 유지
+                        self.daily_circuit_breaker = self.mdd_shutdown = True
+                        print("🔁 [Bot Init] 오늘 서킷 브레이커 발동 상태 복원 → 신규 매수 차단 유지")
+                    # 웜업(기준 자산 보정 3회)을 마친 값이면 그대로 쓰고, 웜업 중에 저장된 값이면 남은 웜업을 이어서 진행
+                    self.sync_warmup_count = int(st.get('warmup', 3))
+                    self._state_restored = self.sync_warmup_count >= 3
+                    print(f"🔁 [Bot Init] 하루 손실 한도 기준 복원: 시작 {int(self.daily_start_capital):,}원 / "
+                          f"최고 {int(self.highest_total_asset):,}원 / 실현손익 {int(self.portfolio.daily_realized_pnl):,}원")
+        except Exception as e:
+            print(f"⚠️ [Bot Init] 당일 상태 복원 예외: {e}")
+
     async def initialize(self):
         """클라이언트, DB 풀, 인메모리 버퍼, 텔레그램 알림, 계좌 상태 초기화"""
         print(f"🚀 [AsyncTradingBot] 엔진 초기화 시작 (모드: {'모의투자' if self.is_demo else '실전투자'})...")
@@ -499,6 +538,7 @@ class AsyncTradingBot:
             except Exception as e:
                 print(f"⚠️ [Bot Init] DB 계좌 복원 예외: {e}")
 
+        await self._restore_today_state()
         await self._sync_account_balance()
         self.is_running = True
         if not self.us_market_task or self.us_market_task.done():
@@ -512,6 +552,7 @@ class AsyncTradingBot:
 
     async def _sync_account_balance(self):
         """계좌 잔고 및 예수금 비동기 동기화 (듀얼 TR: kt00001 예수금상세 + kt00005 계좌평가)"""
+        self._reset_for_new_day()  # 날짜가 바뀌었으면 하루 단위 상태부터 초기화
         # 1) kt00005 계좌평가잔고 (보유종목, 총평가금액, D+2예수금)
         balance_data = await self.client.get_account_balance(priority=RequestPriority.MEDIUM)
         # 2) kt00001 예수금상세현황 (당일 순수 예수금 원금, 전일예수금, D+2 추정예수금)
@@ -728,8 +769,9 @@ class AsyncTradingBot:
             self.highest_total_asset = current_total_asset
 
         # 초기 3회 웜업 기간 동안은 기준 자산 안정화 (서킷 브레이커 판단 유예)
+        # 오늘 기준값을 DB에서 복원했으면 현재 자산으로 덮어쓰지 않음 (재시작 전 손실 유지)
         if self.sync_warmup_count <= 3:
-            if current_total_asset > 0:
+            if current_total_asset > 0 and not self._state_restored:
                 self.daily_start_capital = max(self.daily_start_capital, current_total_asset)
                 self.highest_total_asset = max(self.highest_total_asset, current_total_asset)
             print(f"🌱 [계좌 캘리브레이션/Warm-up {self.sync_warmup_count}/3] 기준자산: {int(self.daily_start_capital):,}원 | 최고자산: {int(self.highest_total_asset):,}원")
@@ -787,6 +829,7 @@ class AsyncTradingBot:
 
         await self.db.save_portfolio(self.portfolio.positions)
         await self.db.update_balance(snap['total_asset'], snap['current_capital'], snap['unrealized_pnl'], snap['total_yield_rate'])
+        await self._save_bot_state()
 
         # 상세 계좌 싱크 및 예수금 정산 로깅
         sync_log = f"🔄 [계좌 싱크/{self.client.mode}] 총자산 {int(snap['total_asset']):,}원 / D+2 예수금 {int(snap['current_capital']):,}원 / 보유 {snap['stock_count']}종목"
@@ -799,6 +842,26 @@ class AsyncTradingBot:
             diff_msg = f"💰 [예수금 정산] 총 평가자산: {int(snap['total_asset']):,}원 / D+2 주문가능: {int(snap['current_capital']):,}원 확정 (증거금·정산 차감: {int(diff):,}원, 미체결: {unclosed_cnt}건)"
             print(diff_msg)
             await self.db.log_message("INFO", diff_msg)
+
+    async def _save_bot_state(self):
+        """하루 손실 한도 기준값을 오늘 날짜로 저장 (값이 바뀌었을 때만 — 동기화 hot path의 불필요한 DB 쓰기 방지)"""
+        if self.daily_start_capital <= 0 or self._risk_day != get_kst_now().date() or not hasattr(self.db, 'save_bot_state'):
+            return
+        state = {
+            'daily_start_capital': self.daily_start_capital,
+            'highest_total_asset': self.highest_total_asset,
+            'daily_realized_pnl': self.portfolio.daily_realized_pnl,
+            'circuit_breaker': 1.0 if (self.daily_circuit_breaker or self.mdd_shutdown) else 0.0,
+            'breach_count': float(self.circuit_breaker_breach_count),
+            'warmup': float(min(self.sync_warmup_count, 3)),
+        }
+        # 기준 자산·차단 상태·웜업·실현손익이 바뀌면 즉시, 최고 자산만 바뀌면 60초 간격으로 저장
+        key = (self._risk_day, state['daily_start_capital'], state['daily_realized_pnl'], state['circuit_breaker'],
+               state['breach_count'], state['warmup'])
+        if key == self._last_saved_state and time.time() - self._last_saved_at < 60:
+            return
+        if await self.db.save_bot_state(self._risk_day.strftime('%Y-%m-%d'), state) is not False:  # 실패면 다음 동기화에 재시도
+            self._last_saved_state, self._last_saved_at = key, time.time()
 
     async def update_watchlist(self, top_n: Optional[int] = None):
         """거래대금 상위 종목 수집 및 피보나치 레벨 계산 (기본 30종목, LOW 우선순위)"""
@@ -1250,6 +1313,7 @@ class AsyncTradingBot:
                     if mgr and order_no not in mgr.tracked_orders:
                         # 외부/미추적 미체결 주문 발견 시 트래커에 즉시 편입
                         name = self.watchlist.get(code, {}).get('name', code)
+                        # 가격 0으로 등록: 매수 한도(100ord_alow_amt)는 키움이 미체결 증거금을 이미 뺀 값이라 다시 빼지 않음
                         await self.order_timeout_mgr.track_order(order_no, code, name, side_str, uncl_qty, 0)
         except Exception as e:
             print(f"⚠️ [미체결 주문 정리 오류] {e}")
@@ -1432,7 +1496,6 @@ class AsyncTradingBot:
         if getattr(self, '_entry_day', None) != today:
             self._entry_day = today
             self._entered_today = set()
-            self._blocked_today = set()
             mgr = getattr(self, 'order_timeout_mgr', None)
             if mgr:
                 mgr.cancel_failures.clear()  # 키움 주문번호는 거래일마다 다시 시작
@@ -1441,7 +1504,7 @@ class AsyncTradingBot:
     def _entry_allowed_today(self, code: str) -> bool:
         """매수 제외 종목, 같은 종목 재진입, 하루 진입 상한을 검사한다."""
         self._roll_entry_day()
-        if code in self._blocked_today:
+        if code in self._blocked_codes:
             return False
         if getattr(self, 'one_entry_per_day', False) and code in self._entered_today:
             return False
@@ -1737,9 +1800,43 @@ class AsyncTradingBot:
             await self.db.log_message("ERROR", f"매수 주문 실패: {name}({code}) - {msg}")
             # 파생상품 ETF 거래신청 미등록: 당일 재시도해도 같은 거부 (msg1·return_msg 둘 다 확인)
             if '509247' in f"{(res or {}).get('msg1')} {(res or {}).get('return_msg')}":
-                self._roll_entry_day()
-                self._blocked_today.add(code)
-                await self.db.log_message("WARNING", f"⛔ [매수 제외] {name}({code}) 파생상품 ETF 거래신청 미등록 → 오늘 매수 대상에서 제외")
+                self._blocked_codes.add(code)
+                if hasattr(self.db, 'add_buy_block'):
+                    await self.db.add_buy_block(code, name, f"509247 파생상품 ETF 거래신청 미등록: {msg}")
+                await self.db.log_message("WARNING", f"⛔ [매수 제외] {name}({code}) 파생상품 ETF 거래신청 미등록 → 매수 대상에서 영구 제외 "
+                                                     f"(거래신청 후 DB buy_blocklist에서 삭제하면 다음 거래일 08:50부터 재개)")
+
+    def _reset_for_new_day(self):
+        """KST 날짜가 바뀌면 하루 단위 상태 초기화 — 잔고 동기화마다 호출, 봇이 여러 날 연속으로 돌아도 매일 1회"""
+        if self._risk_day == get_kst_now().date():
+            return  # 같은 날 두 번째 이후 호출은 무시
+        self._risk_day = get_kst_now().date()
+        self._roll_entry_day()  # 진입 기록·취소 거절 횟수도 같은 시점에 초기화
+        self.time_cut_executed = False  # 둘째 날부터 15:15 일괄 청산이 건너뛰어지던 문제
+        self.portfolio.daily_realized_pnl = 0.0  # 전날 실현손익이 오늘 손실 한도 계산에 섞이지 않도록
+        self._reset_risk_baseline()
+
+    def _reset_risk_baseline(self):
+        """손실 한도 기준·서킷 브레이커·웜업 초기화 (날짜 변경 시, 그리고 매 거래일 08:50 장전 준비 시)"""
+        self.mdd_shutdown = False
+        self.daily_circuit_breaker = False
+        self.circuit_breaker_breach_count = 0  # 전날 연속 위반 횟수가 오늘로 넘어오지 않도록
+        self.market_filter_passed = True
+        self.daily_start_capital = 0.0
+        self.highest_total_asset = 0.0
+        self._state_restored = False
+        self.sync_warmup_count = 0
+
+    async def _prepare_market_open(self):
+        """08:50 장전 준비(거래일 1회): 기준 자산을 장 시작 직전 잔고로 다시 잡고(새벽 동기화 값 대신), 매수 제외 목록 다시 읽기"""
+        self._reset_for_new_day()
+        today = get_kst_now().date()
+        if self._open_day == today:
+            return
+        self._open_day = today
+        self._reset_risk_baseline()  # 장 시작 전이라 오늘 매매 손익은 아직 없음
+        if hasattr(self.db, 'get_buy_blocklist'):
+            self._blocked_codes = await self.db.get_buy_blocklist()  # DB에서 지운 종목(거래신청 완료)은 다시 매수 대상
 
     async def wait_until_next_market_open(self, wake_up_hour: int = 8, wake_up_minute: int = 50):
         """
@@ -1774,11 +1871,7 @@ class AsyncTradingBot:
             if self.is_paused or not self.is_running:
                 self.is_paused = False
                 self.is_running = True
-                self.mdd_shutdown = False
-                self.daily_circuit_breaker = False
-                self.daily_start_capital = 0.0
-                self.market_filter_passed = True
-                self.time_cut_executed = False
+                self._reset_for_new_day()
                 wake_msg = f"🌅 [자동 재시작 스케줄러] 익일 영업일 아침({next_open.strftime('%H:%M')}) 도달: 수동 일시정지 및 서킷브레이커를 해제하고 봇을 '실행(RUNNING)' 상태로 자동 전환합니다."
                 print(wake_msg)
                 if self.notifier:
@@ -2054,8 +2147,7 @@ class AsyncTradingBot:
                 # 4. 장 시작 준비(08:50 ~ 09:00): 계좌 잔고 동기화 및 당일 감시 유니버스 스캔
                 if now_time.hour == 8 and now_time.minute >= 50:
                     print("🌅 [08:50 장전 준비] 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석...")
-                    self.mdd_shutdown = False
-                    self.market_filter_passed = True
+                    await self._prepare_market_open()
                     if self.us_market_fetched_on != now.date():  # 새벽 수집을 못 했으면(재시작 등) 지금 갱신
                         await self.refresh_us_overnight()
                     await self._sync_account_balance()

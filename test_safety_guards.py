@@ -323,7 +323,7 @@ async def test_token_invalid_reissues_once_and_resends():
     assert [r.future.result()[0]["return_code"] for r in reqs] == [0, 0]
     assert client.session.calls.count("Bearer new") == 2
 
-    # 재발급해도 새 토큰을 못 받으면 같은 토큰으로 재전송하지 않고 8005 응답을 돌려줌
+    # 재발급해도 새 토큰을 못 받으면 같은 토큰으로 재전송하지 않고 '응답 없음'(None)을 돌려줌
     client.access_token, client._next_token_try = "still-bad", 0
     tries = []
 
@@ -334,7 +334,7 @@ async def test_token_invalid_reissues_once_and_resends():
     before = len(client.session.calls)
     r = QueuedRequest(priority=1, timestamp=0, api_id="kt00018", url="u", payload={}, future=loop.create_future(), retries=1)
     await client._execute_request(r)
-    assert is_token_invalid(r.future.result()[0])
+    assert r.future.result() == (None, None)
     assert len(tries) == 1 and len(client.session.calls) - before == 1  # 발급 1회 시도, 전송은 처음 1회뿐
 
     # 토큰이 아예 없으면 'Bearer None'으로 보내지 않음
@@ -439,6 +439,110 @@ async def test_rejected_cancel_stops_after_three_and_no_market_resell():
     assert [o for o in client.sent_orders if o["side"] == "SELL"] == sells_before  # 원 매도 주문 유지, 시장가 재발주 없음
 
 
+class _StateDB(MockDatabaseManager):
+    """오늘 매수 종목·bot_state를 흉내 내는 DB"""
+    def __init__(self, codes=(), state=None):
+        super().__init__()
+        self.codes, self.state, self.saved = set(codes), dict(state or {}), []
+
+    async def get_today_buy_codes(self):
+        return set(self.codes)
+
+    async def ensure_bot_state(self):
+        pass
+
+    async def load_bot_state(self, state_date):
+        return dict(self.state)
+
+    async def save_bot_state(self, state_date, values):
+        self.saved.append((state_date, dict(values)))
+
+
+def _clock(monkeypatch, d):
+    import main_rest_async
+    monkeypatch.setattr(main_rest_async, "get_kst_now", lambda: d["d"])
+
+
+async def test_restart_restores_entries_and_daily_loss_baseline(monkeypatch):
+    """장중 재시작: 오늘 매수 종목·시작 자산·실현손익을 복원하고, 웜업이 시작 자산을 현재 값으로 덮어쓰지 않는다"""
+    from datetime import datetime
+    from database import KST
+    d = {"d": datetime(2026, 10, 12, 11, 0, tzinfo=KST)}
+    _clock(monkeypatch, d)
+    db = _StateDB(codes={"005930"}, state={"daily_start_capital": 110_000, "highest_total_asset": 111_000,
+                                           "daily_realized_pnl": -2_000, "circuit_breaker": 1, "breach_count": 3})
+    client = MockKiwoomClient(deposit=100_000)
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db, portfolio=portfolio)
+    bot.one_entry_per_day = True
+    await bot._restore_today_state()
+    assert not bot._entry_allowed_today("005930")  # 재시작 전에 산 종목은 다시 사지 않음
+    assert bot.daily_start_capital == 110_000 and portfolio.daily_realized_pnl == -2_000
+    assert bot.daily_circuit_breaker and bot.mdd_shutdown  # 재시작 전 손실 한도 차단 유지
+    await bot._sync_account_balance()  # 웜업 1회차
+    assert bot.daily_start_capital == 110_000  # 현재 자산으로 덮어쓰지 않음
+    assert db.saved and db.saved[-1][0] == "2026-10-12" and db.saved[-1][1]["daily_realized_pnl"] == -2_000
+    n = len(db.saved)
+    await bot._sync_account_balance()
+    assert len(db.saved) == n  # 값이 그대로면 다시 저장하지 않음
+
+
+async def test_date_change_resets_daily_state(monkeypatch):
+    """날짜가 바뀐 뒤 첫 동기화에서 하루 단위 값 초기화(타임컷 플래그·연속 위반 포함), 같은 날 재호출은 무시"""
+    from datetime import datetime
+    from database import KST
+    d = {"d": datetime(2026, 10, 12, 15, 40, tzinfo=KST)}
+    _clock(monkeypatch, d)
+    db = _StateDB()
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(deposit=100_000), db=db, portfolio=portfolio)
+    bot.time_cut_executed, bot.circuit_breaker_breach_count = True, 2
+    portfolio.daily_realized_pnl, bot.daily_start_capital = -5_000, 120_000
+
+    d["d"] = datetime(2026, 10, 13, 0, 30, tzinfo=KST)  # 봇이 재시작 없이 자정을 넘김
+    await bot._sync_account_balance()
+    assert not bot.time_cut_executed and bot.circuit_breaker_breach_count == 0
+    assert portfolio.daily_realized_pnl == 0 and bot.daily_start_capital == 100_000  # 첫 동기화 자산이 새 기준
+    assert db.saved[-1][0] == "2026-10-13" and db.saved[-1][1]["daily_realized_pnl"] == 0
+    bot.time_cut_executed = True
+    bot._reset_for_new_day()  # 같은 날 재호출은 무시
+    assert bot.time_cut_executed
+
+    # 새벽 동기화로 잡힌 기준·웜업은 08:50 장전 준비에서 다시 잡음 (서킷 브레이커도 해제)
+    bot.mdd_shutdown = bot.daily_circuit_breaker = True
+    d["d"] = datetime(2026, 10, 13, 8, 50, tzinfo=KST)
+    await bot._prepare_market_open()
+    assert not bot.mdd_shutdown and bot.daily_start_capital == 0 and bot.sync_warmup_count == 0
+    assert bot.time_cut_executed  # 날짜 초기화는 이미 자정에 했으므로 다시 하지 않음
+
+
+async def test_restore_mid_warmup_continues_calibration(monkeypatch):
+    """웜업 도중 저장된 기준값이면 남은 웜업을 이어서 진행(max 보정 유지), 저장 실패는 다음 동기화에 재시도"""
+    from datetime import datetime
+    from database import KST
+    d = {"d": datetime(2026, 10, 12, 9, 1, tzinfo=KST)}
+    _clock(monkeypatch, d)
+    db = _StateDB(state={"daily_start_capital": 90_000, "highest_total_asset": 90_000, "warmup": 1})
+    portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(deposit=100_000), db=db, portfolio=portfolio)
+    await bot._restore_today_state()
+    assert bot.sync_warmup_count == 1 and not bot._state_restored
+    await bot._sync_account_balance()
+    assert bot.daily_start_capital == 100_000  # 남은 웜업에서 현재 자산으로 보정
+
+    calls = []
+
+    async def failing_save(state_date, values):
+        calls.append(1)
+        return False
+
+    db.save_bot_state = failing_save
+    portfolio.daily_realized_pnl = -1_000
+    await bot._sync_account_balance()
+    await bot._sync_account_balance()
+    assert len(calls) == 2  # 실패한 저장은 '저장됨'으로 표시하지 않고 다음에 다시 시도
+
+
 async def test_balance_not_saved_when_all_tr_error():
     """잔고·예수금 TR이 모두 업무 오류면 DB 잔고를 저장하지 않고 기존 자산값 유지 (10/8 17,205원 오기록 사례)"""
     client, db = MockKiwoomClient(), MockDatabaseManager()
@@ -471,7 +575,7 @@ async def test_balance_not_saved_when_all_tr_error():
 
 
 async def test_derivative_etf_rejection_blocks_code_for_today(monkeypatch):
-    """509247(파생상품 ETF 거래신청 미등록) 거부 종목은 당일 매수 제외, 다른 종목·다음 날은 허용"""
+    """509247(파생상품 ETF 거래신청 미등록) 거부 종목은 DB에 남기고 다음 날·재시작 후에도 매수 제외, 다른 종목은 허용"""
     import main_rest_async
     from datetime import datetime
     from database import KST
@@ -484,10 +588,27 @@ async def test_derivative_etf_rejection_blocks_code_for_today(monkeypatch):
     async def reject(*a, **k):
         return {"return_code": 2000, "return_msg": "[2000](509247:파생상품 ETF 거래신청 등록 후 주문이 가능합니다.)"}
 
+    blocked = {}
+
+    async def add_buy_block(code, name, reason):
+        blocked[code] = reason
+
+    async def get_buy_blocklist():
+        return set(blocked)
+
+    async def ensure_buy_blocklist():
+        pass
+
+    db.add_buy_block, db.get_buy_blocklist, db.ensure_buy_blocklist = add_buy_block, get_buy_blocklist, ensure_buy_blocklist
     client.send_order = reject
     await bot._execute_smart_buy("114800", "KODEX 인버스", 1, 5000.0)
     assert not bot._entry_allowed_today("114800")
     assert bot._entry_allowed_today("005930")
-    assert any("매수 제외" in l["message"] for l in db.logs)
+    assert any("매수 제외" in l["message"] for l in db.logs) and "509247" in blocked["114800"]
     day["d"] = datetime(2026, 10, 13, 9, 30, tzinfo=KST)
-    assert bot._entry_allowed_today("114800")
+    assert not bot._entry_allowed_today("114800")  # 다음 날도 제외
+
+    bot2 = AsyncTradingBot(is_demo=True, client=client, db=db,
+                           portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    await bot2._restore_today_state()  # 재시작: DB에서 다시 읽음
+    assert not bot2._entry_allowed_today("114800")

@@ -313,7 +313,7 @@ class AsyncKiwoomClient:
                 req.future.set_result((None, None))
             return
 
-        used_token, resend, last = self.access_token, False, (None, None)
+        used_token, resend = self.access_token, False
         headers = self._get_headers(req.api_id)
         if req.headers_override:
             headers.update(req.headers_override)
@@ -341,10 +341,15 @@ class AsyncKiwoomClient:
 
                     # 토큰 무효는 HTTP 200 + return_msg '[8005:...]'로 옴 → 재발급 후 같은 요청 1회 재전송
                     # (인증 단계 거부라 주문도 접수되지 않은 상태)
-                    if not req.reauthed and is_token_invalid(data):
-                        req.reauthed = resend = True
-                        last = (data, response.headers)
-                        break  # 응답 연결을 닫은 뒤 아래에서 재발급·재전송
+                    if is_token_invalid(data):
+                        if not req.reauthed:
+                            req.reauthed = resend = True
+                            break  # 응답 연결을 닫은 뒤 아래에서 재발급·재전송
+                        # 재발급 후에도 무효 → 오류 dict 대신 '응답 없음'으로 (호가·순위 등 정상 여부 미확인 호출부 보호)
+                        print(f"❌ [{self.mode}] {req.api_id} 재발급 후에도 토큰 무효(8005) → 응답 없음 처리")
+                        if not req.future.done():
+                            req.future.set_result((None, None))
+                        return
 
                     if response.status != 200:
                         msg = data.get('msg1') or data.get('return_msg') or data.get('raw_text') or 'HTTP Error'
@@ -377,8 +382,9 @@ class AsyncKiwoomClient:
         if resend:
             await self._refresh_token(used_token)
             if self.access_token == used_token:  # 새 토큰을 못 받음(발급 실패·30초 간격) → 같은 토큰으로 재전송하지 않음
+                print(f"❌ [{self.mode}] {req.api_id} 새 토큰 없음(8005) → 응답 없음 처리")
                 if not req.future.done():
-                    req.future.set_result(last)
+                    req.future.set_result((None, None))
                 return
             await self.rate_limiter.acquire(tokens=1.0, is_priority=req.priority == RequestPriority.CRITICAL)
             return await self._execute_request(req)

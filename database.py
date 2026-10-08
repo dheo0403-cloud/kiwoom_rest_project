@@ -584,6 +584,101 @@ class DatabaseManager:
             print(f"DB Portfolio 조회 에러: {e}")
             return []
 
+    async def get_today_buy_codes(self) -> set:
+        """오늘(KST) 매수 접수한 종목 코드
+        - order_history.timestamp는 DB 기본값(CURRENT_TIMESTAMP, DB 시간대)으로 저장되므로, 기준도 DB의 NOW()에서
+          'KST 자정 이후 지난 초'를 빼서 잡는다 → DB 시간대 설정(UTC/KST)과 무관"""
+        if not self.pool: return set()
+        now = get_kst_now()
+        since_midnight = int((now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds())
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT DISTINCT code FROM order_history WHERE side='BUY' "
+                                         "AND timestamp >= NOW() - INTERVAL %s SECOND", (since_midnight,))
+                    return {r['code'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB 오늘 매수 종목 조회 Error: {e}")
+            return set()
+
+    async def ensure_bot_state(self):
+        """날짜별 봇 상태값(시작 자산·최고 자산·실현손익) — 장중 재시작 시 하루 손실 한도 기준 복원용"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS bot_state (
+                            state_date VARCHAR(10) NOT NULL,
+                            k VARCHAR(50) NOT NULL,
+                            v DOUBLE NOT NULL,
+                            updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                            PRIMARY KEY (state_date, k)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB bot_state 생성 Error: {e}")
+
+    async def save_bot_state(self, state_date: str, values: dict) -> bool:
+        """{k: v} 일괄 upsert — 성공 여부 반환(실패하면 호출부가 다음에 다시 저장)"""
+        if not self.pool: return False
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.executemany('''
+                        INSERT INTO bot_state (state_date, k, v) VALUES (%s, %s, %s)
+                        ON DUPLICATE KEY UPDATE v=VALUES(v)''', [(state_date, k, float(v)) for k, v in values.items()])
+                await conn.commit()
+            return True
+        except Exception as e:
+            print(f"DB bot_state 저장 Error: {e}")
+            return False
+
+    async def load_bot_state(self, state_date: str) -> dict:
+        """해당 날짜의 {k: v} (없으면 빈 dict)"""
+        if not self.pool: return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT k, v FROM bot_state WHERE state_date = %s", (state_date,))
+                    return {r['k']: float(r['v']) for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB bot_state 조회 Error: {e}")
+            return {}
+
+    async def ensure_buy_blocklist(self):
+        """계좌 권한 문제로 매수가 거부되는 종목(예: 509247 파생상품 ETF 거래신청 미등록) — 거래신청 후에는 행을 지우면 다시 매수 대상"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS buy_blocklist (
+                            code VARCHAR(10) NOT NULL PRIMARY KEY,
+                            name VARCHAR(100) NOT NULL,
+                            reason VARCHAR(200) NOT NULL,
+                            created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB buy_blocklist 생성 Error: {e}")
+
+    async def add_buy_block(self, code: str, name: str, reason: str):
+        await self._executemany('''
+            INSERT INTO buy_blocklist (code, name, reason) VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE reason=VALUES(reason)''', [(code, name, reason[:200])], "Buy Blocklist")
+
+    async def get_buy_blocklist(self) -> set:
+        if not self.pool: return set()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT code FROM buy_blocklist")
+                    return {r['code'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB buy_blocklist 조회 Error: {e}")
+            return set()
+
     async def get_watchlist_items(self):
         """현재 DB에 저장된 감시 종목 목록 조회"""
         if not self.pool: return []
