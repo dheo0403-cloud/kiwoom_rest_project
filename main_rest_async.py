@@ -334,6 +334,7 @@ class AsyncTradingBot:
         self._last_saved_state = None  # 마지막으로 저장한 bot_state 핵심값 (같으면 60초 간격으로만 다시 저장)
         self._last_saved_at = 0.0
         self._open_day = None  # 08:50 장전 준비를 마친 날짜
+        self._state_loaded = False  # bot_state 복원 시도 전에는 저장 안 함 (API 서버 기동 동기화가 재시작 전 값을 덮어쓰지 않게)
 
     @property
     def running(self) -> bool:
@@ -508,6 +509,8 @@ class AsyncTradingBot:
                           f"최고 {int(self.highest_total_asset):,}원 / 실현손익 {int(self.portfolio.daily_realized_pnl):,}원")
         except Exception as e:
             print(f"⚠️ [Bot Init] 당일 상태 복원 예외: {e}")
+        finally:
+            self._state_loaded = True
 
     async def initialize(self):
         """클라이언트, DB 풀, 인메모리 버퍼, 텔레그램 알림, 계좌 상태 초기화"""
@@ -845,7 +848,8 @@ class AsyncTradingBot:
 
     async def _save_bot_state(self):
         """하루 손실 한도 기준값을 오늘 날짜로 저장 (값이 바뀌었을 때만 — 동기화 hot path의 불필요한 DB 쓰기 방지)"""
-        if self.daily_start_capital <= 0 or self._risk_day != get_kst_now().date() or not hasattr(self.db, 'save_bot_state'):
+        if (not self._state_loaded or self.daily_start_capital <= 0 or self._risk_day != get_kst_now().date()
+                or not hasattr(self.db, 'save_bot_state')):
             return
         state = {
             'daily_start_capital': self.daily_start_capital,

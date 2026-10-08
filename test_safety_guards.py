@@ -496,6 +496,9 @@ async def test_date_change_resets_daily_state(monkeypatch):
     db = _StateDB()
     portfolio = AsyncPortfolioManager(initial_capital=100_000, max_stocks=5)
     bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(deposit=100_000), db=db, portfolio=portfolio)
+    await bot._sync_account_balance()  # API 서버 기동 동기화(복원 전) → 저장하지 않음
+    assert db.saved == []
+    await bot._restore_today_state()
     bot.time_cut_executed, bot.circuit_breaker_breach_count = True, 2
     portfolio.daily_realized_pnl, bot.daily_start_capital = -5_000, 120_000
 
