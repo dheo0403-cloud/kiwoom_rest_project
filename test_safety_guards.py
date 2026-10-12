@@ -87,6 +87,81 @@ def test_daily_entry_limits(monkeypatch):
     assert bot._entry_allowed_today("A")  # 둘 다 끄면 기존 동작
 
 
+async def test_blocked_buy_signal_is_recorded_without_order():
+    """위험 관리로 막힌 매수 신호는 주문 없이 하루 종목·사유당 1회 기록, 차단이 풀리면 정상 매수하고 기록하지 않는다"""
+    client, db = MockKiwoomClient(), MockDatabaseManager()
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db,
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    records = []
+
+    async def record(ts, code, name, price, signal_reason, block_reason):
+        records.append((code, block_reason, signal_reason))
+
+    async def always_buy(**kwargs):
+        return True, "테스트신호"
+
+    db.record_skipped_signal = record
+    bot.strategy.check_buy_signal = always_buy
+    bot.watchlist["005930"] = {"name": "삼성전자"}
+    bot.market_filter_passed = True
+    bot.daily_circuit_breaker = True
+    for _ in range(3):
+        await bot._evaluate_buy_condition("005930", 70000.0, 1000.0)
+    assert not client.sent_orders
+    assert records == [("005930", "서킷브레이커", "테스트신호")]
+
+    bot.daily_circuit_breaker = bot.mdd_shutdown = False
+    await bot._evaluate_buy_condition("005930", 70000.0, 1000.0)
+    assert [o for o in client.sent_orders if o["side"] == "BUY"]
+    assert len(records) == 1
+
+
+async def test_daily_scorecard_logs_report_and_survives_errors(monkeypatch):
+    """장 마감 후 일일 채점: 결과는 logs(REPORT)에 저장, 리포트 오류는 WARNING만 남기고 데몬은 계속"""
+    import skipped_signal_report
+    db = MockDatabaseManager()
+    logged = []
+
+    async def log_message(level, message):
+        logged.append((level, message))
+
+    db.log_message = log_message
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=db)
+    monkeypatch.setattr(skipped_signal_report, "build_daily_report", lambda days: f"[일일 채점] {days}일")
+    await bot.run_daily_scorecard()
+    assert logged == [("REPORT", "[일일 채점] 20일")]
+
+    def boom(days):
+        raise RuntimeError("DB 연결 실패")
+
+    monkeypatch.setattr(skipped_signal_report, "build_daily_report", boom)
+    await bot.run_daily_scorecard()
+    assert logged[-1][0] == "WARNING" and "DB 연결 실패" in logged[-1][1]
+
+
+def test_scorecard_scoring_rules():
+    """채점 규칙: 진입 다음 분봉부터, −3% 저가면 손절, 아니면 15:15 종가, 15:10 전에 끝나면 보류"""
+    from skipped_signal_report import score, ROUND_TRIP_COST
+
+    class Cur:
+        def __init__(self, bars):
+            self.bars = bars
+
+        def execute(self, sql, params):
+            pass
+
+        def fetchall(self):
+            return self.bars
+
+    ok = Cur([("20261012100000", 9000.0, 9000.0),  # 진입 분봉(제외) — 손절가 아래여도 무시
+              ("20261012100100", 9900.0, 10000.0), ("2026-10-12 15:15:00", 10100.0, 10200.0)])
+    ret, why = score(ok, "A", "20261012", "100000", 10000.0)
+    assert why == "15:15청산" and abs(ret - (0.02 - ROUND_TRIP_COST)) < 1e-9
+    stop = Cur([("20261012100100", 9690.0, 9800.0), ("20261012151500", 10500.0, 10500.0)])
+    assert score(stop, "A", "20261012", "100000", 10000.0)[1] == "손절"
+    assert score(Cur([("20261012110000", 9900.0, 9950.0)]), "A", "20261012", "100000", 10000.0) is None
+
+
 async def test_buy_held_when_core_indicators_missing(monkeypatch):
     """ADX/VWAP 미산출(0)이면 진입 보류, 시간필터 skip 모드(데모/테스트)는 기존 동작"""
     import strategy

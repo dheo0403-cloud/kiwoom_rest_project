@@ -302,6 +302,35 @@ class DatabaseManager:
             INSERT INTO us_daily (symbol, date, close) VALUES (%s, %s, %s)
             ON DUPLICATE KEY UPDATE close=VALUES(close)''', rows, "US Daily")
 
+    async def ensure_skipped_signals(self):
+        """거른 매수 신호 테이블 (신호는 났지만 위험 관리 조건으로 매수하지 않은 기록, 날짜·종목·차단 사유당 1행)"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS skipped_signals (
+                            date VARCHAR(8) NOT NULL,
+                            code VARCHAR(10) NOT NULL,
+                            block_reason VARCHAR(30) NOT NULL,
+                            signal_time DATETIME NOT NULL,
+                            name VARCHAR(50),
+                            price DOUBLE NOT NULL,
+                            signal_reason VARCHAR(100),
+                            PRIMARY KEY (date, code, block_reason)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB skipped_signals 생성 Error: {e}")
+
+    async def record_skipped_signal(self, ts, code: str, name: str, price: float, signal_reason: str, block_reason: str):
+        """거른 신호 1건 저장 (ts는 KST, 재시작으로 같은 날 같은 키가 다시 오면 첫 기록 유지)"""
+        await self._executemany('''
+            INSERT IGNORE INTO skipped_signals (date, code, block_reason, signal_time, name, price, signal_reason)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)''',
+            [(ts.strftime('%Y%m%d'), code, block_reason, ts.replace(tzinfo=None), name, float(price), (signal_reason or '')[:100])],
+            "Skipped Signal")
+
     async def get_recent_us_daily(self, days: int = 10) -> list:
         """심볼별 최근 거래일 행 (summarize용) — 테이블이 없으면 빈 목록"""
         if not self.pool: return []

@@ -17,6 +17,7 @@ from dotenv import load_dotenv
 
 from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority, is_tr_ok, is_order_ok, is_token_invalid
 from async_portfolio import AsyncPortfolioManager
+import limits
 from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
 from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
@@ -256,7 +257,7 @@ class AsyncTradingBot:
             is_demo = env_is_mock
         self.is_demo = is_demo
         self.client = client or AsyncKiwoomClient(is_demo=is_demo)
-        self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=5)
+        self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=limits.MAX_STOCKS)
         self.db = db or AsyncDatabase()
         self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
         self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer)
@@ -268,7 +269,7 @@ class AsyncTradingBot:
         self.mdd_shutdown = False
         self.highest_total_asset = 0.0  # 최초 계좌 동기화 시 실제 자산으로 캘리브레이션
         self.daily_start_capital = 0.0  # 당일 시작 자산 (일일 손실률 추적용)
-        self.daily_loss_limit_rate = -0.025  # 당일 최대 손실 한도: -2.5% (실제 퀀트 매매 손실 기준)
+        self.daily_loss_limit_rate = limits.DAILY_LOSS_LIMIT_RATE  # 당일 최대 손실 한도: -2.5% (실제 퀀트 매매 손실 기준)
         self.daily_circuit_breaker = False   # 일일 최대 손실 제한 차단 플래그
         self.sync_warmup_count = 0  # 초기 캘리브레이션 웜업 카운터 (최초 3회는 baseline 안정화)
         self.circuit_breaker_breach_count = 0  # 서킷 브레이커 조건 연속 충족 카운트 (3회 연속 시 발동)
@@ -282,6 +283,9 @@ class AsyncTradingBot:
         self.watchlist: Dict[str, Dict[str, Any]] = {}
         self.history_collected_on = None  # 장 마감 후 시세 수집을 마친 날짜 (하루 1회)
         self.history_collect_hour = int(os.getenv("HISTORY_COLLECT_HOUR", "16"))  # KST, 종가 확정 뒤
+        # 일일 채점 리포트 (장 마감 수집 직후, 오늘 + 최근 N일 누적)
+        self.daily_report_enabled = os.getenv("DAILY_REPORT_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.daily_report_days = int(os.getenv("DAILY_REPORT_DAYS", "20"))
 
         # 분할 익절 단계 목표치 (1차 전체의 50%, 2차 잔여 물량의 50%, 3차 나머지 전량 100%)
         self.take_profit_stages = [
@@ -289,7 +293,7 @@ class AsyncTradingBot:
             (0.05, 0.50, 2),  # +5% 도달 시 2차 익절 (잔여 물량의 50% 매도) -> Stage 2
             (0.08, 1.00, 3),  # +8% 도달 시 3차 익절 (나머지 전량 100% 매도) -> Stage 3
         ]
-        self.stop_loss_rate = -0.03  # -3.0% 타이트한 하드 스탑로스 (CRITICAL 긴급 매도)
+        self.stop_loss_rate = limits.HARD_STOP_LOSS_RATE  # -3.0% 타이트한 하드 스탑로스 (CRITICAL 긴급 매도)
         self.trailing_stop_drop = 0.020  # 최고점 대비 2.0% 반락 시 트레일링 스탑 매도
         self.realtime_stream_task: Optional[asyncio.Task] = None
         # 미국 시장 야간 데이터: 매 국내 거래일 새벽(기본 06:30 KST) 수집 → 08:50 장전 준비에서 요약 기록
@@ -324,8 +328,12 @@ class AsyncTradingBot:
         self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
         self._buy_inflight: set = set()  # 매수 판단/발주 진행 중인 종목 (동시 중복 진입 차단)
         # 과매매 방지: 같은 종목 하루 1회 진입, 하루 신규 진입 상한(0이면 제한 없음)
-        self.one_entry_per_day = os.getenv("ONE_ENTRY_PER_STOCK_PER_DAY", "true").lower() in ("true", "1", "yes")
-        self.max_daily_entries = int(os.getenv("MAX_DAILY_ENTRIES", "10"))
+        self.one_entry_per_day = limits.env_one_entry_per_day()
+        self.max_daily_entries = limits.env_max_daily_entries()
+        # 주문 한도 상한 검사 (limits.py) — 넘으면 기동 거부
+        limits.validate(max_stocks=self.portfolio.max_stocks, max_daily_entries=self.max_daily_entries,
+                        one_entry_per_day=self.one_entry_per_day, daily_loss_limit_rate=self.daily_loss_limit_rate,
+                        hard_stop_loss_rate=self.strategy.hard_stop_loss_rate, kelly_fraction=self.portfolio.kelly_fraction)
         self._entry_day = None
         self._entered_today: set = set()
         self._blocked_codes: set = set()  # 계좌 권한 문제(509247 파생 ETF 미신청)로 거부된 종목 — DB buy_blocklist와 같이 영구 제외
@@ -491,6 +499,8 @@ class AsyncTradingBot:
                 self._blocked_codes = await self.db.get_buy_blocklist()
                 if self._blocked_codes:
                     print(f"⛔ [Bot Init] 매수 제외 종목 {len(self._blocked_codes)}개 로드: {sorted(self._blocked_codes)}")
+            if hasattr(self.db, 'ensure_skipped_signals'):
+                await self.db.ensure_skipped_signals()
             if hasattr(self.db, 'ensure_bot_state'):
                 await self.db.ensure_bot_state()
                 st = await self.db.load_bot_state(get_kst_now().strftime('%Y-%m-%d'))
@@ -1500,22 +1510,36 @@ class AsyncTradingBot:
         if getattr(self, '_entry_day', None) != today:
             self._entry_day = today
             self._entered_today = set()
+            self._skipped_recorded = set()
             mgr = getattr(self, 'order_timeout_mgr', None)
             if mgr:
                 mgr.cancel_failures.clear()  # 키움 주문번호는 거래일마다 다시 시작
 
 
-    def _entry_allowed_today(self, code: str) -> bool:
-        """매수 제외 종목, 같은 종목 재진입, 하루 진입 상한을 검사한다."""
+    def _entry_block_reason(self, code: str) -> Optional[str]:
+        """매수 제외 종목, 같은 종목 재진입, 하루 진입 상한을 검사해 차단 사유를 돌려준다 (None = 허용)."""
         self._roll_entry_day()
         if code in self._blocked_codes:
-            return False
+            return "매수제외종목"
         if getattr(self, 'one_entry_per_day', False) and code in self._entered_today:
-            return False
+            return "같은종목재진입"
         max_entries = getattr(self, 'max_daily_entries', 0)
         if max_entries > 0 and len(self._entered_today) >= max_entries:
-            return False
-        return True
+            return "하루진입상한"
+        return None
+
+    def _entry_allowed_today(self, code: str) -> bool:
+        return self._entry_block_reason(code) is None
+
+    async def _record_skipped_signal(self, code: str, name: str, price: float, signal_reason: str, block_reason: str):
+        """매수 신호가 났지만 위험 관리 조건으로 거른 경우를 하루 종목·사유당 1회 기록한다 (나중에 판단 품질 채점용)."""
+        self._roll_entry_day()
+        key = (code, block_reason)
+        if key in self._skipped_recorded or not hasattr(self.db, 'record_skipped_signal'):
+            return
+        self._skipped_recorded.add(key)
+        print(f"🚫 [거른 신호] {name}({code}) {int(price):,}원 - 신호({signal_reason}) / 차단({block_reason})")
+        await self.db.record_skipped_signal(get_kst_now(), code, name, price, signal_reason, block_reason)
 
     async def _evaluate_buy_condition_impl(self, code: str, cur_price: float, cur_volume: float, raw_data: Optional[Dict[str, Any]] = None):
         """
@@ -1523,18 +1547,13 @@ class AsyncTradingBot:
         - OnReceiveRealData 이벤트 수신 시 즉시 호출되어 매수 타점 도달 여부 판정
         - 5대 퀀트 알파 필터(체결강도, 호가불균형, VWAP, 스퀴즈모멘텀, 거래대금) 연동
         """
-        if self.daily_circuit_breaker:
-            return
-        if self.mdd_shutdown:
-            return
-        if not self.market_filter_passed:
-            return
-
         now = get_kst_now()
         skip_time_filter = getattr(self, 'is_demo', False) or getattr(self, 'is_test', False)
 
         info = self.watchlist.get(code)
         if not info:
+            return
+        if code in self._blocked_codes:
             return
 
         name = info.get('name', code)
@@ -1549,22 +1568,28 @@ class AsyncTradingBot:
         pending_buy_codes = self.order_timeout_mgr.get_pending_buy_codes() if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr else set()
         pending_buy_amount = self.order_timeout_mgr.get_pending_buy_amount() if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr else 0.0
 
-        # 2. 포지션 한도(최대 5종목) 및 중복 매수 체크 (보유 종목 + 미체결 대기 종목 합산 슬롯 검증)
-        if not await self.portfolio.can_buy(code, pending_buy_codes=pending_buy_codes):
+        # 이미 보유·미체결 중인 종목은 판단 대상 아님 (거른 신호로도 기록하지 않음)
+        if code in pending_buy_codes or code in getattr(self.portfolio, 'positions', {}):
             return
 
-        # 3. 30초 취소 쿨다운 체크 (단기 주문 핑퐁 차단)
-        if hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and self.order_timeout_mgr.is_in_cooldown(code):
-            return
-
-        # 3-1. 당일 진입 제한 (같은 종목 재진입·하루 진입 상한)
-        if not self._entry_allowed_today(code):
-            return
-
-        # 4. 미체결 증거금 락을 차감한 '실제 가용 주문가능금액' 산출
+        # 2~4. 위험 관리 차단 사유 판정 — 걸려도 바로 끝내지 않고 신호만 판단해 '거른 신호'로 기록 (주문은 나가지 않음)
+        self._roll_entry_day()
+        block_reason = None
         real_available_cash = self.portfolio.get_available_cash_with_pending_lock(pending_buy_amount)
-        if real_available_cash < cur_price:
-            return
+        if self.daily_circuit_breaker or self.mdd_shutdown:
+            block_reason = "서킷브레이커"
+        elif not self.market_filter_passed:
+            block_reason = "시장필터"
+        elif not await self.portfolio.can_buy(code, pending_buy_codes=pending_buy_codes):
+            block_reason = "보유슬롯가득"  # 포지션 한도(보유 + 미체결 대기 종목 합산)
+        elif hasattr(self, 'order_timeout_mgr') and self.order_timeout_mgr and self.order_timeout_mgr.is_in_cooldown(code):
+            block_reason = "취소쿨다운"  # 30초 취소 쿨다운 (단기 주문 핑퐁 차단)
+        else:
+            block_reason = self._entry_block_reason(code)  # 같은 종목 재진입·하루 진입 상한
+            if block_reason is None and real_available_cash < cur_price:
+                block_reason = "자금부족"
+        if block_reason and (code, block_reason) in self._skipped_recorded:
+            return  # 오늘 이미 기록한 차단 → 신호 계산 생략
 
         # 5. 지표 산출 (인메모리 버퍼 기반 + 결측치 안전 보정)
         candle_df = self.buffer.get_dataframe(code, limit=20)
@@ -1604,6 +1629,11 @@ class AsyncTradingBot:
 
         diff_pct = ((cur_price - fib_382) / fib_382 * 100.0) if fib_382 > 0 else 0.0
 
+        if block_reason:
+            if buy_signal:
+                await self._record_skipped_signal(code, name, cur_price, reason, block_reason)
+            return
+
         if buy_signal:
             atr14 = ind.get('atr14', 0)
             # 프랙셔널 켈리 공식 × 시장 레짐 승수 및 1.5% Risk 한도 기반 최적 주문 수량 계산 (실제 가용 현금 반영)
@@ -1617,6 +1647,7 @@ class AsyncTradingBot:
                 else:
                     print(f"⚠️ [매수 차단/자금부족] {name}({code}) - 타점 도달({reason})했으나 가용 예수금 부족 (D+2: {int(self.portfolio.current_capital):,}원 - 미체결락: {int(pending_buy_amount):,}원 = 가용: {int(real_available_cash):,}원 / 1주 가격: {int(cur_price):,}원)")
                     await self.db.log_message("WARNING", f"매수 자금 부족: {name}({code}) 현재가 {int(cur_price):,}원 > 가용 예수금 {int(real_available_cash):,}원")
+                    await self._record_skipped_signal(code, name, cur_price, reason, "자금부족")
                     return
 
             # [2차 방어] 실시간 매수 시 잔고 초과 최종 체크 (매수가 × 수량 > 가용 예수금 → 수량 축소 또는 차단)
@@ -1630,6 +1661,7 @@ class AsyncTradingBot:
                 else:
                     print(f"⚠️ [잔고 부족으로 매수 스킵] {name}({code}) - 예상매수금({int(total_buy_amount):,}원) > 가용 예수금({int(real_available_cash):,}원)")
                     await self.db.log_message("WARNING", f"잔고 부족으로 매수 스킵: {name}({code}) 매수금 {int(total_buy_amount):,}원 > 가용 예수금 {int(real_available_cash):,}원")
+                    await self._record_skipped_signal(code, name, cur_price, reason, "자금부족")
                     return
 
             print(f"🔥 [BUY_SIGNAL] {name}({code}) -> {reason} (현재가: {cur_price:,.0f}원, 발주수량: {order_qty}주, 가용예수금: {int(real_available_cash):,}원)")
@@ -2014,6 +2046,20 @@ class AsyncTradingBot:
         except Exception as e:
             print(f"❌ [수집 오류] {e}")
             await self.db.log_message("ERROR", f"장 마감 후 시세 수집 오류: {e}")
+        await self.run_daily_scorecard()
+
+    async def run_daily_scorecard(self):
+        """장 마감 수집 직후 일일 채점 리포트(실제 매수 + 거른 신호)를 logs(level=REPORT)에 저장. 실패해도 데몬은 계속"""
+        if not self.daily_report_enabled:
+            return
+        try:
+            import skipped_signal_report  # 조회 전용 (pymysql 동기 → 스레드에서 실행)
+            text = await asyncio.to_thread(skipped_signal_report.build_daily_report, self.daily_report_days)
+            print(f"📊 {text}")
+            await self.db.log_message("REPORT", text)
+        except Exception as e:
+            print(f"⚠️ [일일 채점 오류] {e}")
+            await self.db.log_message("WARNING", f"일일 채점 리포트 오류: {e}")
 
     def _backfill_allowed(self, now: datetime) -> bool:
         """백필 허용 시간: 휴장일 종일, 거래일은 MINUTE_BACKFILL_WINDOW(기본 16:10~익일 08:00)"""

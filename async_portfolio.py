@@ -10,13 +10,15 @@ import collections
 from typing import Dict, Any, Optional, List
 import numpy as np
 
+import limits
+
 
 class AsyncPortfolioManager:
     """
     동시성 안전한 비동기 포트폴리오 및 켈리 자산 배분 관리자
     """
-    def __init__(self, initial_capital: float = 10_000_000, max_stocks: int = 5,
-                 kelly_fraction: float = 0.4):
+    def __init__(self, initial_capital: float = 10_000_000, max_stocks: int = limits.MAX_STOCKS,
+                 kelly_fraction: float = limits.KELLY_FRACTION):
         self.initial_capital = initial_capital
         self.current_capital = initial_capital  # 실제 주문 가능 현금 (D+2 예수금)
         self.total_asset = initial_capital      # 계좌 총 평가 자산 (원금 + 주식평가금)

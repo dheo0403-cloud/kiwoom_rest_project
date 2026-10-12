@@ -18,6 +18,7 @@ from typing import Dict, Any, Tuple, Optional
 import pandas as pd
 import numpy as np
 
+import limits
 from database import get_kst_now
 
 
@@ -41,7 +42,7 @@ class AdaptiveVolatilityBreakoutStrategy:
                  atr_hard_stop_mult: float = 1.5,
                  atr_trailing_stop_mult: float = 2.0,
                  breakeven_trigger_pct: float = 0.012,
-                 hard_stop_loss_rate: float = -0.03,
+                 hard_stop_loss_rate: float = limits.HARD_STOP_LOSS_RATE,
                  trailing_stop_drop_rate: float = -0.02,
                  trailing_activation_pct: float = 0.015,
                  use_trailing_stop_only: bool = True,

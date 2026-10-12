@@ -140,10 +140,13 @@ def test_api_server_endpoints():
 
     # 9. 무중단 파라미터 튜닝 (/api/bot/params)
     print("▶ [Test 8] /api/bot/params 파라미터 튜닝 검증...")
-    res = client.post("/api/bot/params?k_breakout=0.6&kelly_fraction=0.5")
+    res = client.post("/api/bot/params?k_breakout=0.6&kelly_fraction=0.3")
     assert res.status_code == 200
     assert res.json()["updated_params"]["k_breakout"] == 0.6
-    assert res.json()["updated_params"]["kelly_fraction"] == 0.5
+    assert res.json()["updated_params"]["kelly_fraction"] == 0.3
+    res = client.post("/api/bot/params?kelly_fraction=0.5")  # 상한 0.4 초과 → 거부, 값 유지
+    assert res.status_code == 400
+    assert ctx.portfolio.kelly_fraction == 0.3
     print("  ✅ 런타임 무중단 파라미터 동적 튜닝 완료")
 
     # 10. WebSocket 포트폴리오 스트리밍 (/ws/portfolio)

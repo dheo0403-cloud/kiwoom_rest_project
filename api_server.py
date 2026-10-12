@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from async_kiwoom_client import AsyncKiwoomClient, RequestPriority
 from async_portfolio import AsyncPortfolioManager
+import limits
 from database import DatabaseManager, format_kst_time_str, get_kst_now
 from main_rest_async import AsyncTradingBot
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
@@ -1036,6 +1037,11 @@ async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fracti
     """런타임 무중단 매매 파라미터 동적 조정"""
     if not ctx.bot:
         raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
+
+    if kelly_fraction is not None:
+        bad = limits.violations(kelly_fraction=float(kelly_fraction))  # 주문 한도 상한 (limits.py)
+        if bad:
+            raise HTTPException(status_code=400, detail="주문 한도 상한 초과: " + ", ".join(bad))
 
     updated = {}
     if k_breakout is not None and hasattr(ctx.bot, 'strategy') and ctx.bot.strategy:
