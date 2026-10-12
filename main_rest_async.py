@@ -20,7 +20,7 @@ from async_portfolio import AsyncPortfolioManager
 import limits
 from database import AsyncDatabase, get_kst_now, KST
 from market_data_buffer import MarketDataBuffer
-from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE
+from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE, load_strategy_params
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
@@ -260,7 +260,8 @@ class AsyncTradingBot:
         self.portfolio = portfolio or AsyncPortfolioManager(initial_capital=initial_capital, max_stocks=limits.MAX_STOCKS)
         self.db = db or AsyncDatabase()
         self.buffer = buffer or MarketDataBuffer(db_manager=self.db, buffer_maxlen=60)
-        self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer)
+        self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(db_manager=self.db, buffer_manager=self.buffer,
+                                                                       **load_strategy_params())
         self.notifier = notifier or AsyncNotifier()
         self.macro_filter = MacroRegimeFilter(kodex_crash_threshold=-1.5, vix_panic_threshold=28.0)
 
@@ -2048,6 +2049,13 @@ class AsyncTradingBot:
             await self.db.log_message("ERROR", f"장 마감 후 시세 수집 오류: {e}")
         await self.run_daily_scorecard()
 
+    def _is_last_trading_day_of_week(self, now: datetime) -> bool:
+        """다음 거래일이 다른 주(ISO 주차)면 오늘이 이번 주 마지막 거래일"""
+        nxt = now + timedelta(days=1)
+        while self.is_korean_market_holiday(nxt):
+            nxt += timedelta(days=1)
+        return nxt.isocalendar()[:2] != now.isocalendar()[:2]
+
     async def run_daily_scorecard(self):
         """장 마감 수집 직후 일일 채점 리포트(실제 매수 + 거른 신호)를 logs(level=REPORT)에 저장. 실패해도 데몬은 계속"""
         if not self.daily_report_enabled:
@@ -2057,6 +2065,10 @@ class AsyncTradingBot:
             text = await asyncio.to_thread(skipped_signal_report.build_daily_report, self.daily_report_days)
             print(f"📊 {text}")
             await self.db.log_message("REPORT", text)
+            if self._is_last_trading_day_of_week(get_kst_now()):  # 주의 마지막 거래일이면 주간 판정표도 저장
+                weekly = await asyncio.to_thread(skipped_signal_report.build_weekly_report)
+                print(f"📅 {weekly}")
+                await self.db.log_message("WEEKLY", weekly)
         except Exception as e:
             print(f"⚠️ [일일 채점 오류] {e}")
             await self.db.log_message("WARNING", f"일일 채점 리포트 오류: {e}")

@@ -21,6 +21,12 @@ jobs:
     steps:
       - name: 1. Checkout Repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 보호 영역 검사가 푸시 범위 커밋을 읽음
+
+      - name: 1-0. Protected Path Boundary (보호 파일은 [operator] 커밋만, 실패 시 배포 중단)
+        if: github.event_name == 'push'
+        run: python .github/scripts/boundary.py "${{ github.event.before }}" "${{ github.sha }}"
 
       - name: 1-1. Set up Python 3.11 for Tests
         uses: actions/setup-python@v5

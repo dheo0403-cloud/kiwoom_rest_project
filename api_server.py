@@ -1038,10 +1038,13 @@ async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fracti
     if not ctx.bot:
         raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
 
+    bad = []  # 주문 한도·전략 파라미터 허용 범위 (limits.py)
     if kelly_fraction is not None:
-        bad = limits.violations(kelly_fraction=float(kelly_fraction))  # 주문 한도 상한 (limits.py)
-        if bad:
-            raise HTTPException(status_code=400, detail="주문 한도 상한 초과: " + ", ".join(bad))
+        bad += limits.violations(kelly_fraction=float(kelly_fraction))
+    if k_breakout is not None:
+        bad += limits.strategy_param_violations({"k_breakout": float(k_breakout)})
+    if bad:
+        raise HTTPException(status_code=400, detail="허용 범위 초과: " + ", ".join(bad))
 
     updated = {}
     if k_breakout is not None and hasattr(ctx.bot, 'strategy') and ctx.bot.strategy:

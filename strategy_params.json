@@ -1,0 +1,11 @@
+{
+  "k_breakout": 0.5,
+  "atr_hard_stop_mult": 1.5,
+  "atr_trailing_stop_mult": 2.0,
+  "breakeven_trigger_pct": 0.012,
+  "trailing_stop_drop_rate": -0.02,
+  "trailing_activation_pct": 0.015,
+  "use_trailing_stop_only": true,
+  "breakeven_buffer_pct": 0.0025,
+  "disabled_filters": []
+}

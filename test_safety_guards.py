@@ -128,8 +128,13 @@ async def test_daily_scorecard_logs_report_and_survives_errors(monkeypatch):
     db.log_message = log_message
     bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=db)
     monkeypatch.setattr(skipped_signal_report, "build_daily_report", lambda days: f"[일일 채점] {days}일")
+    monkeypatch.setattr(skipped_signal_report, "build_weekly_report", lambda: "[주간 판정표]")
+    bot._is_last_trading_day_of_week = lambda now: False
     await bot.run_daily_scorecard()
     assert logged == [("REPORT", "[일일 채점] 20일")]
+    bot._is_last_trading_day_of_week = lambda now: True  # 주의 마지막 거래일이면 주간 판정표도 저장
+    await bot.run_daily_scorecard()
+    assert logged[-2:] == [("REPORT", "[일일 채점] 20일"), ("WEEKLY", "[주간 판정표]")]
 
     def boom(days):
         raise RuntimeError("DB 연결 실패")
@@ -137,6 +142,16 @@ async def test_daily_scorecard_logs_report_and_survives_errors(monkeypatch):
     monkeypatch.setattr(skipped_signal_report, "build_daily_report", boom)
     await bot.run_daily_scorecard()
     assert logged[-1][0] == "WARNING" and "DB 연결 실패" in logged[-1][1]
+
+
+def test_last_trading_day_of_week():
+    """주간 판정표 날짜: 보통 금요일, 금요일이 휴장이면 목요일, 월~목은 아님"""
+    from datetime import datetime
+    from database import KST
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=MockDatabaseManager())
+    assert bot._is_last_trading_day_of_week(datetime(2026, 10, 16, 16, 0, tzinfo=KST))  # 금
+    assert not bot._is_last_trading_day_of_week(datetime(2026, 10, 15, 16, 0, tzinfo=KST))  # 목
+    assert bot._is_last_trading_day_of_week(datetime(2026, 10, 8, 16, 0, tzinfo=KST))  # 10/9(금) 한글날 휴장 → 목
 
 
 def test_scorecard_scoring_rules():

@@ -99,10 +99,40 @@ def build_daily_report(days: int = 20) -> str:
     return "\n".join(lines)
 
 
+def _breakdown(df: pd.DataFrame, col: str, title: str) -> str:
+    s = df.dropna(subset=["ret"])
+    if s.empty:
+        return f"{title}: (없음)"
+    g = s.groupby(col)["ret"]
+    out = pd.DataFrame({"건수": g.size(), "평균%": g.mean() * 100, "승률%": g.apply(lambda x: (x > 0).mean() * 100)})
+    return f"{title}\n{out.round(2).to_string()}"
+
+
+def build_weekly_report(weeks: int = 4) -> str:
+    """주간 판정표 재료: 이번 주(월~오늘) 그룹·날짜·진입 시간대·청산 사유별 성적 + 최근 N주 누적 (기준 대조는 weekly_review_rules.md)"""
+    now = get_kst_now()
+    monday = (now - timedelta(days=now.weekday())).strftime("%Y%m%d")
+    df = load_scored((now - timedelta(weeks=weeks)).strftime("%Y%m%d"))
+    df["hour"] = df["hhmmss"].str[:2] + "시"
+    wk = df[df["date"] >= monday]
+    buys = wk[wk["group"] == "실제매수"]
+    lines = [f"[주간 판정표 {monday}~{now:%Y%m%d}] 기준: research/weekly_review_rules.md",
+             "■ 이번 주 그룹별", summarize(wk),
+             _breakdown(buys, "date", "■ 이번 주 실제 매수 — 날짜별"),
+             _breakdown(buys, "hour", "■ 이번 주 실제 매수 — 진입 시간대별"),
+             _breakdown(buys, "exit", "■ 이번 주 실제 매수 — 청산 사유별"),
+             f"■ 최근 {weeks}주 누적", summarize(df),
+             _breakdown(df[df["group"] == "실제매수"], "hour", f"■ 최근 {weeks}주 실제 매수 — 진입 시간대별"),
+             f"채점 보류: 이번 주 {int(wk['ret'].isna().sum())}건 / 누적 {int(df['ret'].isna().sum())}건"]
+    return "\n".join(lines)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--days", type=int, default=20, help="최근 며칠(달력 기준)")
-    print(build_daily_report(ap.parse_args().days))
+    ap.add_argument("--weekly", action="store_true", help="주간 판정표 출력")
+    args = ap.parse_args()
+    print(build_weekly_report() if args.weekly else build_daily_report(args.days))
 
 
 if __name__ == "__main__":

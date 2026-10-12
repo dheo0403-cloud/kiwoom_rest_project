@@ -2,6 +2,7 @@
 
 상한(BOUNDS)은 사람이 이유를 적어 직접 커밋해서만 바꾼다. test_limits.py가 현재 값·상한을 고정하고,
 봇은 기동할 때 validate()로 확인해 상한을 넘으면 기동을 거부한다(대시보드 API 변경도 같은 검사).
+보호 영역: 이 파일·test_limits.py·.github/ 를 바꾼 커밋은 메시지에 [operator]가 있어야 배포된다(.github/scripts/boundary.py).
 """
 import os
 
@@ -21,6 +22,41 @@ BOUNDS = {
     "hard_stop_loss_rate": (-0.03, -0.001),
     "kelly_fraction": (0.01, 0.4),
 }
+
+
+# 주간 검토로 고칠 수 있는 전략 파라미터(strategy_params.json)의 허용 범위 — 이 표에 없는 키는 파일에 넣을 수 없음.
+# 손실 상한은 하드 손절(HARD_STOP_LOSS_RATE)이 따로 막으므로 ATR 배수를 키워도 1회 손실은 −3%를 넘지 않는다.
+STRATEGY_PARAM_BOUNDS = {
+    "k_breakout": (0.3, 1.0),
+    "atr_hard_stop_mult": (0.5, 3.0),
+    "atr_trailing_stop_mult": (1.0, 4.0),
+    "breakeven_trigger_pct": (0.005, 0.03),
+    "trailing_stop_drop_rate": (-0.05, -0.005),
+    "trailing_activation_pct": (0.005, 0.05),
+    "breakeven_buffer_pct": (0.0, 0.01),
+}
+STRATEGY_BOOL_PARAMS = {"use_trailing_stop_only"}
+UNDISABLEABLE_FILTERS = {"time", "indicator_missing"}  # 장 시간·지표 누락 필터는 끌 수 없음
+
+
+def strategy_param_violations(params: dict) -> list:
+    """strategy_params.json 값 검사 (빈 목록 = 정상)"""
+    out = []
+    for key, val in params.items():
+        if key == "disabled_filters":
+            locked = set(val) & UNDISABLEABLE_FILTERS
+            if locked:
+                out.append(f"disabled_filters에 끌 수 없는 필터 {sorted(locked)}")
+        elif key in STRATEGY_BOOL_PARAMS:
+            if not isinstance(val, bool):
+                out.append(f"{key}={val} (true/false만)")
+        elif key in STRATEGY_PARAM_BOUNDS:
+            lo, hi = STRATEGY_PARAM_BOUNDS[key]
+            if isinstance(val, bool) or not isinstance(val, (int, float)) or not lo <= val <= hi:
+                out.append(f"{key}={val} (허용 {lo}~{hi})")
+        else:
+            out.append(f"{key}: 수정 허용 목록에 없는 파라미터")
+    return out
 
 
 def env_max_daily_entries() -> int:

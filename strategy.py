@@ -13,6 +13,8 @@
   3) 🎯 ATR 샹들리에 엑시트(Chandelier Exit) 트레일링 스탑 & R-배수 3단계 분할 익절
   4) ⏰ 장마감 오버나잇 방지 강제 청산 (15:15 이후)
 """
+import json
+import os
 from datetime import datetime
 from typing import Dict, Any, Tuple, Optional
 import pandas as pd
@@ -27,6 +29,18 @@ MIN_STOCK_PRICE = 1000  # 동전주 기준가 (미만이면 매수 대상 제외
 # 매수 필터 이름 (백테스트 필터 제거 실험용 disabled_filters 키)
 BUY_FILTERS = ("time", "indicator_missing", "rsi", "ma20", "adx", "dmi", "vwap", "poc",
                "volume_power", "orderbook", "trade_value", "volume_surge", "squeeze")
+
+STRATEGY_PARAMS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "strategy_params.json")
+
+
+def load_strategy_params(path: str = STRATEGY_PARAMS_PATH) -> dict:
+    """주간 검토로 고치는 전략 파라미터(strategy_params.json)를 읽고 limits.py 허용 범위를 검사한다. 범위를 벗어나면 ValueError"""
+    with open(path, encoding="utf-8") as f:
+        params = json.load(f)
+    bad = limits.strategy_param_violations(params)
+    if bad:
+        raise ValueError("strategy_params.json 허용 범위 위반: " + ", ".join(bad))
+    return params
 
 
 class AdaptiveVolatilityBreakoutStrategy:

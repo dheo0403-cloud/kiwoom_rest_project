@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional
 import numpy as np
 import pandas as pd
 from indicators import TechnicalIndicators
-from strategy import AdaptiveVolatilityBreakoutStrategy
+from strategy import AdaptiveVolatilityBreakoutStrategy, load_strategy_params
 from async_portfolio import AsyncPortfolioManager
 
 BUFFER_BARS = 20       # 실거래 버퍼 조회 개수 (buffer.get_dataframe(limit=20))
@@ -48,7 +48,7 @@ class HighFidelityBacktester:
     def __init__(
         self,
         initial_capital: float = 10_000_000.0,
-        k_breakout: float = 0.5,
+        k_breakout: Optional[float] = None,  # None = strategy_params.json 값 (실거래와 동일)
         kelly_fraction: float = 0.4,
         max_stocks: int = 5,
         slippage_rate: float = 0.0008,    # 0.08% 호가 슬리피지
@@ -59,7 +59,12 @@ class HighFidelityBacktester:
         atr_source: str = "minute"       # 'minute'(실거래와 동일, 최근 20분봉) | 'daily'(실험: 전일까지 일봉 ATR14)
     ):
         self.initial_capital = initial_capital
-        self.strategy = strategy or AdaptiveVolatilityBreakoutStrategy(k_breakout=k_breakout)
+        if strategy is None:
+            params = load_strategy_params()  # 실거래 봇과 같은 전략 파라미터
+            if k_breakout is not None:
+                params["k_breakout"] = k_breakout
+            strategy = AdaptiveVolatilityBreakoutStrategy(**params)
+        self.strategy = strategy
         self.kelly_fraction = kelly_fraction
         self.max_stocks = max_stocks
         self.slippage_rate = slippage_rate

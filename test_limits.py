@@ -62,6 +62,49 @@ def test_bot_allows_stricter_env(monkeypatch):
     assert _bot().max_daily_entries == 3
 
 
+def test_strategy_param_bounds_are_pinned():
+    """AI가 고칠 수 있는 전략 파라미터 목록·범위 (2026-10-12)"""
+    assert limits.STRATEGY_PARAM_BOUNDS == {
+        "k_breakout": (0.3, 1.0),
+        "atr_hard_stop_mult": (0.5, 3.0),
+        "atr_trailing_stop_mult": (1.0, 4.0),
+        "breakeven_trigger_pct": (0.005, 0.03),
+        "trailing_stop_drop_rate": (-0.05, -0.005),
+        "trailing_activation_pct": (0.005, 0.05),
+        "breakeven_buffer_pct": (0.0, 0.01),
+    }
+    assert limits.STRATEGY_BOOL_PARAMS == {"use_trailing_stop_only"}
+    assert limits.UNDISABLEABLE_FILTERS == {"time", "indicator_missing"}
+
+
+def test_strategy_params_file_is_valid_and_used(monkeypatch):
+    """strategy_params.json은 허용 범위 안이고, 봇·백테스터가 같은 값을 쓴다"""
+    from backtest import HighFidelityBacktester
+    from strategy import load_strategy_params
+    params = load_strategy_params()
+    assert "hard_stop_loss_rate" not in params  # 손절은 limits.py(보호 영역)
+    bot, bt = _bot(), HighFidelityBacktester()
+    for key, val in params.items():
+        expected = set(val) if key == "disabled_filters" else val
+        assert getattr(bot.strategy, key) == expected
+        assert getattr(bt.strategy, key) == expected
+
+
+@pytest.mark.parametrize("params,needle", [
+    ({"k_breakout": 1.5}, "k_breakout"),
+    ({"hard_stop_loss_rate": -0.05}, "허용 목록에 없는"),
+    ({"disabled_filters": ["time"]}, "끌 수 없는"),
+    ({"use_trailing_stop_only": "yes"}, "true/false"),
+])
+def test_strategy_params_out_of_range_rejected(tmp_path, params, needle):
+    import json
+    from strategy import load_strategy_params
+    path = tmp_path / "p.json"
+    path.write_text(json.dumps(params), encoding="utf-8")
+    with pytest.raises(ValueError, match=needle):
+        load_strategy_params(str(path))
+
+
 @pytest.mark.parametrize("kwargs", [
     {"portfolio": AsyncPortfolioManager(initial_capital=100_000, max_stocks=6)},
     {"portfolio": AsyncPortfolioManager(initial_capital=100_000, kelly_fraction=0.5)},
