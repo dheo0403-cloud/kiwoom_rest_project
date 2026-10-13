@@ -224,6 +224,48 @@ class DatabaseManager:
             print(f"DB investor_daily 조회 Error: {e}")
             return {}
 
+    async def ensure_nxt_daily(self):
+        """넥스트레이드(NXT) 일봉 (ka10081 '코드_NX', 08:00~20:00 NXT 체결만) — 없으면 생성. 종가 = 애프터마켓 마지막 가격"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS nxt_daily (
+                            code VARCHAR(10) NOT NULL,
+                            date VARCHAR(8) NOT NULL,
+                            open BIGINT NOT NULL,
+                            high BIGINT NOT NULL,
+                            low BIGINT NOT NULL,
+                            close BIGINT NOT NULL,
+                            volume BIGINT NOT NULL,
+                            value BIGINT NOT NULL,
+                            PRIMARY KEY (code, date)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB nxt_daily 생성 Error: {e}")
+
+    async def upsert_nxt_daily_rows(self, rows: list):
+        """(code, date, open, high, low, close, volume, value) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO nxt_daily (code, date, open, high, low, close, volume, value)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE open=VALUES(open), high=VALUES(high), low=VALUES(low),
+            close=VALUES(close), volume=VALUES(volume), value=VALUES(value)''', rows, "NXT Daily Rows")
+
+    async def get_nxt_codes(self) -> set:
+        """nxt_daily에 행이 있는 종목(= NXT 거래 종목으로 확인된 것)"""
+        if not self.pool: return set()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT DISTINCT code FROM nxt_daily")
+                    return {r['code'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB nxt_daily 조회 Error: {e}")
+            return set()
+
     async def ensure_minute_backfill(self):
         """분봉 과거 백필 진행표 (종목별 가장 오래 받은 날짜·완료 여부) — 없으면 생성"""
         if not self.pool: return
@@ -647,6 +689,22 @@ class DatabaseManager:
                 await conn.commit()
         except Exception as e:
             print(f"DB bot_state 생성 Error: {e}")
+
+    async def ensure_order_history_side(self):
+        """order_history.side VARCHAR(10)→(16): CANCEL_SELL(11자)이 1406 오류로 한 번도 기록되지 않던 문제 (10/13 확인)"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT CHARACTER_MAXIMUM_LENGTH AS n FROM information_schema.columns "
+                                         "WHERE table_schema = DATABASE() AND table_name = 'order_history' AND column_name = 'side'")
+                    row = await cursor.fetchone()
+                    if row and row.get('n') is not None and int(row['n']) < 16:
+                        await cursor.execute("ALTER TABLE order_history MODIFY side VARCHAR(16)")
+                        print(f"🔧 [DB] order_history.side VARCHAR({row['n']}) → VARCHAR(16) 확장")
+                await conn.commit()
+        except Exception as e:
+            print(f"DB order_history.side 확장 Error: {e}")
 
     async def save_bot_state(self, state_date: str, values: dict) -> bool:
         """{k: v} 일괄 upsert — 성공 여부 반환(실패하면 호출부가 다음에 다시 저장)"""

@@ -97,7 +97,6 @@ class ServerContext:
         self.db: Optional[DatabaseManager] = None
         self.portfolio: Optional[AsyncPortfolioManager] = None
         self.bot: Optional[AsyncTradingBot] = None
-        self.bot_task: Optional[asyncio.Task] = None
         self.ws_broadcast_task: Optional[asyncio.Task] = None
         self.log_broadcast_task: Optional[asyncio.Task] = None
         self.account_sync_task: Optional[asyncio.Task] = None
@@ -134,16 +133,13 @@ async def daily_market_scheduler_loop():
                     ctx.bot.daily_start_capital = 0.0
                     ctx.bot.market_filter_passed = True
 
-                    # 3. 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석
+                    # 3. 계좌 잔고 동기화 및 당일 감시 유니버스 사전 분석 (화면 표시용)
+                    # 매매 루프는 main_rest_async 프로세스만 돌린다 — 여기서 또 띄우면 같은 계좌에 엔진이 2개가 됨 (10/13 반복 매도·855056)
                     try:
                         await ctx.bot.sync_account_and_portfolio()
                         await ctx.bot.prepare_morning_universe()
                     except Exception as e:
                         print(f"⚠️ [API Server Scheduler] 장전 동기화 오류: {e}")
-
-                    # 4. 백그라운드 트레이딩 루프 태스크 시작 (중복 실행 방지)
-                    if ctx.bot_task is None or ctx.bot_task.done():
-                        ctx.bot_task = asyncio.create_task(ctx.bot.run_daily_trading_loop())
 
                     # 5. DB 및 WebSocket 실시간 알림 브로드캐스트
                     wake_log = "🌅 [자동 재시작 스케줄러] 영업일 아침 08:50 도달: 수동 일시정지 상태가 해제되고 봇이 '실행(RUNNING)' 상태로 자동 전환되었습니다."
@@ -158,7 +154,7 @@ async def daily_market_scheduler_loop():
                             "timestamp": format_kst_time_str(now)
                         }
                     })
-                    print(f"✅ [API Server Scheduler] 봇 자동 가동 및 트레이딩 루프 기동 완료")
+                    print(f"✅ [API Server Scheduler] 장전 동기화 완료 (매매는 main_rest_async 엔진이 담당)")
 
             await asyncio.sleep(5.0)
         except asyncio.CancelledError:
@@ -424,14 +420,6 @@ async def lifespan(app: FastAPI):
     yield
 
     # 4. 종료 정리
-    if ctx.bot_task and not ctx.bot_task.done():
-        ctx.bot.running = False
-        ctx.bot_task.cancel()
-        try:
-            await ctx.bot_task
-        except asyncio.CancelledError:
-            pass
-
     if ctx.account_sync_task:
         ctx.account_sync_task.cancel()
     if ctx.daily_scheduler_task:
@@ -907,30 +895,38 @@ async def create_manual_order(req: ManualOrderRequest):
         "response": res
     }
 
+async def _set_trading_paused(paused: bool):
+    """매매 엔진(main_rest_async 프로세스)에 일시정지/재개 전달 — 오늘 날짜 bot_state.paused
+    - 다음 거래일은 행이 없어 자동 재개 (기존 '익일 08:50 자동 재개'와 같은 동작)
+    - 저장 실패 시 엔진이 계속 매매하므로 500으로 알림"""
+    if not (ctx.db and hasattr(ctx.db, 'save_bot_state')):
+        return
+    ok = await ctx.db.save_bot_state(get_kst_now().strftime('%Y-%m-%d'), {'paused': 1 if paused else 0})
+    if ok is False:
+        raise HTTPException(status_code=500, detail="매매 엔진에 일시정지/재개 전달 실패 (DB bot_state 저장 오류)")
+
 @api_router.post("/bot/control", dependencies=[Depends(require_api_token)])
 async def control_bot(req: BotControlRequest):
-    """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)"""
+    """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)
+    - START/STOP은 DB로 매매 엔진에 전달하고, 여기 ctx.bot은 화면 표시 상태만 맞춘다 (API 서버는 매매 루프를 돌리지 않음)"""
     if not ctx.bot:
         raise HTTPException(status_code=503, detail="트레이딩 봇이 초기화되지 않았습니다.")
 
     action = req.action.upper()
     if action == "START":
+        await _set_trading_paused(False)
         ctx.bot.is_paused = False
         ctx.bot.running = True
         ctx.bot.mdd_shutdown = False
         ctx.bot.daily_circuit_breaker = False
         ctx.bot.market_filter_passed = True
-        if ctx.bot_task is None or ctx.bot_task.done():
-            ctx.bot_task = asyncio.create_task(ctx.bot.run_daily_trading_loop())
-            return {"status": "started", "message": "트레이딩 루프가 시작되었습니다."}
-        return {"status": "already_running", "message": "트레이딩 봇이 이미 실행 중입니다."}
+        return {"status": "started", "message": "매매 엔진 재개를 요청했습니다. (최대 30초 내 반영)"}
 
     elif action == "STOP":
+        await _set_trading_paused(True)
         ctx.bot.is_paused = True
         ctx.bot.running = False
-        if ctx.bot_task and not ctx.bot_task.done():
-            ctx.bot_task.cancel()
-        return {"status": "stopped", "message": "트레이딩 루프가 일시정지되었습니다. (익일 아침 08:50 자동 재개 예약)"}
+        return {"status": "stopped", "message": "매매 엔진 일시정지를 요청했습니다. (최대 10초 내 반영, 익일 아침 08:50 자동 재개)"}
 
     elif action == "REFRESH":
         await ctx.bot.sync_account_and_portfolio()
@@ -986,10 +982,13 @@ async def emergency_kill_switch():
     if not ctx.bot or not ctx.client or not ctx.portfolio:
         raise HTTPException(status_code=503, detail="트레이딩 엔진이 준비되지 않았습니다.")
 
+    # 청산보다 먼저 매매 엔진을 멈춰 재매수를 막는다 (전달 실패해도 청산은 계속 진행)
+    try:
+        await _set_trading_paused(True)
+    except HTTPException as e:
+        print(f"⚠️ [Emergency Kill-Switch] {e.detail}")
     ctx.bot.running = False
     ctx.bot.mdd_shutdown = True
-    if ctx.bot_task:
-        ctx.bot_task.cancel()
 
     snap = await ctx.portfolio.get_snapshot()
     positions = snap.get('positions', [])

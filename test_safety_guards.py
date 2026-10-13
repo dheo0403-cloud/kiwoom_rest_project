@@ -705,3 +705,42 @@ async def test_derivative_etf_rejection_blocks_code_for_today(monkeypatch):
                            portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
     await bot2._restore_today_state()  # 재시작: DB에서 다시 읽음
     assert not bot2._entry_allowed_today("114800")
+
+
+def test_api_control_does_not_start_second_trading_loop():
+    """API 서버는 매매 루프를 띄우지 않고 STOP/START·킬스위치를 오늘 bot_state.paused로 매매 엔진에 전달한다 (10/13 엔진 2개 사례)"""
+    db = _StateDB()
+    ctx.client, ctx.db = MockKiwoomClient(), db
+    ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=db)
+    c = TestClient(app)
+    assert c.post("/api/bot/control", json={"action": "STOP"}).json()["status"] == "stopped"
+    assert db.saved[-1][1] == {"paused": 1}
+    assert c.post("/api/bot/control", json={"action": "START"}).json()["status"] == "started"
+    assert db.saved[-1][1] == {"paused": 0}
+    assert not hasattr(ctx, "bot_task")  # 두 번째 매매 루프 태스크 없음
+    assert c.post("/api/bot/emergency-stop").status_code == 200
+    assert db.saved[-1][1] == {"paused": 1}
+
+
+async def test_trading_engine_follows_remote_pause(monkeypatch):
+    """매매 엔진: 오늘 paused=1이면 재시작해도 정지 유지, 매매 루프는 첫 회차에 멈추고, paused=0(START)이면 대기 중 재개"""
+    from datetime import datetime
+    from database import KST
+    d = {"d": datetime(2026, 10, 13, 10, 0, tzinfo=KST)}
+    _clock(monkeypatch, d)
+    db = _StateDB(state={"paused": 1})
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=db,
+                          portfolio=AsyncPortfolioManager(initial_capital=100_000, max_stocks=5))
+    await bot._restore_today_state()
+    assert bot.is_paused and await bot._remote_paused() is True
+
+    bot.resume()  # 메모리상 실행 중이어도 루프 첫 회차에 DB 지시로 정지
+    bot._realtime_data_stream_worker = lambda: asyncio.sleep(0)
+    await asyncio.wait_for(bot.trading_loop(), timeout=5)
+    assert bot.is_paused and any("원격 일시정지" in l["message"] for l in db.logs)
+
+    db.state = {"paused": 0}  # 대시보드 START
+    assert await bot._remote_paused() is False
+    db.state = {}  # 다음 날: 지시 없음
+    assert await bot._remote_paused() is None

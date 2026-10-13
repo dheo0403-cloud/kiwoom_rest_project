@@ -70,6 +70,23 @@ class TestCollectHistory(unittest.TestCase):
         self.assertEqual(db.investor[0], ("005930", "20261007", -61779, 1200, -3))
         self.assertNotIn("20240101", [r[1] for r in db.investor])
 
+    def test_nxt_daily_requests_nx_code_and_saves_six_digit(self):
+        """NXT 일봉은 '코드_NX'로 첫 페이지만 요청하고, 6자리 코드로 nxt_daily에 저장 (종가 0인 날은 제외)"""
+        pages = [({"stk_dt_pole_chart_qry": [daily_item("20261013", "+68500"), daily_item("20261012", "0")]},
+                  {"cont-yn": "Y", "next-key": "K1"})]
+        client, db = FakeClient(pages), FakeDB()
+        db.nxt = []
+
+        async def up(rows): db.nxt += rows
+        db.upsert_nxt_daily_rows = up
+        with mock.patch.object(ch, "get_kst_now", return_value=__import__("datetime").datetime(2026, 10, 13, 20, 5)):
+            n = asyncio.run(ch.collect_nxt_daily(client, db, "138540"))
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(client.calls[0][1]["stk_cd"], "138540_NX")
+        self.assertEqual(n, 1)
+        self.assertEqual(db.nxt, [("138540", "20261013", 100, 110, 90, 68500, 1000, 5)])
+        self.assertEqual(db.daily, [])
+
     def test_minute_keeps_recent_trade_days_only(self):
         items = [{"cntr_tm": t, "open_pric": "1", "high_pric": "1", "low_pric": "1", "cur_prc": "1", "trde_qty": "7"}
                  for t in ("20260904153000", "20260904090000", "20260903153000", "bad")]

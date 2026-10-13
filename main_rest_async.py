@@ -24,7 +24,7 @@ from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE, load_s
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
-from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor
+from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor, collect_nxt_daily
 from us_market import refresh_us_daily, summarize as summarize_us
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -317,6 +317,10 @@ class AsyncTradingBot:
         self.investor_backfill_years = float(os.getenv("INVESTOR_BACKFILL_YEARS", "3"))
         self.investor_sync_hour = int(os.getenv("INVESTOR_SYNC_HOUR", "18"))
         self.investor_sync_task: Optional[asyncio.Task] = None
+        # 넥스트레이드 일봉(ka10081 '_NX') 동기화: 애프터마켓이 끝난 뒤(기본 20시~08시·휴장일) 하루 1회, 매매에는 쓰지 않는 연구용 수집
+        self.nxt_sync_enabled = os.getenv("NXT_SYNC_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.nxt_sync_hour = int(os.getenv("NXT_SYNC_HOUR", "20"))
+        self.nxt_sync_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -370,6 +374,13 @@ class AsyncTradingBot:
         self.is_paused = False
         self.is_running = True
         print("▶️ [AsyncTradingBot] 봇 매매 재개 (RUNNING)")
+
+    async def _remote_paused(self) -> Optional[bool]:
+        """API 서버(대시보드 STOP/START·킬스위치)가 오늘 날짜 bot_state.paused로 보낸 지시 (None = 지시 없음)"""
+        if not hasattr(self.db, 'load_bot_state'):
+            return None
+        v = (await self.db.load_bot_state(get_kst_now().strftime('%Y-%m-%d'))).get('paused')
+        return None if v is None else v >= 1
 
     def reset_circuit_breaker(self):
         """서킷 브레이커 플래그 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션"""
@@ -502,9 +513,13 @@ class AsyncTradingBot:
                     print(f"⛔ [Bot Init] 매수 제외 종목 {len(self._blocked_codes)}개 로드: {sorted(self._blocked_codes)}")
             if hasattr(self.db, 'ensure_skipped_signals'):
                 await self.db.ensure_skipped_signals()
+            if hasattr(self.db, 'ensure_order_history_side'):
+                await self.db.ensure_order_history_side()
             if hasattr(self.db, 'ensure_bot_state'):
                 await self.db.ensure_bot_state()
                 st = await self.db.load_bot_state(get_kst_now().strftime('%Y-%m-%d'))
+                if st.get('paused', 0) >= 1:  # 대시보드 STOP 후 재시작돼도 오늘은 정지 유지
+                    self.pause()
                 if st.get('daily_start_capital', 0) > 0:
                     self.daily_start_capital = st['daily_start_capital']
                     self.highest_total_asset = st.get('highest_total_asset', self.daily_start_capital)
@@ -561,6 +576,8 @@ class AsyncTradingBot:
             self.minute_backfill_task = asyncio.create_task(self._minute_backfill_worker())
         if self.investor_sync_enabled and (not self.investor_sync_task or self.investor_sync_task.done()):
             self.investor_sync_task = asyncio.create_task(self._investor_sync_worker())
+        if self.nxt_sync_enabled and (not self.nxt_sync_task or self.nxt_sync_task.done()):
+            self.nxt_sync_task = asyncio.create_task(self._nxt_sync_worker())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -1895,6 +1912,9 @@ class AsyncTradingBot:
         print(f"💤 [휴면 모드] 다음 거래일({next_open.strftime('%Y-%m-%d %H:%M')})까지 약 {hours}시간 {minutes}분 대기합니다...")
 
         while not self.is_shutdown and get_kst_now() < next_open:
+            # 대시보드 START(오늘 paused=0)는 API 서버 프로세스에서 오므로 DB로 확인
+            if self.is_paused and await self._remote_paused() is False:
+                self.resume()
             # 대기 도중 사용자가 수동으로 봇 시작(Resume)을 누른 경우 (정규장 시간 내)
             if self.is_running and not self.is_paused:
                 now_curr = get_kst_now()
@@ -1946,6 +1966,12 @@ class AsyncTradingBot:
                     await self.cleanup_unexecuted_orders()
 
                     # 3. 시장 필터 및 계좌 싱크 (10초 주기)
+                    # 원격 일시정지 확인 (첫 루프 포함 10초 주기)
+                    if loop_count % 5 == 1 and await self._remote_paused():
+                        self.pause()
+                        await self.db.log_message("SYSTEM", "⏸️ [원격 일시정지] 대시보드 STOP/킬스위치 지시로 매매 루프 정지 (익일 08:50 자동 재개)")
+                        break
+
                     if loop_count % 5 == 0:
                         await self.check_market_filter()
                         await self._sync_account_balance()
@@ -2174,6 +2200,50 @@ class AsyncTradingBot:
                 await self.db.log_message("ERROR", f"투자자 순매수 동기화 오류: {e}")
                 await asyncio.sleep(600.0)
 
+    def _nxt_sync_allowed(self, now: datetime) -> bool:
+        """NXT 일봉 동기화 시간: 휴장일 종일, 거래일은 NXT_SYNC_HOUR(기본 20시, 애프터마켓 종료) 이후 ~ 08시 전"""
+        return self.is_korean_market_holiday(now) or now.hour >= self.nxt_sync_hour or now.hour < 8
+
+    async def _nxt_sync_worker(self):
+        """넥스트레이드 일봉 동기화 (하루 1라운드). NXT 거래가 확인된 종목은 매일, 아직 확인 안 된 종목은
+        첫 라운드와 토요일 라운드에만 조회 (NXT 비거래 종목 약 1,700개를 매일 헛조회하지 않도록)"""
+        await self.db.ensure_nxt_daily()
+        synced_on = None
+        while not self.is_shutdown:
+            try:
+                now = get_kst_now()
+                round_day = (now - timedelta(hours=8)).date()  # 20시~익일 08시를 같은 라운드로 묶음
+                if not self._nxt_sync_allowed(now) or synced_on == round_day:
+                    await asyncio.sleep(300.0)
+                    continue
+                universe = await self.db.get_stock_universe()
+                if not universe:
+                    await asyncio.sleep(600.0)
+                    continue
+                known = await self.db.get_nxt_codes()
+                full = not known or round_day.weekday() == 5
+                targets = universe if full else [c for c in universe if c in known]
+                rows, done, empty = 0, 0, 0
+                for code in targets:
+                    if self.is_shutdown or not self._nxt_sync_allowed(get_kst_now()):
+                        break
+                    n = await collect_nxt_daily(self.client, self.db, code)
+                    rows += n
+                    done += 1
+                    empty += (n == 0)
+                finished = done == len(targets)
+                if finished:
+                    synced_on = round_day
+                await self.db.log_message("SYSTEM", f"NXT 일봉 동기화 {'완료' if finished else '중단(시간 종료)'}"
+                                                    f"({'전체' if full else 'NXT 종목'}): {done:,}/{len(targets):,}종목, "
+                                                    f"{rows:,}행, 빈 응답 {empty:,}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ [NXT 일봉 동기화 오류] {e}")
+                await self.db.log_message("ERROR", f"NXT 일봉 동기화 오류: {e}")
+                await asyncio.sleep(600.0)
+
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
         await self.initialize()
@@ -2254,6 +2324,8 @@ class AsyncTradingBot:
             self.minute_backfill_task.cancel()
         if self.investor_sync_task and not self.investor_sync_task.done():
             self.investor_sync_task.cancel()
+        if self.nxt_sync_task and not self.nxt_sync_task.done():
+            self.nxt_sync_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

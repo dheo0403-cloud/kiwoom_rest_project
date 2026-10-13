@@ -89,6 +89,17 @@ async def collect_daily(client, db, code: str, years: float = 0.0, base_dt: Opti
     return len(rows)
 
 
+async def collect_nxt_daily(client, db, code: str) -> int:
+    """넥스트레이드 일봉 첫 페이지(최근 약 600거래일 = NXT 출범 2025-03 이후 전부) → nxt_daily (6자리 코드로 저장).
+    NXT 비거래 종목은 빈 응답 → 0행"""
+    items = await _paged(client, "ka10081", "/api/dostk/chart",
+                         {"stk_cd": f"{code}_NX", "base_dt": get_kst_now().strftime('%Y%m%d'), "upd_stkpc_tp": "1"},
+                         "stk_dt_pole_chart_qry", lambda page: True)
+    rows = [r for r in parse_daily(code, items) if r[5] > 0]  # 체결 없는 날(종가 0)은 저장하지 않음
+    await db.upsert_nxt_daily_rows(rows)
+    return len(rows)
+
+
 def _snum(v: Any) -> int:
     """키움 숫자 문자열 → 부호 유지 정수 (순매수처럼 음수가 의미 있는 값)"""
     try:
