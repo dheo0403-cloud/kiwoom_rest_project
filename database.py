@@ -254,6 +254,35 @@ class DatabaseManager:
             ON DUPLICATE KEY UPDATE open=VALUES(open), high=VALUES(high), low=VALUES(low),
             close=VALUES(close), volume=VALUES(volume), value=VALUES(value)''', rows, "NXT Daily Rows")
 
+    async def ensure_nxt_minute(self):
+        """NXT 애프터마켓 1분봉 (ka10080 '코드_NX', 15:30~20:00 봉만, 연구용) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS nxt_minute (
+                            code VARCHAR(10) NOT NULL,
+                            datetime VARCHAR(14) NOT NULL,
+                            open BIGINT NOT NULL,
+                            high BIGINT NOT NULL,
+                            low BIGINT NOT NULL,
+                            close BIGINT NOT NULL,
+                            volume BIGINT NOT NULL,
+                            PRIMARY KEY (code, datetime)
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB nxt_minute 생성 Error: {e}")
+
+    async def upsert_nxt_minute_rows(self, rows: list):
+        """(code, datetime14, open, high, low, close, volume) 튜플 일괄 upsert"""
+        await self._executemany('''
+            INSERT INTO nxt_minute (code, datetime, open, high, low, close, volume)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE open=VALUES(open), high=VALUES(high), low=VALUES(low),
+            close=VALUES(close), volume=VALUES(volume)''', rows, "NXT Minute Rows")
+
     async def get_nxt_codes(self) -> set:
         """nxt_daily에 행이 있는 종목(= NXT 거래 종목으로 확인된 것)"""
         if not self.pool: return set()

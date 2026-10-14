@@ -321,6 +321,9 @@ class AsyncTradingBot:
         self.nxt_sync_enabled = os.getenv("NXT_SYNC_ENABLED", "true").lower() in ("1", "true", "yes")
         self.nxt_sync_hour = int(os.getenv("NXT_SYNC_HOUR", "20"))
         self.nxt_sync_task: Optional[asyncio.Task] = None
+        # NXT 애프터마켓 분봉 과거 백필 (N3 2차 재검증용, NXT 일봉 동기화와 같은 시간대, 기간은 MINUTE_BACKFILL_DAYS)
+        self.nxt_minute_backfill_enabled = os.getenv("NXT_MINUTE_BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.nxt_minute_backfill_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -578,6 +581,8 @@ class AsyncTradingBot:
             self.investor_sync_task = asyncio.create_task(self._investor_sync_worker())
         if self.nxt_sync_enabled and (not self.nxt_sync_task or self.nxt_sync_task.done()):
             self.nxt_sync_task = asyncio.create_task(self._nxt_sync_worker())
+        if self.nxt_minute_backfill_enabled and (not self.nxt_minute_backfill_task or self.nxt_minute_backfill_task.done()):
+            self.nxt_minute_backfill_task = asyncio.create_task(self._nxt_minute_backfill_worker())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -2244,6 +2249,52 @@ class AsyncTradingBot:
                 await self.db.log_message("ERROR", f"NXT 일봉 동기화 오류: {e}")
                 await asyncio.sleep(600.0)
 
+    async def _nxt_minute_backfill_worker(self):
+        """NXT 애프터마켓 분봉 과거 백필: nxt_daily에 있는 종목만, 20시~08시·휴장일에 종목별 20페이지씩 돌아가며
+        (진행표 minute_backfill의 '코드_NX' 키로 재시작 후 이어받기). 매매에는 쓰지 않는 연구용"""
+        await self.db.ensure_minute_backfill()
+        await self.db.ensure_nxt_minute()
+        announced_done = False
+        while not self.is_shutdown:
+            try:
+                if not self._nxt_sync_allowed(get_kst_now()):
+                    await asyncio.sleep(300.0)
+                    continue
+                codes = sorted(await self.db.get_nxt_codes())
+                if not codes:
+                    await asyncio.sleep(600.0)
+                    continue
+                states = await self.db.get_minute_backfill()
+                pending = [c for c in codes if not int((states.get(f"{c}_NX") or {}).get("done", 0))]
+                if not pending:
+                    if not announced_done:
+                        await self.db.log_message("SYSTEM", f"NXT 분봉 과거 백필 완료: {len(codes):,}종목")
+                        announced_done = True
+                    await asyncio.sleep(3600.0)
+                    continue
+                announced_done = False
+                steps, rows, errors = 0, 0, 0
+                for code in pending:
+                    if self.is_shutdown or not self._nxt_sync_allowed(get_kst_now()):
+                        break
+                    before = states.get(f"{code}_NX")
+                    after = await backfill_minute_step(self.client, self.db, code, before, self.minute_backfill_days, nx=True)
+                    steps += 1
+                    rows += after["rows_saved"] - int((before or {}).get("rows_saved", 0))
+                    if not after["done"] and after["oldest_date"] == (before or {}).get("oldest_date"):
+                        errors += 1
+                        await asyncio.sleep(5.0)  # 오류·무진전: 잠시 쉬고 다음 종목
+                    states[f"{code}_NX"] = after
+                left = sum(1 for c in codes if not int((states.get(f"{c}_NX") or {}).get("done", 0)))
+                await self.db.log_message("SYSTEM", f"NXT 분봉 백필 라운드: {steps:,}종목 처리, 신규 {rows:,}행, "
+                                                    f"오류·무진전 {errors}, 남은 종목 {left:,}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ [NXT 분봉 백필 오류] {e}")
+                await self.db.log_message("ERROR", f"NXT 분봉 백필 오류: {e}")
+                await asyncio.sleep(60.0)
+
     async def run_daemon(self):
         """24시간 365일 무중단 데몬 메인 오케스트레이터"""
         await self.initialize()
@@ -2326,6 +2377,8 @@ class AsyncTradingBot:
             self.investor_sync_task.cancel()
         if self.nxt_sync_task and not self.nxt_sync_task.done():
             self.nxt_sync_task.cancel()
+        if self.nxt_minute_backfill_task and not self.nxt_minute_backfill_task.done():
+            self.nxt_minute_backfill_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

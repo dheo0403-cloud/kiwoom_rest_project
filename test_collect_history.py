@@ -160,6 +160,33 @@ class TestMinuteBackfill(unittest.TestCase):
         self.assertEqual(new["done"], 1)
         self.assertEqual([r[1] for r in db.minute], ["20261005150000"])     # 목표 기간 밖 행은 저장 안 함
 
+    def test_nxt_mode_saves_after_market_only_and_tracks_nx_key(self):
+        """nx=True: '코드_NX'로 요청, 15:30~20:00 봉만 nxt_minute에 저장, 진행표 키는 '코드_NX'"""
+        pages = [({"stk_min_pole_chart_qry": minute_items(["20261013195900", "20261013120000", "20261013080500"])},
+                  {"cont-yn": "Y", "next-key": "K"}),
+                 ({"stk_min_pole_chart_qry": []}, {"cont-yn": "N"})]
+        client, db = FakeClient(pages), BackfillDB()
+        db.nxt_minute = []
+
+        async def up(rows): db.nxt_minute += rows
+        db.upsert_nxt_minute_rows = up
+        with mock.patch.object(ch, "get_kst_now", return_value=self.NOW):
+            asyncio.run(ch.backfill_minute_step(client, db, "005930", None, 365, pages=5, nx=True))
+        self.assertEqual(client.calls[0][1]["stk_cd"], "005930_NX")
+        self.assertEqual([r[1] for r in db.nxt_minute], ["20261013195900"])
+        self.assertEqual(db.minute, [])                                      # 정규장 분봉 테이블엔 안 씀
+        self.assertEqual(db.progress["005930_NX"][3], "no_more")
+
+    def test_nxt_mode_progresses_on_days_without_after_market(self):
+        """애프터 체결이 없는 구간도 받은 봉 날짜로 진행 (저장 0행이어도 무진전으로 끝내지 않음)"""
+        pages = [({"stk_min_pole_chart_qry": minute_items(["20261010120000", "20261008090000"])}, {"cont-yn": "Y", "next-key": "K"})]
+        client, db = FakeClient(pages), BackfillDB()
+        db.upsert_nxt_minute_rows = lambda rows: asyncio.sleep(0)
+        with mock.patch.object(ch, "get_kst_now", return_value=self.NOW):
+            new = asyncio.run(ch.backfill_minute_step(client, db, "005930", {"oldest_date": "20261010", "rows_saved": 3, "done": 0},
+                                                      365, pages=1, nx=True))
+        self.assertEqual(new, {"oldest_date": "20261008", "rows_saved": 3, "done": 0})
+
     def test_business_error_is_retried_not_done(self):
         _, db, new = self._step([({"return_code": 5, "return_msg": "한도 초과"}, {})], {"oldest_date": "20260410", "rows_saved": 0, "done": 0})
         self.assertEqual(new["done"], 0)
