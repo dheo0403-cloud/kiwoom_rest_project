@@ -2244,6 +2244,7 @@ class AsyncTradingBot:
         """수정주가 재수집: 기업 이벤트로 과거 가격이 바뀐 종목의 분봉(KRX·NXT)과 600일 넘는 일봉을 오늘 기준일로 다시 받는다.
         대기열은 최초 1회 전 종목 표본 점검 + 매일 일봉 수집 때 과거 종가 변경 감지(collect_history._detect_adjustment)로 채움"""
         await self.db.ensure_minute_refetch()
+        failures: Dict[str, int] = {}  # 대기열 키별 연속 실패 (3회면 포기 표시, 다음 이벤트 감지 때 다시 등록됨)
         while not self.is_shutdown:
             try:
                 if not self._backfill_allowed(get_kst_now()):
@@ -2256,42 +2257,56 @@ class AsyncTradingBot:
                     if not universe:
                         await asyncio.sleep(600.0)
                         continue
-                    found = []
+                    found, finished = [], True
                     for code in universe:
-                        if self.is_shutdown:
+                        if self.is_shutdown or not self._backfill_allowed(get_kst_now()):
+                            finished = False  # 허용 시간이 끝나면 다음 시간대에 처음부터 다시 점검
                             break
                         d = await minute_daily_mismatch(self.db, code, self.minute_backfill_days)
-                        if d is None and code in nxt_codes:
-                            d = await minute_daily_mismatch(self.db, code, self.minute_backfill_days, nx=True)
                         if d:
-                            found.append((code, f"최초 점검: {d} 분봉이 일봉 고가~저가 밖"))
-                    if self.is_shutdown:
-                        break
+                            found.append((code, f"최초 점검: {d} KRX 분봉이 일봉 고가~저가 밖"))
+                        if code in nxt_codes:
+                            dn = await minute_daily_mismatch(self.db, code, self.minute_backfill_days, nx=True)
+                            if dn:
+                                found.append((f"{code}_NX", f"최초 점검: {dn} NXT 분봉이 일봉 고가~저가 밖"))
+                    if not finished:
+                        continue
                     await self.db.queue_minute_refetch(found + [("__seeded__", f"최초 점검 {len(universe):,}종목")])
                     await self.db.mark_minute_refetch_done("__seeded__", len(found))
-                    await self.db.log_message("SYSTEM", f"수정주가 최초 점검 완료: {len(universe):,}종목 중 분봉 재수집 대상 {len(found):,}종목")
+                    await self.db.log_message("SYSTEM", f"수정주가 최초 점검 완료: {len(universe):,}종목 중 재수집 대상 "
+                                                        f"{len(found):,}건(KRX·NXT 합)")
                     continue
                 pending = sorted(c for c, v in queue.items() if c != "__seeded__" and not v.get("done_at"))
                 if not pending:
                     await asyncio.sleep(1800.0)
                     continue
                 done, rows, errors = 0, 0, 0
-                for code in pending:
+                for key in pending:
                     if self.is_shutdown or not self._backfill_allowed(get_kst_now()):
                         break
-                    n = await refetch_minute_adjusted(self.client, self.db, code, self.minute_backfill_days)
-                    nx = await refetch_minute_adjusted(self.client, self.db, code, self.minute_backfill_days, nx=True) \
-                        if code in nxt_codes else 0
-                    if n < 0 or nx < 0:
+                    nx = key.endswith("_NX")
+                    code = key[:-3] if nx else key
+                    n = await refetch_minute_adjusted(self.client, self.db, code, self.minute_backfill_days, nx=nx)
+                    if n < 0:
                         errors += 1
+                        failures[key] = failures.get(key, 0) + 1
+                        if failures[key] >= 3:
+                            await self.db.mark_minute_refetch_done(key, -1)  # -1 = 3회 실패로 포기
+                            await self.db.log_message("WARNING", f"수정주가 재수집 3회 실패로 포기: {key}")
                         await asyncio.sleep(5.0)
                         continue
-                    await collect_daily(self.client, self.db, code, years=3)  # 첫 페이지(약 600일)보다 오래된 일봉도 수정주가로
-                    await self.db.mark_minute_refetch_done(code, n + nx)
-                    done, rows = done + 1, rows + n + nx
-                left = len(pending) - done
-                await self.db.log_message("SYSTEM", f"수정주가 분봉 재수집 라운드: {done:,}종목 완료, {rows:,}행 덮어씀, "
-                                                    f"오류 {errors}, 남은 종목 {left:,}")
+                    if not nx:
+                        await collect_daily(self.client, self.db, code, years=3)  # 첫 페이지(약 600일)보다 오래된 일봉도 수정주가로
+                        nx_state = queue.get(f"{code}_NX")
+                        if code in nxt_codes and not (nx_state and not nx_state.get("done_at")):  # 대기 중이 아니면 NXT 분봉도
+                            await self.db.queue_minute_refetch([(f"{code}_NX", f"{code} 재수집에 따라 NXT 분봉도")])
+                    await self.db.mark_minute_refetch_done(key, n)
+                    failures.pop(key, None)
+                    done, rows = done + 1, rows + n
+                await self.db.log_message("SYSTEM", f"수정주가 분봉 재수집 라운드: {done:,}건 완료, {rows:,}행 덮어씀, "
+                                                    f"오류 {errors}, 남은 {len(pending) - done:,}건")
+                if errors and not done:
+                    await asyncio.sleep(600.0)  # 전부 실패한 라운드는 쉬었다가 (호출 한도·장애 대비)
             except asyncio.CancelledError:
                 break
             except Exception as e:
