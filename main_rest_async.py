@@ -24,7 +24,8 @@ from strategy import AdaptiveVolatilityBreakoutStrategy, MIN_STOCK_PRICE, load_s
 from indicators import TechnicalIndicators
 from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
-from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor, collect_nxt_daily
+from collect_history import (collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor, collect_nxt_daily,
+                             collect_daily, refetch_minute_adjusted, minute_daily_mismatch)
 from us_market import refresh_us_daily, summarize as summarize_us
 from n3_trader import N3Trader
 
@@ -285,6 +286,9 @@ class AsyncTradingBot:
         self.watchlist: Dict[str, Dict[str, Any]] = {}
         self.history_collected_on = None  # 장 마감 후 시세 수집을 마친 날짜 (하루 1회)
         # N3 애프터마켓 반등 매매 (n3_trader.py, 19:50 NXT 매수 → 다음 거래일 시가 매도)
+        # 수정주가 재수집 (기업 이벤트 종목의 분봉을 오늘 기준일로 다시 받음, 백필 시간대)
+        self.minute_refetch_enabled = os.getenv("MINUTE_REFETCH_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.minute_refetch_task = None
         self.n3_enabled = os.getenv("N3_ENABLED", "true").lower() in ("1", "true", "yes")
         self.n3 = None
         self.n3_task = None
@@ -588,6 +592,8 @@ class AsyncTradingBot:
             self.nxt_sync_task = asyncio.create_task(self._nxt_sync_worker())
         if self.nxt_minute_backfill_enabled and (not self.nxt_minute_backfill_task or self.nxt_minute_backfill_task.done()):
             self.nxt_minute_backfill_task = asyncio.create_task(self._nxt_minute_backfill_worker())
+        if self.minute_refetch_enabled and (not self.minute_refetch_task or self.minute_refetch_task.done()):
+            self.minute_refetch_task = asyncio.create_task(self._minute_refetch_worker())
         if self.n3_enabled and not self.is_demo and (not self.n3_task or self.n3_task.done()):
             self.n3 = N3Trader(self)
             self.n3_task = asyncio.create_task(self.n3.run())
@@ -2234,6 +2240,65 @@ class AsyncTradingBot:
                 await self.db.log_message("ERROR", f"NXT 일봉 동기화 오류: {e}")
                 await asyncio.sleep(600.0)
 
+    async def _minute_refetch_worker(self):
+        """수정주가 재수집: 기업 이벤트로 과거 가격이 바뀐 종목의 분봉(KRX·NXT)과 600일 넘는 일봉을 오늘 기준일로 다시 받는다.
+        대기열은 최초 1회 전 종목 표본 점검 + 매일 일봉 수집 때 과거 종가 변경 감지(collect_history._detect_adjustment)로 채움"""
+        await self.db.ensure_minute_refetch()
+        while not self.is_shutdown:
+            try:
+                if not self._backfill_allowed(get_kst_now()):
+                    await asyncio.sleep(300.0)
+                    continue
+                queue = await self.db.get_minute_refetch()
+                nxt_codes = await self.db.get_nxt_codes()
+                if "__seeded__" not in queue:
+                    universe = await self.db.get_stock_universe()
+                    if not universe:
+                        await asyncio.sleep(600.0)
+                        continue
+                    found = []
+                    for code in universe:
+                        if self.is_shutdown:
+                            break
+                        d = await minute_daily_mismatch(self.db, code, self.minute_backfill_days)
+                        if d is None and code in nxt_codes:
+                            d = await minute_daily_mismatch(self.db, code, self.minute_backfill_days, nx=True)
+                        if d:
+                            found.append((code, f"최초 점검: {d} 분봉이 일봉 고가~저가 밖"))
+                    if self.is_shutdown:
+                        break
+                    await self.db.queue_minute_refetch(found + [("__seeded__", f"최초 점검 {len(universe):,}종목")])
+                    await self.db.mark_minute_refetch_done("__seeded__", len(found))
+                    await self.db.log_message("SYSTEM", f"수정주가 최초 점검 완료: {len(universe):,}종목 중 분봉 재수집 대상 {len(found):,}종목")
+                    continue
+                pending = sorted(c for c, v in queue.items() if c != "__seeded__" and not v.get("done_at"))
+                if not pending:
+                    await asyncio.sleep(1800.0)
+                    continue
+                done, rows, errors = 0, 0, 0
+                for code in pending:
+                    if self.is_shutdown or not self._backfill_allowed(get_kst_now()):
+                        break
+                    n = await refetch_minute_adjusted(self.client, self.db, code, self.minute_backfill_days)
+                    nx = await refetch_minute_adjusted(self.client, self.db, code, self.minute_backfill_days, nx=True) \
+                        if code in nxt_codes else 0
+                    if n < 0 or nx < 0:
+                        errors += 1
+                        await asyncio.sleep(5.0)
+                        continue
+                    await collect_daily(self.client, self.db, code, years=3)  # 첫 페이지(약 600일)보다 오래된 일봉도 수정주가로
+                    await self.db.mark_minute_refetch_done(code, n + nx)
+                    done, rows = done + 1, rows + n + nx
+                left = len(pending) - done
+                await self.db.log_message("SYSTEM", f"수정주가 분봉 재수집 라운드: {done:,}종목 완료, {rows:,}행 덮어씀, "
+                                                    f"오류 {errors}, 남은 종목 {left:,}")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"❌ [수정주가 재수집 오류] {e}")
+                await self.db.log_message("ERROR", f"수정주가 분봉 재수집 오류: {e}")
+                await asyncio.sleep(60.0)
+
     async def _nxt_minute_backfill_worker(self):
         """NXT 애프터마켓 분봉 과거 백필: nxt_daily에 있는 종목만, 20시~08시·휴장일에 종목별 20페이지씩 돌아가며
         (진행표 minute_backfill의 '코드_NX' 키로 재시작 후 이어받기). 매매에는 쓰지 않는 연구용"""
@@ -2366,6 +2431,8 @@ class AsyncTradingBot:
             self.nxt_minute_backfill_task.cancel()
         if self.n3_task and not self.n3_task.done():
             self.n3_task.cancel()
+        if self.minute_refetch_task and not self.minute_refetch_task.done():
+            self.minute_refetch_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

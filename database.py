@@ -350,6 +350,86 @@ class DatabaseManager:
             print(f"DB N3 진입 조회 Error: {e}")
             return -1
 
+    async def ensure_minute_refetch(self):
+        """수정주가 재수집 대기열 (기업 이벤트로 과거 일봉이 바뀐 종목 → 분봉을 오늘 기준일로 다시 받음) — 없으면 생성"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS minute_refetch (
+                            code VARCHAR(12) NOT NULL PRIMARY KEY,
+                            reason VARCHAR(120) NULL,
+                            queued_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                            done_at DATETIME NULL,
+                            rows_saved BIGINT NOT NULL DEFAULT 0
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB minute_refetch 생성 Error: {e}")
+
+    async def queue_minute_refetch(self, items: list):
+        """[(code, reason)] 재수집 대기열에 넣음 (이미 끝난 종목도 다시 대기로)"""
+        await self._executemany('''
+            INSERT INTO minute_refetch (code, reason) VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE reason=VALUES(reason), queued_at=CURRENT_TIMESTAMP, done_at=NULL''',
+            [(c, (r or "")[:120]) for c, r in items], "Minute Refetch Queue")
+
+    async def get_minute_refetch(self) -> dict:
+        """code → {reason, done_at, rows_saved} ('__seeded__' 행 = 최초 점검 완료 표시)"""
+        if not self.pool: return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT code, reason, done_at, rows_saved FROM minute_refetch")
+                    return {r['code']: dict(r) for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB minute_refetch 조회 Error: {e}")
+            return {}
+
+    async def mark_minute_refetch_done(self, code: str, rows: int):
+        await self._executemany("UPDATE minute_refetch SET done_at=CURRENT_TIMESTAMP, rows_saved=%s WHERE code=%s",
+                                [(rows, code)], "Minute Refetch Done")
+
+    async def get_daily_closes(self, code: str, since: str, table: str = "daily_ohlcv") -> dict:
+        """date(YYYYMMDD) → 저장된 종가 (since 이후)"""
+        if not self.pool or table not in ("daily_ohlcv", "nxt_daily"): return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(f"SELECT date, close FROM {table} WHERE code=%s AND date >= %s", (code, since))
+                    return {r['date']: int(r['close']) for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB 일봉 종가 조회 Error: {e}")
+            return {}
+
+    async def get_daily_ranges(self, code: str, since: str, table: str = "daily_ohlcv") -> list:
+        """[(date, high, low)] since 이후 날짜순"""
+        if not self.pool or table not in ("daily_ohlcv", "nxt_daily"): return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(f"SELECT date, high, low FROM {table} WHERE code=%s AND date >= %s ORDER BY date",
+                                         (code, since))
+                    return [(r['date'], int(r['high']), int(r['low'])) for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB 일봉 범위 조회 Error: {e}")
+            return []
+
+    async def get_minute_close_between(self, code: str, dt_from: str, dt_to: str, table: str = "minute_ohlcv"):
+        """dt_from~dt_to(14자리) 첫 체결 봉 종가 (기본키 범위 조회), 없으면 None"""
+        if not self.pool or table not in ("minute_ohlcv", "nxt_minute"): return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(f"SELECT close FROM {table} WHERE code=%s AND datetime BETWEEN %s AND %s "
+                                         "AND volume > 0 ORDER BY datetime LIMIT 1", (code, dt_from, dt_to))
+                    r = await cursor.fetchone()
+                    return int(r['close']) if r else None
+        except Exception as e:
+            print(f"DB 분봉 조회 Error: {e}")
+            return None
+
     async def ensure_minute_backfill(self):
         """분봉 과거 백필 진행표 (종목별 가장 오래 받은 날짜·완료 여부) — 없으면 생성"""
         if not self.pool: return

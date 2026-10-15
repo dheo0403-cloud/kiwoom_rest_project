@@ -86,8 +86,80 @@ async def collect_daily(client, db, code: str, years: float = 0.0, base_dt: Opti
     items = await _paged(client, "ka10081", "/api/dostk/chart",
                          {"stk_cd": code, "base_dt": base_dt, "upd_stkpc_tp": "1"}, "stk_dt_pole_chart_qry", stop)
     rows = [r for r in parse_daily(code, items) if not cutoff or r[1] >= cutoff]
+    if not cutoff and hasattr(db, "queue_minute_refetch"):
+        await _detect_adjustment(db, code, rows)
     await db.upsert_daily_rows(rows)
     return len(rows)
+
+
+ADJUST_TOLERANCE = 0.005  # 저장된 과거 종가와 새 수정주가가 0.5% 넘게 다르면 기업 이벤트(분할·증자 등)로 본다
+
+
+def adjusted_dates(old: Dict[str, int], rows: List[tuple], today: str) -> List[str]:
+    """오늘 이전 날짜 중 저장된 종가(old)와 새로 받은 종가가 ADJUST_TOLERANCE 넘게 다른 날짜"""
+    out = []
+    for r in rows:
+        prev = old.get(r[1])
+        if r[1] < today and prev and r[5] > 0 and abs(r[5] / prev - 1) > ADJUST_TOLERANCE:
+            out.append(r[1])
+    return out
+
+
+async def _detect_adjustment(db, code: str, rows: List[tuple]):
+    """일봉 첫 페이지(수정주가)를 저장하기 전에 최근 저장분과 비교 → 과거 값이 바뀌었으면 분봉 재수집 대기열에 넣는다
+    (키움 차트는 base_dt가 권리발생일 이후일 때만 수정주가를 적용해, 이벤트 전에 받아 둔 분봉은 원주가로 남음)"""
+    today = get_kst_now().strftime('%Y%m%d')
+    old = await db.get_daily_closes(code, (get_kst_now() - timedelta(days=14)).strftime('%Y%m%d'))
+    changed = adjusted_dates(old, rows, today)
+    if changed:
+        await db.queue_minute_refetch([(code, f"일봉 과거 종가 변경 {changed[0]}~{changed[-1]} ({len(changed)}일)")])
+        print(f"🔁 [수정주가] {code} 과거 일봉 변경 감지 → 분봉 재수집 대기열")
+
+
+async def refetch_minute_adjusted(client, db, code: str, max_days: int, nx: bool = False, max_pages: int = 400) -> int:
+    """분봉을 오늘 기준일 + 연속조회로 max_days까지 다시 받아 덮어쓴다 (전 구간 수정주가). 받은 행 수, 오류면 -1
+    키움 명세(ka10081 upd_stkpc_tp): 수정주가는 base_dt가 권리발생일 이후일 때만 적용, 연속조회도 동일"""
+    stk_cd = f"{code}_NX" if nx else code
+    session = NXT_AFTER_SESSION if nx else MINUTE_SESSION
+    upsert = db.upsert_nxt_minute_rows if nx else db.upsert_minute_rows
+    cutoff = (get_kst_now() - timedelta(days=max_days)).strftime('%Y%m%d')
+    payload = {"stk_cd": stk_cd, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": get_kst_now().strftime('%Y%m%d')}
+    total, buf, next_key = 0, [], None
+    for _ in range(max_pages):
+        headers = {"cont-yn": "Y", "next-key": next_key} if next_key else None
+        data, resp_headers = await client.request("ka10080", f"{client.base_url}/api/dostk/chart", payload, headers_override=headers)
+        if data is None or str(data.get("return_code", 0)) not in ("0", ""):
+            await upsert(buf)  # 받은 데까지는 저장 (모두 수정주가), 대기열은 남겨 다음에 처음부터 다시
+            return -1
+        raw = data.get("stk_min_pole_chart_qry") or []
+        buf.extend(r for r in parse_minute(code, raw, session) if r[1][:8] >= cutoff)
+        dates = [str(it.get("cntr_tm", ""))[:8] for it in raw if len(str(it.get("cntr_tm", ""))) == 14]
+        if len(buf) >= 5000:
+            await upsert(buf)
+            total, buf = total + len(buf), []
+        if not dates or min(dates) < cutoff:
+            break
+        if not resp_headers or str(resp_headers.get('cont-yn', 'N')).upper() != 'Y' or not resp_headers.get('next-key'):
+            break
+        next_key = resp_headers.get('next-key')
+    await upsert(buf)
+    return total + len(buf)
+
+
+async def minute_daily_mismatch(db, code: str, max_days: int, nx: bool = False, samples: int = 12):
+    """최초 점검: 약 한 달 간격 표본일의 분봉(KRX 15:00~15:20, NXT 15:40~20:00 첫 체결)이 그날 일봉 고가~저가 밖이면 그 날짜를 돌려준다.
+    수정주가가 섞였으면 이벤트 이전 구간이 배수만큼 벗어난다. 문제없으면 None"""
+    since = (get_kst_now() - timedelta(days=max_days)).strftime('%Y%m%d')
+    ranges = await db.get_daily_ranges(code, since, "nxt_daily" if nx else "daily_ohlcv")
+    if not ranges:
+        return None
+    step = max(1, len(ranges) // samples)
+    t0, t1 = ("154000", "200000") if nx else ("150000", "152000")
+    for d, high, low in ranges[::step]:
+        px = await db.get_minute_close_between(code, d + t0, d + t1, "nxt_minute" if nx else "minute_ohlcv")
+        if px and not (low * (1 - ADJUST_TOLERANCE) <= px <= high * (1 + ADJUST_TOLERANCE)):
+            return d
+    return None
 
 
 async def collect_nxt_daily(client, db, code: str) -> int:
