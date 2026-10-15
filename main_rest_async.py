@@ -15,7 +15,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
-from async_kiwoom_client import parse_unexecuted_orders, AsyncKiwoomClient, RequestPriority, is_tr_ok, is_order_ok, is_token_invalid
+from async_kiwoom_client import parse_unexecuted_orders, orderbook_price, floor_tick, AsyncKiwoomClient, RequestPriority, is_tr_ok, is_order_ok, is_token_invalid
 from async_portfolio import AsyncPortfolioManager
 import limits
 from database import AsyncDatabase, get_kst_now, KST
@@ -1417,23 +1417,11 @@ class AsyncTradingBot:
             sell_price = 0
         else:
             orderbook = await self.client.get_orderbook(code, priority=RequestPriority.CRITICAL) if (self.client and hasattr(self.client, 'get_orderbook')) else None
-            sell_price = int(cur_price)
             order_type = "00"
 
             if orderbook:
-                out = orderbook.get('output', orderbook)
-                if isinstance(out, list) and len(out) > 0:
-                    out = out[0]
-                elif not isinstance(out, dict):
-                    out = {}
-                # 매수 2호가 타겟팅으로 빠른 체결 유도
-                bid2 = out.get('buy_fpr_bid2') or out.get('bid_price2')
-                if bid2 and str(bid2).isdigit() and int(bid2) > 0:
-                    sell_price = int(bid2)
-                elif out.get('buy_fpr_bid') or out.get('bid_price1'):
-                    bid1 = out.get('buy_fpr_bid') or out.get('bid_price1')
-                    if bid1 and str(bid1).isdigit() and int(bid1) > 0:
-                        sell_price = int(bid1)
+                # 매수 2호가 타겟팅으로 빠른 체결 유도 (없으면 1호가 → 현재가), 호가단위로 내림
+                sell_price = floor_tick(orderbook_price(orderbook, 'buy_2th_pre_bid', 'buy_fpr_bid2', 'bid_price2', 'buy_fpr_bid', 'bid_price1') or int(cur_price))
             else:
                 order_type = "03"
                 sell_price = 0
@@ -1475,16 +1463,8 @@ class AsyncTradingBot:
         await self._cancel_unexecuted_orders_for_stock(code)
 
         orderbook = await self.client.get_orderbook(code, priority=RequestPriority.HIGH)
-        sell_price = int(cur_price)
-
-        if orderbook:
-            out = orderbook.get('output', orderbook)
-            if isinstance(out, list) and len(out) > 0:
-                out = out[0]
-            # 매수 1호가(buy_fpr_bid) 타겟팅
-            bid1 = out.get('buy_fpr_bid') or out.get('bid_price1')
-            if bid1 and str(bid1).isdigit() and int(bid1) > 0:
-                sell_price = int(bid1)
+        # 매수 1호가(buy_fpr_bid) 타겟팅 (없으면 현재가), 호가단위로 내림
+        sell_price = floor_tick(orderbook_price(orderbook, 'buy_fpr_bid', 'bid_price1') or int(cur_price))
 
         res = await self.client.send_order(code, qty, sell_price, order_type="00", side="SELL", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')
@@ -1830,16 +1810,8 @@ class AsyncTradingBot:
     async def _execute_smart_buy(self, code: str, name: str, qty: int, cur_price: float, reason: str = "ATR돌파_스퀴즈모멘텀"):
         """HIGH 우선순위로 매도 1호가 지정가 매수 발주"""
         orderbook = await self.client.get_orderbook(code, priority=RequestPriority.HIGH)
-        buy_price = int(cur_price)
-
-        if orderbook:
-            out = orderbook.get('output', orderbook)
-            if isinstance(out, list) and len(out) > 0:
-                out = out[0]
-            # 매도 1호가(sel_fpr_bid) 타겟팅
-            ask1 = out.get('sel_fpr_bid') or out.get('ask_price1')
-            if ask1 and str(ask1).isdigit() and int(ask1) > 0:
-                buy_price = int(ask1)
+        # 매도 1호가(sel_fpr_bid) 타겟팅 (없으면 현재가)
+        buy_price = orderbook_price(orderbook, 'sel_fpr_bid', 'ask_price1') or int(cur_price)
 
         res = await self.client.send_order(code, qty, buy_price, order_type="00", side="BUY", priority=RequestPriority.HIGH)
         rt_cd = (res or {}).get('rt_cd') if (res or {}).get('rt_cd') is not None else (res or {}).get('return_code')

@@ -136,6 +136,32 @@ def is_token_invalid(resp: Any) -> bool:
     return not is_tr_ok(resp) and isinstance(resp, dict) and '8005:' in str(resp.get('return_msg') or '')
 
 
+def orderbook_price(ob: Any, *keys: str) -> int:
+    """ka10004 호가 응답에서 첫 번째로 유효한 가격 (부호 '+275500'/'-275000' 제거). 없으면 0"""
+    out = (ob or {}).get('output', ob) if isinstance(ob, dict) else {}
+    if isinstance(out, list):
+        out = out[0] if out else {}
+    if not isinstance(out, dict):
+        return 0
+    for k in keys:
+        try:
+            p = abs(int(str(out.get(k) or '0').strip()))
+        except ValueError:
+            continue
+        if p > 0:
+            return p
+    return 0
+
+
+def floor_tick(price: int) -> int:
+    """KRX 주식 호가단위(2023년 개편)로 내림. 2,000원 이상은 모두 5원의 배수라 ETF(5원 단위)에도 유효"""
+    p = int(price)
+    for limit, tick in ((2000, 1), (5000, 5), (20000, 10), (50000, 50), (200000, 100), (500000, 500)):
+        if p < limit:
+            return p // tick * tick
+    return p // 1000 * 1000
+
+
 def parse_unexecuted_orders(data: Any) -> List[Dict[str, Any]]:
     """미체결 응답(ka10075 'oso' 목록 / kt00007 등) → [{ord_no, code, name, side('BUY'|'SELL'|None), qty}]
     - 수량: oso_qty(ka10075 미체결수량) 우선, side: io_tp_nm('+매수'/'-매도') 등에서 판별, 판별 불가면 None"""
@@ -429,6 +455,10 @@ class AsyncKiwoomClient:
         if side.upper() == "BUY" and str(order_type) == "03":
             print(f"🛡️ [send_order 가드] BUY 시장가→지정가 자동 전환: {clean_code} @ {price}원 (증거금 부족 방지)")
             order_type = "00"
+        # 지정가 매도는 호가단위로 내림 — 단위가 안 맞으면 571557(주문단가 오류)로 거절되어 손절이 늦어짐
+        if side.upper() == "SELL" and str(order_type) == "00" and int(price) > 0 and floor_tick(price) != int(price):
+            print(f"🛡️ [send_order 가드] SELL 호가단위 내림: {clean_code} {int(price):,}원 → {floor_tick(price):,}원")
+            price = floor_tick(price)
         url = f"{self.base_url}/api/dostk/ordr"
         api_id = "kt10000" if side == "BUY" else "kt10001"
         payload = {

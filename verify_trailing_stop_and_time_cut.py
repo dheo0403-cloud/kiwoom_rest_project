@@ -52,7 +52,7 @@ class VerificationMockClient:
 
     async def get_orderbook(self, code: str, priority: RequestPriority = RequestPriority.LOW):
         price = self.prices.get(code, 70000.0)
-        return {"output": [{"buy_fpr_bid": str(int(price)), "buy_fpr_bid2": str(int(price - 100))}]}
+        return {"output": [{"buy_fpr_bid": str(int(price)), "buy_2th_pre_bid": str(int(price - 100))}]}
 
     async def get_account_balance(self, priority: RequestPriority = RequestPriority.MEDIUM):
         return {"output1": [{"tot_evlu_amt": str(int(self.deposit)), "dnca_tot_amt": str(int(self.deposit))}], "output2": []}

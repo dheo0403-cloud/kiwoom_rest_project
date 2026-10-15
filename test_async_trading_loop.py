@@ -88,7 +88,7 @@ class MockKiwoomClient:
                 "stk_cd": code,
                 "sel_fpr_bid": str(int(price + 100)),     # 매도 1호가
                 "buy_fpr_bid": str(int(price)),           # 매수 1호가
-                "buy_fpr_bid2": str(int(price - 100))     # 매수 2호가
+                "buy_2th_pre_bid": str(int(price - 100))     # 매수 2호가
             }]
         }
 

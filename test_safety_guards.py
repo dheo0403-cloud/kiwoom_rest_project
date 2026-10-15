@@ -363,6 +363,25 @@ def test_orderbook_imbalance_ka10004_schema():
     assert r["imbalance_ratio"] == 0.5
 
 
+def test_orderbook_price_signed_and_spec_keys():
+    """ka10004 부호 붙은 호가('-25705')와 명세 키(buy_2th_pre_bid) 파싱 — 10/15 cur_price 25,712 주문 거절 재발 방지"""
+    from async_kiwoom_client import orderbook_price
+    ob = {"return_code": 0, "buy_fpr_bid": "-25710", "buy_2th_pre_bid": "-25705", "sel_fpr_bid": "+25715"}
+    assert orderbook_price(ob, 'buy_2th_pre_bid', 'buy_fpr_bid') == 25705
+    assert orderbook_price(ob, 'sel_fpr_bid') == 25715
+    assert orderbook_price({"buy_2th_pre_bid": "", "buy_fpr_bid": "-100"}, 'buy_2th_pre_bid', 'buy_fpr_bid') == 100
+    assert orderbook_price(None, 'buy_fpr_bid') == 0
+    assert orderbook_price({"output": [{"buy_fpr_bid": "70000"}]}, 'buy_fpr_bid') == 70000
+
+
+def test_floor_tick_krx_units():
+    """KRX 호가단위 내림 (경계값 포함)"""
+    from async_kiwoom_client import floor_tick
+    cases = {1999: 1999, 2003: 2000, 4999: 4995, 5007: 5000, 19999: 19990, 25712: 25700,
+             50099: 50000, 199999: 199900, 200400: 200000, 499999: 499500, 501234: 501000}
+    assert {p: floor_tick(p) for p in cases} == cases
+
+
 class _FakeResp:
     def __init__(self, data):
         self.status, self._data, self.headers = 200, data, {}

@@ -120,7 +120,7 @@ class UnexecutedMockKiwoomClient:
                 "stk_cd": code,
                 "sel_fpr_bid": str(int(price + 50)),
                 "buy_fpr_bid": str(int(price)),
-                "buy_fpr_bid2": str(int(price - 50))
+                "buy_2th_pre_bid": str(int(price - 50))
             }]
         }
 
