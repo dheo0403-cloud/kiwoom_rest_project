@@ -26,6 +26,7 @@ from notifier import AsyncNotifier
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
 from collect_history import collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor, collect_nxt_daily
 from us_market import refresh_us_daily, summarize as summarize_us
+from n3_trader import N3Trader
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -283,6 +284,10 @@ class AsyncTradingBot:
         self.watchlist_size = int(os.getenv("WATCHLIST_SIZE", "30"))  # 기본 30종목으로 확대
         self.watchlist: Dict[str, Dict[str, Any]] = {}
         self.history_collected_on = None  # 장 마감 후 시세 수집을 마친 날짜 (하루 1회)
+        # N3 애프터마켓 반등 매매 (n3_trader.py, 19:50 NXT 매수 → 다음 거래일 시가 매도)
+        self.n3_enabled = os.getenv("N3_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.n3 = None
+        self.n3_task = None
         self.history_collect_hour = int(os.getenv("HISTORY_COLLECT_HOUR", "16"))  # KST, 종가 확정 뒤
         # 일일 채점 리포트 (장 마감 수집 직후, 오늘 + 최근 N일 누적)
         self.daily_report_enabled = os.getenv("DAILY_REPORT_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -583,6 +588,9 @@ class AsyncTradingBot:
             self.nxt_sync_task = asyncio.create_task(self._nxt_sync_worker())
         if self.nxt_minute_backfill_enabled and (not self.nxt_minute_backfill_task or self.nxt_minute_backfill_task.done()):
             self.nxt_minute_backfill_task = asyncio.create_task(self._nxt_minute_backfill_worker())
+        if self.n3_enabled and not self.is_demo and (not self.n3_task or self.n3_task.done()):
+            self.n3 = N3Trader(self)
+            self.n3_task = asyncio.create_task(self.n3.run())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -1212,6 +1220,9 @@ class AsyncTradingBot:
             # 매수 접수만 되고 잔고로 확인되지 않은 종목은 청산 판단 제외 (0주 매도 800033 반복 방지)
             if pos.get('unconfirmed'):
                 continue
+            # N3 장전 시장가 매도(09:00 시가 체결) 대기 중인 종목은 09:05까지 일중 청산 판단 제외 (주문 취소·중복 매도 방지)
+            if self.n3 and self.n3.protects(code):
+                continue
             name = pos['name']
             qty = pos['qty']
             buy_price = pos['buy_price']
@@ -1345,6 +1356,8 @@ class AsyncTradingBot:
                 order_no, code, uncl_qty = order['ord_no'], order['code'], order['qty']
                 side_str = order['side'] or "BUY"
 
+                if self.n3 and self.n3.protects(code):
+                    continue  # N3 장전 시장가 매도(시가 체결 대기)는 30초 타임아웃 취소·재발주 대상에서 제외
                 if order_no and uncl_qty > 0:
                     # 취소 3회 거절 주문도 추적은 함(미체결 집계용). 자동 취소는 check_and_resolve_timeouts에서 건너뜀
                     if mgr and order_no not in mgr.tracked_orders:
@@ -2351,6 +2364,8 @@ class AsyncTradingBot:
             self.nxt_sync_task.cancel()
         if self.nxt_minute_backfill_task and not self.nxt_minute_backfill_task.done():
             self.nxt_minute_backfill_task.cancel()
+        if self.n3_task and not self.n3_task.done():
+            self.n3_task.cancel()
         try:
             await self.buffer.stop()
         except Exception as e:

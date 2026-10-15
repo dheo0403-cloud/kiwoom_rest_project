@@ -442,9 +442,10 @@ class AsyncKiwoomClient:
 
     async def send_order(self, code: str, qty: int, price: int,
                          order_type: str = "00", side: str = "BUY",
-                         priority: RequestPriority = RequestPriority.HIGH) -> Optional[Dict[str, Any]]:
+                         priority: RequestPriority = RequestPriority.HIGH, exchange: str = "KRX") -> Optional[Dict[str, Any]]:
         """
         주문 발송 (기본 Priority: HIGH, 긴급 매도시 CRITICAL 지정 가능)
+        - exchange: 'KRX'(기본) 또는 'NXT'(넥스트레이드 애프터마켓 등, 지정가만)
         - 계좌번호(accNo) 및 비밀번호(accPwd) 필수 포함
         - 지정가(00) 및 시장가(03) 정규 파라미터 보장
         - [안전 가드] BUY 주문은 항상 지정가(00)로 강제 (시장가 매수 시 ETF 증거금 부족(855056) 방지)
@@ -462,7 +463,7 @@ class AsyncKiwoomClient:
         url = f"{self.base_url}/api/dostk/ordr"
         api_id = "kt10000" if side == "BUY" else "kt10001"
         payload = {
-            "dmst_stex_tp": "KRX",
+            "dmst_stex_tp": exchange,
             "accNo": self.account,
             "accPwd": self.password,
             "stk_cd": clean_code,
@@ -489,7 +490,7 @@ class AsyncKiwoomClient:
         return data
 
     async def cancel_order(self, order_no: str, code: str, qty: int,
-                           priority: RequestPriority = RequestPriority.HIGH) -> Optional[Dict[str, Any]]:
+                           priority: RequestPriority = RequestPriority.HIGH, exchange: str = "KRX") -> Optional[Dict[str, Any]]:
         """
         주문 취소 발송 (kt10003 - 취소주문)
         - 원주문번호(orig_ord_no) 필수
@@ -498,7 +499,7 @@ class AsyncKiwoomClient:
         clean_code = str(code).replace('A', '').strip()
         url = f"{self.base_url}/api/dostk/ordr"
         payload = {
-            "dmst_stex_tp": "KRX",
+            "dmst_stex_tp": exchange,
             "accNo": self.account,
             "accPwd": self.password,
             "stk_cd": clean_code,
@@ -521,6 +522,12 @@ class AsyncKiwoomClient:
             msg = data.get('msg1') or data.get('return_msg') or '취소 실패'
             print(f"⚠️ [CANCEL_REJECTED] 주문 취소 거절 (원주문: {order_no}): {msg}")
         return data
+
+    async def get_watch_quotes(self, codes: List[str], priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        """관심종목정보(ka10095) — 여러 종목 현재가·호가 일괄 조회. codes는 '039490_NX'처럼 거래소 접미사 포함 가능, '|'로 묶어 보냄"""
+        url = f"{self.base_url}/api/dostk/stkinfo"
+        data, _ = await self.request("ka10095", url, {"stk_cd": "|".join(codes)}, priority=priority)
+        return data if is_tr_ok(data) else None
 
     async def get_unexecuted_orders(self, code: str = "", priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
         """

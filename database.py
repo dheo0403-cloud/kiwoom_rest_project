@@ -295,6 +295,61 @@ class DatabaseManager:
             print(f"DB nxt_daily 조회 Error: {e}")
             return set()
 
+    async def get_n3_universe(self, date: str) -> list:
+        """N3 대상: 그날 KRX 거래대금 상위 300 보통주(종가 ≥ 1,000원) 중 NXT 종목 — [{code, name, close, value, prev_close}]
+        (research/afterhours_explore.py와 같은 대상 정의)"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT t.code, t.name, t.close, t.value,
+                               (SELECT p.close FROM daily_ohlcv p WHERE p.code = t.code AND p.date < %s
+                                ORDER BY p.date DESC LIMIT 1) AS prev_close
+                        FROM (SELECT d.code, m.name, d.close, d.value FROM daily_ohlcv d
+                              JOIN stock_master m ON m.code = d.code
+                              WHERE d.date = %s AND d.close >= 1000 AND m.is_etf = 0 AND m.market IN ('KOSPI', 'KOSDAQ')
+                                AND d.code REGEXP '^[0-9]{5}0$' AND m.name NOT LIKE '%%스팩%%'
+                              ORDER BY d.value DESC LIMIT 300) t
+                        WHERE t.code IN (SELECT DISTINCT code FROM nxt_daily)
+                        ORDER BY t.value DESC''', (date, date))
+                    return [dict(r) for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB N3 대상 조회 Error: {e}")
+            return []
+
+    async def get_n3_open(self) -> list:
+        """마지막 N3_SELL 뒤의 N3 매수 접수 − 19:58 취소 수량이 남은 종목 (최근 10일) — [{code, name, qty}]. DB 오류면 None"""
+        if not self.pool: return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT b.code, MAX(b.name) AS name,
+                               SUM(CASE WHEN b.side = 'N3_BUY' THEN b.qty ELSE -b.qty END) AS qty
+                        FROM order_history b
+                        WHERE b.side IN ('N3_BUY', 'N3_CANCEL') AND b.timestamp >= UTC_TIMESTAMP() - INTERVAL 10 DAY
+                          AND NOT EXISTS (SELECT 1 FROM order_history s WHERE s.code = b.code
+                                          AND s.side = 'N3_SELL' AND s.timestamp > b.timestamp)
+                        GROUP BY b.code HAVING qty > 0''')
+                    return [dict(r) for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB N3 보유 조회 Error: {e}")
+            return None
+
+    async def count_n3_buys_since(self, utc_start: str) -> int:
+        """utc_start(UTC 'YYYY-MM-DD HH:MM:SS') 이후 N3_BUY 접수 건수 — 재시작 뒤 같은 날 중복 진입 방지. DB 오류면 -1"""
+        if not self.pool: return -1
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT COUNT(*) AS n FROM order_history WHERE side = 'N3_BUY' AND timestamp >= %s",
+                                         (utc_start,))
+                    return int((await cursor.fetchone())['n'])
+        except Exception as e:
+            print(f"DB N3 진입 조회 Error: {e}")
+            return -1
+
     async def ensure_minute_backfill(self):
         """분봉 과거 백필 진행표 (종목별 가장 오래 받은 날짜·완료 여부) — 없으면 생성"""
         if not self.pool: return
