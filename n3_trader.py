@@ -50,20 +50,29 @@ def parse_watch_quotes(data: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-def pick_n3_orders(universe: List[dict], quotes: Dict[str, dict], slots: int, budget: float) -> List[dict]:
-    """신호 종목을 거래대금 순으로 골라 주문 목록 생성. 예산으로 1주도 못 사는 종목은 건너뛴다"""
+ONE_SHARE_CAP = 0.5  # 종목당 예산으로 1주도 못 살 때 1주는 허용하되, 한 종목에 주문가능금액의 이 비율까지 (10/15 사용자 결정)
+
+
+def pick_n3_orders(universe: List[dict], quotes: Dict[str, dict], slots: int, budget: float, cash: float = None) -> List[dict]:
+    """신호 종목을 거래대금 순으로 골라 주문 목록 생성.
+    수량 = 종목당 예산 // 가격. 0주면 가격이 주문가능금액 × ONE_SHARE_CAP 이하일 때만 1주. 합계는 주문가능금액(cash) 안"""
     picks = []
     if slots <= 0:
         return picks
+    cash = budget * limits.MAX_STOCKS if cash is None else cash
+    left = cash
     for u in universe:  # get_n3_universe가 거래대금 내림차순
         q = quotes.get(u["code"])
         a = signal_drop(u, q)
         if a is None:
             continue
         price = q["ask"] or q["cur"]
-        qty = int(budget // price)
+        qty = int(min(budget, left) // price)
+        if qty < 1 and price <= min(cash * ONE_SHARE_CAP, left):
+            qty = 1
         if qty < 1:
             continue
+        left -= qty * price
         picks.append({"code": u["code"], "name": u.get("name") or u["code"], "qty": qty, "price": int(price), "a": a})
         if len(picks) >= slots:
             break
@@ -145,12 +154,15 @@ class N3Trader:
         slots = max(0, limits.MAX_STOCKS - len(snap["positions"]))
         cash = float(self.bot.portfolio.current_capital or 0)
         budget = min(cash, float(self.bot.portfolio.total_asset or cash)) / limits.MAX_STOCKS
-        picks = pick_n3_orders(universe, quotes, slots, budget)
-        n_sig = sum(1 for u in universe if signal_drop(u, quotes.get(u["code"])) is not None)
-        await self.log("SYSTEM", f"[N3/{tag}] 19:50 판단: 대상 {len(universe)}종목, 시세 {len(quotes)}종목, 신호 {n_sig}건, "
-                                 f"빈 슬롯 {slots}, 종목당 예산 {int(budget):,}원 → 주문 {len(picks)}건: "
-                                 + ", ".join(f"{p['name']}({p['code']}) {p['a'] * 100:+.2f}% {p['qty']}주@{p['price']:,}" for p in picks),
-                       notify=live and bool(picks))
+        picks = pick_n3_orders(universe, quotes, slots, budget, min(cash, float(self.bot.portfolio.total_asset or cash)))
+        sigs = [(u, quotes[u["code"]], a) for u in universe
+                if (a := signal_drop(u, quotes.get(u["code"]))) is not None]
+        await self.log("SYSTEM", f"[N3/{tag}] 19:50 판단: 대상 {len(universe)}종목, 시세 {len(quotes)}종목, 신호 {len(sigs)}건"
+                                 + (" (" + ", ".join(f"{u['name']}({u['code']}) {a * 100:+.2f}% @{q['ask'] or q['cur']:,}"
+                                                     for u, q, a in sigs) + ")" if sigs else "")
+                                 + f", 빈 슬롯 {slots}, 종목당 예산 {int(budget):,}원 → 주문 {len(picks)}건: "
+                                 + ", ".join(f"{p['name']}({p['code']}) {p['qty']}주@{p['price']:,}" for p in picks),
+                       notify=live and bool(sigs))
         if not live:
             return
         while get_kst_now().time() < T_BUY:  # 판단(19:50) 뒤 19:51부터 체결 (설계 M1)
