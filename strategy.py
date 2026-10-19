@@ -102,10 +102,11 @@ class AdaptiveVolatilityBreakoutStrategy:
         skip_time_filter = ind.get('skip_time_filter', False) or is_test
         on = lambda name: name not in self.disabled_filters  # 실험에서 끈 필터는 건너뜀
 
-        # [필터 1] 거래 시간 필터 (09:15 이전 장초반 휩소 차단 & 14:30 이후 신규 진입 차단)
+        # [필터 1] 거래 시간 필터 (09:30 이전 장초반 휩소 차단 & 14:30 이후 신규 진입 차단)
+        # 10/19: 09:15→09:30 (9/15~10/16 주문 기록상 09:00~09:30 매수 손실 최대, 10/19 09:21·09:29 매수 손절)
         if not skip_time_filter and on("time"):
-            if now.hour < 9 or (now.hour == 9 and now.minute < 15):
-                return False, "장초반_노이즈_안정화대기(09:15이전)"
+            if now.hour < 9 or (now.hour == 9 and now.minute < 30):
+                return False, "장초반_노이즈_안정화대기(09:30이전)"
             if now.hour > 14 or (now.hour == 14 and now.minute >= 30):
                 return False, "시간외_신규매수차단(14:30이후)"
 

@@ -763,3 +763,14 @@ async def test_trading_engine_follows_remote_pause(monkeypatch):
     assert await bot._remote_paused() is False
     db.state = {}  # 다음 날: 지시 없음
     assert await bot._remote_paused() is None
+
+
+async def test_no_new_entry_before_0930():
+    """장 초반(09:30 전) 신규 매수 금지, 09:30부터 시간 필터 통과 (10/19 09:21·09:29 매수 손절 사례)"""
+    from datetime import datetime
+    from database import KST
+    s = AdaptiveVolatilityBreakoutStrategy()
+    ok, reason = await s.check_buy_signal("005930", 70000.0, 1000.0, {"now": datetime(2026, 10, 19, 9, 29, tzinfo=KST)})
+    assert not ok and "09:30이전" in reason
+    _, reason = await s.check_buy_signal("005930", 70000.0, 1000.0, {"now": datetime(2026, 10, 19, 9, 30, tzinfo=KST)})
+    assert "장초반" not in reason
