@@ -50,7 +50,7 @@ def parse_watch_quotes(data: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
-ONE_SHARE_CAP = 0.5  # 종목당 예산으로 1주도 못 살 때 1주는 허용하되, 한 종목에 주문가능금액의 이 비율까지 (10/15 사용자 결정)
+ONE_SHARE_CAP = 0.7  # 종목당 예산으로 1주도 못 살 때 1주는 허용하되, 한 종목에 주문가능금액의 이 비율까지 (10/15 50% → 10/20 사용자 결정 70%)
 
 
 def pick_n3_orders(universe: List[dict], quotes: Dict[str, dict], slots: int, budget: float, cash: float = None) -> List[dict]:
