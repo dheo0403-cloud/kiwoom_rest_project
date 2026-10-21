@@ -105,6 +105,7 @@ async def test_blocked_buy_signal_is_recorded_without_order():
     bot.watchlist["005930"] = {"name": "삼성전자"}
     bot.market_filter_passed = True
     bot.daily_circuit_breaker = True
+    bot.signal_confirm_sec = 0  # 신호 확인 매수는 별도 테스트에서 검증
     for _ in range(3):
         await bot._evaluate_buy_condition("005930", 70000.0, 1000.0)
     assert not client.sent_orders
@@ -774,3 +775,21 @@ async def test_no_new_entry_before_0930():
     assert not ok and "09:30이전" in reason
     _, reason = await s.check_buy_signal("005930", 70000.0, 1000.0, {"now": datetime(2026, 10, 19, 9, 30, tzinfo=KST)})
     assert "장초반" not in reason
+
+
+def test_signal_confirmed_needs_second_signal_next_minute():
+    """신호 확인 매수: 첫 신호·같은 분 반복은 대기, 다음 분~5분 안 재신호면 매수, 5분 지나면 새 첫 신호 (10/21 09:30~09:33 5연속 손절 사례)"""
+    from datetime import datetime
+    from database import KST
+    bot = AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=MockDatabaseManager(),
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    bot.signal_confirm_sec = 300
+    t = lambda h, m, s=0: datetime(2026, 10, 21, h, m, s, tzinfo=KST)
+    assert not bot._signal_confirmed("005930", t(9, 30, 4))
+    assert not bot._signal_confirmed("005930", t(9, 30, 50))   # 같은 분 반복 틱
+    assert bot._signal_confirmed("005930", t(9, 31, 1))        # 다음 1분봉에서 재신호 → 매수
+    assert not bot._signal_confirmed("005930", t(9, 40))       # 확인 후엔 다시 첫 신호부터
+    assert not bot._signal_confirmed("005930", t(9, 45, 30))   # 5분 넘게 지나면 새 첫 신호
+    assert bot._signal_confirmed("005930", t(9, 46))
+    bot.signal_confirm_sec = 0
+    assert bot._signal_confirmed("000660", t(10, 0))           # 0이면 즉시 매수

@@ -74,6 +74,7 @@ class HighFidelityBacktester:
         if atr_source not in ("minute", "daily"):
             raise ValueError(f"atr_source는 'minute' 또는 'daily': {atr_source}")
         self.atr_source = atr_source
+        self.confirm_minutes = 0  # 0 = 신호 즉시 진입(실거래 현재), N = 다음 봉~N분 안 재신호 시 진입
 
         self.closed_trades: List[BacktestTrade] = []
         self.equity_curve: List[Dict[str, Any]] = []
@@ -156,6 +157,7 @@ class HighFidelityBacktester:
         self.closed_trades = []
         self.equity_curve = []
         cur_day, context, acml_vol = None, {}, 0.0
+        first_signal = None  # 신호 확인 매수: 첫 신호 봉 시각
 
         for i in range(start, end):
             row = bars.iloc[i]
@@ -208,6 +210,12 @@ class HighFidelityBacktester:
                 buy_signal, _ = await self.strategy.check_buy_signal(
                     code=code, current_price=close_p, current_volume=float(row['volume']), ind=ind
                 )
+                # 신호 확인 매수: 첫 신호는 기억만, 다음 봉부터 confirm_minutes 안에 다시 신호면 진입 (지나면 새 첫 신호)
+                if buy_signal and self.confirm_minutes > 0:
+                    if first_signal is None or not (0 < (now - first_signal).total_seconds() <= self.confirm_minutes * 60):
+                        first_signal, buy_signal = now, False
+                    else:
+                        first_signal = None
                 if buy_signal:
                     entry_price = close_p * (1.0 + self.slippage_rate)
                     shares = await portfolio.get_order_qty(entry_price, atr=ind.get('atr14', 0), available_cash=cash)
@@ -394,18 +402,20 @@ if __name__ == "__main__":
     parser.add_argument("--atr-source", choices=["minute", "daily"], default="minute")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE",
                         help="전략 파라미터 덮어쓰기 (예: breakeven_buffer_pct=0.005, use_trailing_stop_only=false)")
+    parser.add_argument("--confirm-minutes", type=int, default=0, help="신호 확인 매수: 첫 신호 뒤 다음 봉~N분 안 재신호 시 진입")
     args = parser.parse_args()
 
     bars_df = load_minute_bars_from_db(args.code)
     print(f"[기간] {bars_df['datetime'].min()} ~ {bars_df['datetime'].max()}, 거래일 {bars_df['datetime'].dt.date.nunique()}일")
     bt = HighFidelityBacktester(atr_source=args.atr_source)
+    bt.confirm_minutes = args.confirm_minutes
     for kv in args.set:
         key, _, raw = kv.partition('=')
         if not hasattr(bt.strategy, key):
             parser.error(f'알 수 없는 전략 파라미터: {key}')
         cur = getattr(bt.strategy, key)
         setattr(bt.strategy, key, raw.lower() in ('1', 'true', 'yes') if isinstance(cur, bool) else type(cur)(raw))
-    print(f"[설정] atr_source={args.atr_source}, train {args.train_days}일 / test {args.test_days}일, k={args.k_values}, set={args.set}")
+    print(f"[설정] atr_source={args.atr_source}, confirm={args.confirm_minutes}분, train {args.train_days}일 / test {args.test_days}일, k={args.k_values}, set={args.set}")
     res = bt.run_walk_forward_optimization(bars_df, k_values=args.k_values,
                                            train_days=args.train_days, test_days=args.test_days)
     print(f"{'train':^25} {'test':^25} {'best_k':>6} {'IS샤프':>7} {'OOS수익%':>8} {'OOS거래':>6} {'OOS승률%':>7}")

@@ -12,6 +12,13 @@ from typing import Dict, Any, Optional, List
 from async_kiwoom_client import RequestPriority
 from async_portfolio import AsyncPortfolioManager
 from main_rest_async import AsyncTradingBot
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _immediate_buy(monkeypatch):
+    """이 파일의 매매 흐름 테스트는 신호 즉시 매수를 전제로 한다 (신호 확인 매수는 test_safety_guards에서 검증)"""
+    monkeypatch.setenv("SIGNAL_CONFIRM_SEC", "0")
 
 class MockKiwoomClient:
     """테스트 시뮬레이션용 Mock 비동기 키움 클라이언트"""

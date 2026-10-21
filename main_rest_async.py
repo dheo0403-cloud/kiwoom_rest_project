@@ -344,6 +344,9 @@ class AsyncTradingBot:
         self.order_timeout_mgr = OrderTimeoutManager(bot=self, client=self.client, db=self.db, timeout_seconds=timeout_sec)
         self.time_cut_executed = False  # 15:15 장 마감 일괄 청산 1회 실행 플래그
         self._buy_inflight: set = set()  # 매수 판단/발주 진행 중인 종목 (동시 중복 진입 차단)
+        # 신호 확인 매수 (10/21): 첫 신호는 기억만, 다음 1분봉부터 이 시간 안에 다시 신호면 매수 (0이면 즉시 매수)
+        self.signal_confirm_sec = int(os.getenv("SIGNAL_CONFIRM_SEC", "300"))
+        self._first_signal: Dict[str, datetime] = {}
         # 과매매 방지: 같은 종목 하루 1회 진입, 하루 신규 진입 상한(0이면 제한 없음)
         self.one_entry_per_day = limits.env_one_entry_per_day()
         self.max_daily_entries = limits.env_max_daily_entries()
@@ -1550,6 +1553,20 @@ class AsyncTradingBot:
             return "하루진입상한"
         return None
 
+    def _signal_confirmed(self, code: str, now: datetime) -> bool:
+        """첫 신호는 기억만 하고 False. 다음 1분봉(다른 분)부터 signal_confirm_sec 안에 다시 신호면 True"""
+        if getattr(self, 'signal_confirm_sec', 0) <= 0:
+            return True
+        first = self._first_signal.get(code)
+        if first is not None and now.replace(second=0, microsecond=0) > first.replace(second=0, microsecond=0) \
+                and (now - first).total_seconds() <= self.signal_confirm_sec:
+            del self._first_signal[code]
+            return True
+        if first is None or (now - first).total_seconds() > self.signal_confirm_sec:
+            self._first_signal[code] = now  # 새 첫 신호 (같은 분 반복 틱은 처음 시각 유지)
+            print(f"⏳ [신호 확인 대기] {code} 첫 신호 {now:%H:%M:%S} → 다음 1분봉 이후 재신호 시 매수")
+        return False
+
     def _entry_allowed_today(self, code: str) -> bool:
         return self._entry_block_reason(code) is None
 
@@ -1654,6 +1671,9 @@ class AsyncTradingBot:
         if block_reason:
             if buy_signal:
                 await self._record_skipped_signal(code, name, cur_price, reason, block_reason)
+            return
+
+        if buy_signal and not self._signal_confirmed(code, now):
             return
 
         if buy_signal:
