@@ -59,6 +59,8 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 API_BASE_URL = os.getenv("API_SERVER_URL", "http://localhost:8501")
+# 변경성 API 인증: 서버에 API_AUTH_TOKEN이 설정되면 같은 값을 X-API-Token 헤더로 보낸다
+API_HEADERS = {"X-API-Token": os.environ["API_AUTH_TOKEN"]} if os.getenv("API_AUTH_TOKEN") else {}
 
 
 def get_connection():
@@ -166,7 +168,7 @@ with e_col1:
 with e_col2:
     if st.button("🚨 긴급 전량 청산 (Kill-Switch)", type="primary", use_container_width=True):
         try:
-            res = requests.post(f"{API_BASE_URL}/api/bot/emergency-stop", timeout=3)
+            res = requests.post(f"{API_BASE_URL}/api/bot/emergency-stop", headers=API_HEADERS, timeout=3)
             if res.status_code == 200:
                 st.error("🚨 [비상 킬스위치 발동 완료] 모든 보유 종목의 시장가 매도 주문이 접수되었습니다!")
                 st.cache_data.clear()
@@ -178,7 +180,7 @@ with e_col2:
 with e_col3:
     if st.button("🔄 봇 상태 동기화", use_container_width=True):
         try:
-            requests.post(f"{API_BASE_URL}/api/bot/control", json={"action": "REFRESH"}, timeout=2)
+            requests.post(f"{API_BASE_URL}/api/bot/control", json={"action": "REFRESH"}, headers=API_HEADERS, timeout=2)
             st.success("✅ 계좌 및 감시 유니버스가 동기화되었습니다.")
             st.cache_data.clear()
         except Exception:
@@ -393,7 +395,7 @@ try:
 
         if st.button("🚀 파라미터 실시간 적용", type="primary"):
             try:
-                res = requests.post(f"{API_BASE_URL}/api/bot/params?k_breakout={k_val}&kelly_fraction={kelly_val}", timeout=3)
+                res = requests.post(f"{API_BASE_URL}/api/bot/params?k_breakout={k_val}&kelly_fraction={kelly_val}", headers=API_HEADERS, timeout=3)
                 if res.status_code == 200:
                     st.success(f"✅ 파라미터 적용 완료: k={k_val}, Kelly={kelly_val}")
                 else:
