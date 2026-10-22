@@ -117,6 +117,32 @@ async def test_blocked_buy_signal_is_recorded_without_order():
     assert len(records) == 1
 
 
+async def test_intraday_buy_switch_blocks_only_new_buys(monkeypatch):
+    """INTRADAY_BUY_ENABLED=false면 장중 매수 신호는 주문 없이 '장중매수중지'로만 기록 (기본값은 매수 허용)"""
+    assert AsyncTradingBot(is_demo=True, client=MockKiwoomClient(), db=MockDatabaseManager()).intraday_buy_enabled
+    monkeypatch.setenv("INTRADAY_BUY_ENABLED", "false")
+    client, db = MockKiwoomClient(), MockDatabaseManager()
+    bot = AsyncTradingBot(is_demo=True, client=client, db=db,
+                          portfolio=AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5))
+    records = []
+
+    async def record(ts, code, name, price, signal_reason, block_reason):
+        records.append((code, block_reason))
+
+    async def always_buy(**kwargs):
+        return True, "테스트신호"
+
+    db.record_skipped_signal = record
+    bot.strategy.check_buy_signal = always_buy
+    bot.watchlist["005930"] = {"name": "삼성전자"}
+    bot.market_filter_passed = True
+    bot.signal_confirm_sec = 0
+    for _ in range(2):
+        await bot._evaluate_buy_condition("005930", 70000.0, 1000.0)
+    assert not client.sent_orders
+    assert records == [("005930", "장중매수중지")]
+
+
 async def test_daily_scorecard_logs_report_and_survives_errors(monkeypatch):
     """장 마감 후 일일 채점: 결과는 logs(REPORT)에 저장, 리포트 오류는 WARNING만 남기고 데몬은 계속"""
     import skipped_signal_report

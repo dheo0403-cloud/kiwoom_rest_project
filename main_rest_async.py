@@ -346,6 +346,8 @@ class AsyncTradingBot(CollectionWorkersMixin):
         # 신호 확인 매수 (10/21): 첫 신호는 기억만, 다음 1분봉부터 이 시간 안에 다시 신호면 매수 (0이면 즉시 매수)
         self.signal_confirm_sec = int(os.getenv("SIGNAL_CONFIRM_SEC", "300"))
         self._first_signal: Dict[str, datetime] = {}
+        # 장중 신규 매수 스위치 (10/22): false면 장중 매수만 막는다 — 보유분 매도 감시·N3는 그대로
+        self.intraday_buy_enabled = os.getenv("INTRADAY_BUY_ENABLED", "true").lower() in ("1", "true", "yes")
         # 과매매 방지: 같은 종목 하루 1회 진입, 하루 신규 진입 상한(0이면 제한 없음)
         self.one_entry_per_day = limits.env_one_entry_per_day()
         self.max_daily_entries = limits.env_max_daily_entries()
@@ -1614,7 +1616,9 @@ class AsyncTradingBot(CollectionWorkersMixin):
         self._roll_entry_day()
         block_reason = None
         real_available_cash = self.portfolio.get_available_cash_with_pending_lock(pending_buy_amount)
-        if self.daily_circuit_breaker or self.mdd_shutdown:
+        if not getattr(self, 'intraday_buy_enabled', True):
+            block_reason = "장중매수중지"
+        elif self.daily_circuit_breaker or self.mdd_shutdown:
             block_reason = "서킷브레이커"
         elif not self.market_filter_passed:
             block_reason = "시장필터"
