@@ -100,7 +100,9 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   const isStrongVolume = volumePower !== null && volumePower >= 120.0;
   const netRealizedPnl = safePerf.cumulative_realized_pnl ?? 0;
 
-  const recentTrades: ClosedTrade[] = safePerf.recent_closed_trades || [];
+  // 당일(KST) 매도분만 표시 — timestamp는 서버가 준 KST 'MM-DD HH:MM'
+  const todayMd = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }).slice(5);
+  const recentTrades: ClosedTrade[] = (safePerf.recent_closed_trades || []).filter((t) => t.timestamp?.startsWith(todayMd));
 
   return (
     <div className="bento-card p-4 flex flex-col bg-slate-900/80 border border-slate-800 mb-3.5 relative overflow-hidden">
@@ -318,7 +320,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           <div className="flex items-center justify-between text-xs mb-1.5">
             <span className="font-bold text-slate-300 flex items-center gap-1.5">
               <History className="w-3.5 h-3.5 text-purple-400" />
-              최근 퀀트 청산 타점 성과 (Recent Closed Trades)
+              오늘 퀀트 청산 타점 성과 (Today's Closed Trades)
             </span>
             <span className="text-[10px] text-slate-400 font-mono">
               누적 실현손익: <strong className={netRealizedPnl >= 0 ? 'text-rose-400' : 'text-blue-400'}>{netRealizedPnl >= 0 ? '+' : ''}{Math.round(netRealizedPnl).toLocaleString()}원</strong>
@@ -328,7 +330,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
           <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800">
             {recentTrades.length === 0 ? (
               <div className="py-2 text-center text-slate-500 text-[11px]">
-                최근 청산된 매매 내역이 없습니다.
+                오늘 청산된 매매 내역이 없습니다.
               </div>
             ) : (
               recentTrades.map((trade, idx) => {
