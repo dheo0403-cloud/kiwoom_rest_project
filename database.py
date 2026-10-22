@@ -983,7 +983,7 @@ class DatabaseManager:
         }
 
     async def get_recent_trade_returns(self, limit: int = 50) -> list:
-        """order_history 청산 거래(취소 차감 FIFO) 최근 limit건의 수익률(소수, 예 0.012) — 켈리 비중 이력 복원용"""
+        """order_history 장중 청산 거래(취소 차감 LIFO) 최근 limit건의 수익률(소수, 예 0.012) — 켈리 비중 이력 복원용 (N3 제외)"""
         if not self.pool:
             return []
         try:
@@ -991,8 +991,9 @@ class DatabaseManager:
                 async with conn.cursor() as cursor:
                     await cursor.execute("SELECT * FROM order_history ORDER BY id ASC")
                     orders = await cursor.fetchall()
-            trades = list(reversed(compute_trade_metrics(orders, recent_limit=limit)["recent_closed_trades"]))
-            return [t['return_pct'] / 100.0 for t in trades]
+            trades = compute_trade_metrics(orders, recent_limit=len(orders))["recent_closed_trades"]
+            intraday = [t for t in trades if t['strategy'] == '장중'][:limit]  # 최신순 → limit건
+            return [t['return_pct'] / 100.0 for t in reversed(intraday)]
         except Exception as e:
             print(f"DB 청산 수익률 이력 조회 에러: {e}")
             return []
@@ -1016,7 +1017,7 @@ class DatabaseManager:
                     await cursor.execute("SELECT * FROM balance ORDER BY date ASC")
                     balances = await cursor.fetchall()
 
-            metrics = compute_trade_metrics(orders)
+            metrics = compute_trade_metrics(orders, recent_limit=30)  # 장중 하루 10건 안팎 + N3 → 이틀치 이상 표시
 
             daily_return = 0.0
             equity_history = []
@@ -1116,9 +1117,19 @@ class DatabaseManager:
 AsyncDatabase = DatabaseManager
 
 
+def _order_time_kst(v) -> str:
+    """order_history.timestamp(DB 기본값 CURRENT_TIMESTAMP = UTC, naive) → KST 'MM-DD HH:MM'"""
+    if isinstance(v, datetime):
+        d = v if v.tzinfo else v.replace(tzinfo=timezone.utc)
+        return d.astimezone(KST).strftime('%m-%d %H:%M')
+    return format_kst_time_str(v) if v else ""
+
+
 def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
     """order_history 행(id 오름차순) → 청산 거래·승률·손익비·누적 실현손익·실현손익 최대 낙폭
-    - CANCEL_BUY/CANCEL_SELL 행은 같은 종목의 직전 BUY/SELL 접수 수량에서 차감한 뒤 FIFO 매칭
+    - CANCEL_BUY/CANCEL_SELL/N3_CANCEL 행은 같은 종목의 직전 매수/매도 접수 수량에서 차감
+    - 장중(BUY/SELL)과 N3(N3_BUY/N3_SELL)는 따로 매칭하고, 각 청산 거래에 strategy('장중'|'N3')를 붙인다
+    - 매칭은 가장 최근 매수분부터(LIFO): 체결 안 된 채 남은 옛 매수 접수가 오늘 매도와 짝지어지는 것을 막음
     - 수수료·세금: 매수 0.015%, 매도 0.195%(수수료+거래세) 근사"""
     rows = []
     for r in orders:
@@ -1129,10 +1140,11 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
             'side': side,
             'qty': int(r.get('qty', 0) or 0),
             'price': float(r.get('price', 0) or 0),
-            'timestamp': format_kst_time_str(r.get('timestamp') or r.get('created_at') or r.get('time')),
+            'timestamp': _order_time_kst(r.get('timestamp') or r.get('created_at') or r.get('time')),
         }
-        if side.startswith('CANCEL_'):
-            target, remain = side[len('CANCEL_'):], row['qty']
+        if side.startswith('CANCEL_') or side == 'N3_CANCEL':
+            target = 'N3_BUY' if side == 'N3_CANCEL' else side[len('CANCEL_'):]
+            remain = row['qty']
             for prev in reversed(rows):
                 if remain <= 0:
                     break
@@ -1147,25 +1159,27 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
     for r in rows:
         if r['qty'] <= 0:
             continue
-        if r['side'] == 'BUY':
-            lots.setdefault(r['code'], []).append({'qty': r['qty'], 'price': r['price']})
-        elif r['side'] == 'SELL' and lots.get(r['code']):
+        strategy = 'N3' if r['side'].startswith('N3_') else '장중'
+        book = (strategy, r['code'])
+        if r['side'] in ('BUY', 'N3_BUY'):
+            lots.setdefault(book, []).append({'qty': r['qty'], 'price': r['price']})
+        elif r['side'] in ('SELL', 'N3_SELL') and lots.get(book):
             rem, cost, matched = r['qty'], 0.0, 0
-            while rem > 0 and lots[r['code']]:
-                lot = lots[r['code']][0]
+            while rem > 0 and lots[book]:
+                lot = lots[book][-1]
                 take = min(rem, lot['qty'])
                 cost += take * lot['price']
                 matched += take
                 lot['qty'] -= take
                 rem -= take
                 if lot['qty'] <= 0:
-                    lots[r['code']].pop(0)
+                    lots[book].pop()
             if matched > 0:
                 avg_buy = cost / matched
                 sell_val = matched * r['price']
                 net_pnl = (sell_val - cost) - (cost * 0.00015 + sell_val * 0.00195)
                 closed_trades.append({
-                    'code': r['code'], 'name': r['name'],
+                    'code': r['code'], 'name': r['name'], 'strategy': strategy,
                     'buy_price': round(avg_buy, 0), 'sell_price': r['price'], 'qty': matched,
                     'pnl': round(net_pnl, 0),
                     'return_pct': round(((r['price'] / avg_buy) - 1.0) * 100.0, 2) if avg_buy > 0 else 0.0,

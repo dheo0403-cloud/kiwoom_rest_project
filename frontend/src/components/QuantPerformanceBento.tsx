@@ -325,13 +325,13 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
             </span>
           </div>
 
-          <div className="space-y-1.5 max-h-24 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800">
+          <div className="space-y-1.5 max-h-48 overflow-y-auto pr-1 scrollbar-thin scrollbar-thumb-slate-800">
             {recentTrades.length === 0 ? (
               <div className="py-2 text-center text-slate-500 text-[11px]">
                 최근 청산된 매매 내역이 없습니다.
               </div>
             ) : (
-              recentTrades.slice(0, 3).map((trade, idx) => {
+              recentTrades.map((trade, idx) => {
                 const isWin = (trade.pnl || 0) >= 0;
                 const pColor = isWin
                   ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
@@ -339,9 +339,13 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
 
                 return (
                   <div key={idx} className="flex items-center justify-between bg-slate-900/60 px-2.5 py-1.5 rounded text-[11px] border border-slate-800/60 font-mono">
-                    <div className="flex items-center gap-2">
-                      <span className="text-white font-bold">{trade.name || trade.code}</span>
-                      <span className="text-[10px] text-slate-400">{trade.code}</span>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[10px] text-slate-500 shrink-0">{trade.timestamp}</span>
+                      {trade.strategy === 'N3' && (
+                        <span className="text-[9px] px-1 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 shrink-0">N3</span>
+                      )}
+                      <span className="text-white font-bold truncate">{trade.name || trade.code}</span>
+                      <span className="text-[10px] text-slate-400 shrink-0">{trade.code}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <span className={`font-bold ${pColor}`}>

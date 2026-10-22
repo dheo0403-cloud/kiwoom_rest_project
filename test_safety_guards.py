@@ -338,6 +338,25 @@ def test_trade_metrics_subtract_cancelled_orders_and_realized_mdd():
     assert m["realized_mdd_amount"] == b["pnl"]  # 고점(A 청산 후) 대비 B 손실만큼 하락
 
 
+def test_trade_metrics_n3_lifo_and_kst_time():
+    """N3는 장중과 따로 매칭, 남은 옛 매수 접수 대신 최근 매수와 짝(LIFO), 시각은 UTC→KST"""
+    from datetime import datetime
+    from database import compute_trade_metrics
+    orders = [
+        {"code": "A", "side": "BUY", "qty": 1, "price": 42935, "timestamp": datetime(2026, 10, 1, 1, 0)},  # 매도 없이 남은 접수
+        {"code": "A", "side": "BUY", "qty": 1, "price": 32055, "timestamp": datetime(2026, 10, 22, 0, 52)},
+        {"code": "A", "side": "SELL", "qty": 1, "price": 31900, "timestamp": datetime(2026, 10, 22, 0, 54)},
+        {"code": "T", "side": "N3_BUY", "qty": 1, "price": 55500, "timestamp": datetime(2026, 10, 20, 10, 50)},
+        {"code": "T", "side": "SELL", "qty": 1, "price": 1, "timestamp": datetime(2026, 10, 20, 11, 0)},  # 장중 매도는 N3 매수와 짝짓지 않음
+        {"code": "T", "side": "N3_SELL", "qty": 1, "price": 56900, "timestamp": datetime(2026, 10, 20, 23, 55)},
+    ]
+    m = compute_trade_metrics(orders)
+    n3, a = m["recent_closed_trades"]
+    assert (a["strategy"], a["buy_price"], a["timestamp"]) == ("장중", 32055, "10-22 09:54")
+    assert (n3["strategy"], n3["buy_price"], n3["timestamp"]) == ("N3", 55500, "10-21 08:55")
+    assert m["total_trades"] == 2
+
+
 def test_parse_unexecuted_orders_ka10075_schema():
     """ka10075 응답(oso 목록, oso_qty, io_tp_nm '+매수'/'-매도') 파싱, 구분 불명은 None"""
     from async_kiwoom_client import parse_unexecuted_orders

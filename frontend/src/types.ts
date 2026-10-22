@@ -18,7 +18,8 @@ export interface ClosedTrade {
   qty: number;
   pnl: number;
   return_pct: number;
-  timestamp: string;
+  timestamp: string; // 매도 접수 시각 KST 'MM-DD HH:MM'
+  strategy?: '장중' | 'N3';
 }
 
 export interface EquityHistoryPoint {
