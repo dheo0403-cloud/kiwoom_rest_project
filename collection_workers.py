@@ -8,8 +8,10 @@ from datetime import datetime, timedelta
 from typing import Dict
 
 from database import get_kst_now
+from dart_disclosure import DartClient, fetch_day
 from collect_history import (collect_after_close, backfill_minute_step, refresh_stock_master, collect_investor, collect_nxt_daily,
-                             collect_daily, refetch_minute_adjusted, minute_daily_mismatch)
+                             collect_daily, refetch_minute_adjusted, minute_daily_mismatch, collect_nxt_minute_day,
+                             NXT_AFTER_SESSION, NXT_PRE_SESSION)
 
 
 class CollectionWorkersMixin:
@@ -177,7 +179,9 @@ class CollectionWorkersMixin:
                 known = await self.db.get_nxt_codes()
                 full = not known or round_day.weekday() == 5
                 targets = universe if full else [c for c in universe if c in known]
-                rows, done, empty = 0, 0, 0
+                # 라운드 날짜가 거래일이면 그날 NXT 분봉(장전 + 애프터)도 함께 저장 (N3 전진 검증·확장용)
+                minute_day = None if self.is_korean_market_holiday(now - timedelta(hours=8)) else round_day.strftime('%Y%m%d')
+                rows, done, empty, minute_rows = 0, 0, 0, 0
                 for code in targets:
                     if self.is_shutdown or not self._nxt_sync_allowed(get_kst_now()):
                         break
@@ -185,12 +189,14 @@ class CollectionWorkersMixin:
                     rows += n
                     done += 1
                     empty += (n == 0)
+                    if minute_day and n > 0:
+                        minute_rows += await collect_nxt_minute_day(self.client, self.db, code, minute_day)
                 finished = done == len(targets)
                 if finished:
                     synced_on = round_day
                 await self.db.log_message("SYSTEM", f"NXT 일봉 동기화 {'완료' if finished else '중단(시간 종료)'}"
                                                     f"({'전체' if full else 'NXT 종목'}): {done:,}/{len(targets):,}종목, "
-                                                    f"{rows:,}행, 빈 응답 {empty:,}")
+                                                    f"{rows:,}행, 빈 응답 {empty:,}, {minute_day or '휴장일'} 분봉 {minute_rows:,}행")
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -273,10 +279,11 @@ class CollectionWorkersMixin:
                 await asyncio.sleep(60.0)
 
     async def _nxt_minute_backfill_worker(self):
-        """NXT 애프터마켓 분봉 과거 백필: nxt_daily에 있는 종목만, 20시~08시·휴장일에 종목별 20페이지씩 돌아가며
-        (진행표 minute_backfill의 '코드_NX' 키로 재시작 후 이어받기). 매매에는 쓰지 않는 연구용"""
+        """NXT 분봉 과거 백필: nxt_daily에 있는 종목만, 20시~08시·휴장일에 종목별 20페이지씩 돌아가며
+        (진행표 minute_backfill 키로 재시작 후 이어받기). 애프터 봉('코드_NX')을 끝낸 뒤 장전 봉('코드_NXP', 10/22 추가). 연구용"""
         await self.db.ensure_minute_backfill()
         await self.db.ensure_nxt_minute()
+        phases = {"_NX": NXT_AFTER_SESSION, "_NXP": NXT_PRE_SESSION}
         announced_done = False
         while not self.is_shutdown:
             try:
@@ -288,27 +295,29 @@ class CollectionWorkersMixin:
                     await asyncio.sleep(600.0)
                     continue
                 states = await self.db.get_minute_backfill()
-                pending = [c for c in codes if not int((states.get(f"{c}_NX") or {}).get("done", 0))]
+                pending = [(c, s) for s in phases for c in codes if not int((states.get(c + s) or {}).get("done", 0))]
                 if not pending:
                     if not announced_done:
-                        await self.db.log_message("SYSTEM", f"NXT 분봉 과거 백필 완료: {len(codes):,}종목")
+                        await self.db.log_message("SYSTEM", f"NXT 분봉 과거 백필 완료(애프터·장전): {len(codes):,}종목")
                         announced_done = True
                     await asyncio.sleep(3600.0)
                     continue
                 announced_done = False
                 steps, rows, errors = 0, 0, 0
-                for code in pending:
+                for code, suffix in pending:
                     if self.is_shutdown or not self._nxt_sync_allowed(get_kst_now()):
                         break
-                    before = states.get(f"{code}_NX")
-                    after = await backfill_minute_step(self.client, self.db, code, before, self.minute_backfill_days, nx=True)
+                    key = code + suffix
+                    before = states.get(key)
+                    after = await backfill_minute_step(self.client, self.db, code, before, self.minute_backfill_days, nx=True,
+                                                       session=phases[suffix], key=key)
                     steps += 1
                     rows += after["rows_saved"] - int((before or {}).get("rows_saved", 0))
                     if not after["done"] and after["oldest_date"] == (before or {}).get("oldest_date"):
                         errors += 1
                         await asyncio.sleep(5.0)  # 오류·무진전: 잠시 쉬고 다음 종목
-                    states[f"{code}_NX"] = after
-                left = sum(1 for c in codes if not int((states.get(f"{c}_NX") or {}).get("done", 0)))
+                    states[key] = after
+                left = sum(1 for s in phases for c in codes if not int((states.get(c + s) or {}).get("done", 0)))
                 await self.db.log_message("SYSTEM", f"NXT 분봉 백필 라운드: {steps:,}종목 처리, 신규 {rows:,}행, "
                                                     f"오류·무진전 {errors}, 남은 종목 {left:,}")
             except asyncio.CancelledError:
@@ -317,3 +326,80 @@ class CollectionWorkersMixin:
                 print(f"❌ [NXT 분봉 백필 오류] {e}")
                 await self.db.log_message("ERROR", f"NXT 분봉 백필 오류: {e}")
                 await asyncio.sleep(60.0)
+
+    def _dart_live_allowed(self, now: datetime) -> bool:
+        """공시 장중 폴링 시간: 거래일 06~21시"""
+        return not self.is_korean_market_holiday(now) and 6 <= now.hour < 21
+
+    async def _dart_worker(self):
+        """DART 공시 수집 (공시 이벤트 연구용, 매매에는 쓰지 않음, 10/22 추가)
+        - 거래일 06~21시: DART_POLL_SEC(기본 60초)마다 오늘 공시를 최신순으로 읽어 새 공시만 저장, 처음 본 시각 = first_seen_at
+        - 그 밖(21시~06시·휴장일): 어제부터 과거 DART_BACKFILL_DAYS(기본 1095일)를 하루씩 백필 (시각 NULL, 진행표 dart_days)"""
+        key = os.getenv("DART_API_KEY", "")
+        if not key:
+            await self.db.log_message("WARNING", "DART_API_KEY 없음 → 공시 수집 안 함 (키를 넣고 재시작하면 시작)")
+            return
+        await self.db.ensure_dart()
+        dart = DartClient(key, int(os.getenv("DART_DAILY_LIMIT", "18000")))
+        poll_sec = float(os.getenv("DART_POLL_SEC", "60"))
+        backfill_days = int(os.getenv("DART_BACKFILL_DAYS", "1095"))
+        known, known_day, timed_day, announced_done = set(), None, None, False
+        try:
+            while not self.is_shutdown:
+                try:
+                    now = get_kst_now()
+                    today = now.strftime('%Y%m%d')
+                    if dart.budget_left(today) <= 0:
+                        await asyncio.sleep(600.0)
+                        continue
+                    if self._dart_live_allowed(now):
+                        if known_day != today:
+                            known, known_day = await self.db.get_dart_rcept_nos(today), today
+                        # 그날 첫 조회는 그 전에 올라온 공시가 섞여 시각을 모르므로 NULL, 다음 조회부터 처음 본 시각
+                        seen_at = now.replace(tzinfo=None, microsecond=0) if timed_day == today else None
+                        rows = await fetch_day(dart, today, today, known=known, first_seen_at=seen_at)
+                        if rows is not None:
+                            new = [r for r in rows if r[0] not in known]  # 이미 본 공시는 시각을 다시 쓰지 않음
+                            if await self.db.upsert_dart_rows(new):
+                                known.update(r[0] for r in new)
+                                timed_day = today
+                                if new:
+                                    print(f"📰 [DART] 새 공시 {len(new)}건 (오늘 누적 {len(known):,}건)")
+                        await asyncio.sleep(poll_sec)
+                        continue
+                    if not self._nxt_sync_allowed(now):
+                        await asyncio.sleep(300.0)
+                        continue
+                    done_days = await self.db.get_dart_days()
+                    pending = [d for d in ((now - timedelta(days=i)).strftime('%Y%m%d') for i in range(1, backfill_days + 1))
+                               if d not in done_days]
+                    if not pending:
+                        if not announced_done:
+                            await self.db.log_message("SYSTEM", f"DART 공시 과거 백필 완료: {backfill_days:,}일")
+                            announced_done = True
+                        await asyncio.sleep(3600.0)
+                        continue
+                    announced_done = False
+                    days, saved, failed = 0, 0, False
+                    for d in pending:
+                        t = get_kst_now()
+                        if self.is_shutdown or self._dart_live_allowed(t) or not self._nxt_sync_allowed(t):
+                            break
+                        rows = await fetch_day(dart, d, t.strftime('%Y%m%d'))
+                        if rows is None or not await self.db.upsert_dart_rows(rows):
+                            failed = True  # 오류·한도: 그날은 완료 처리하지 않고 다음 라운드에 다시
+                            break
+                        await self.db.mark_dart_day(d, len(rows))
+                        days, saved = days + 1, saved + len(rows)
+                    await self.db.log_message("SYSTEM", f"DART 공시 백필 라운드: {days:,}일, {saved:,}건, "
+                                                        f"{'오류로 중단, ' if failed else ''}남은 {len(pending) - days:,}일, 오늘 호출 {dart.calls:,}회")
+                    if failed:
+                        await asyncio.sleep(600.0)
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print(f"❌ [DART 공시 수집 오류] {e}")
+                    await self.db.log_message("ERROR", f"DART 공시 수집 오류: {e}")
+                    await asyncio.sleep(60.0)
+        finally:
+            await dart.close()

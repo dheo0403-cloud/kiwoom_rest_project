@@ -65,13 +65,17 @@ def parse_daily(code: str, items: List[Dict[str, Any]]) -> List[tuple]:
 # 저장할 장 시간 (HHMM, 포함). 키움 분봉에는 넥스트레이드 장전·장후(08~20시) 봉도 섞여 와서 정규장만 남긴다.
 MINUTE_SESSION = tuple(os.getenv("MINUTE_SESSION", "0900-1530").split("-"))
 NXT_AFTER_SESSION = ("1530", "2000")  # NXT 분봉('_NX')은 애프터마켓 봉만 저장 (research/afterhours_minute_plan.md)
+NXT_PRE_SESSION = ("0800", "0850")    # NXT 장전 봉 (N3 확장: D+1 장전 매도 변형 검증용, 10/22 추가)
+NXT_SESSIONS = (NXT_PRE_SESSION, NXT_AFTER_SESSION)  # 매일 수집·재수집은 장전 + 애프터 (정규장 시간 NXT 봉은 저장 안 함)
 
 
 def parse_minute(code: str, items: List[Dict[str, Any]], session=MINUTE_SESSION) -> List[tuple]:
+    """session: (시작, 끝) HHMM 하나 또는 그 묶음(여러 시간대)"""
+    windows = session if isinstance(session[0], tuple) else (session,)
     out = []
     for it in items:
         tm = str(it.get('cntr_tm') or '').strip()
-        if len(tm) != 14 or not tm.isdigit() or not (session[0] <= tm[8:12] <= session[1]):
+        if len(tm) != 14 or not tm.isdigit() or not any(a <= tm[8:12] <= b for a, b in windows):
             continue
         out.append((code, tm, _num(it.get('open_pric')), _num(it.get('high_pric')), _num(it.get('low_pric')),
                     _num(it.get('cur_prc')), _num(it.get('trde_qty'))))
@@ -120,7 +124,7 @@ async def refetch_minute_adjusted(client, db, code: str, max_days: int, nx: bool
     """분봉을 오늘 기준일 + 연속조회로 max_days까지 다시 받아 덮어쓴다 (전 구간 수정주가). 받은 행 수, 오류면 -1
     키움 명세(ka10081 upd_stkpc_tp): 수정주가는 base_dt가 권리발생일 이후일 때만 적용, 연속조회도 동일"""
     stk_cd = f"{code}_NX" if nx else code
-    session = NXT_AFTER_SESSION if nx else MINUTE_SESSION
+    session = NXT_SESSIONS if nx else MINUTE_SESSION
     upsert = db.upsert_nxt_minute_rows if nx else db.upsert_minute_rows
     cutoff = (get_kst_now() - timedelta(days=max_days)).strftime('%Y%m%d')
     payload = {"stk_cd": stk_cd, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": get_kst_now().strftime('%Y%m%d')}
@@ -173,6 +177,18 @@ async def collect_nxt_daily(client, db, code: str) -> int:
     return len(rows)
 
 
+async def collect_nxt_minute_day(client, db, code: str, day: str) -> int:
+    """NXT 하루치 분봉(장전 08:00~08:50 + 애프터 15:30~20:00) → nxt_minute. NXT 일봉 동기화 라운드(20시~)에서 매일 호출
+    (10/14 과거 백필 완료 뒤로는 매일 갱신하는 곳이 없어 종목마다 최근 날짜가 들쭉날쭉했음)"""
+    stop = lambda page: min(str(p.get('cntr_tm', '9' * 14)) for p in page)[:8] < day
+    items = await _paged(client, "ka10080", "/api/dostk/chart",
+                         {"stk_cd": f"{code}_NX", "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": day},
+                         "stk_min_pole_chart_qry", stop)
+    rows = [r for r in parse_minute(code, items, NXT_SESSIONS) if r[1][:8] == day]
+    await db.upsert_nxt_minute_rows(rows)
+    return len(rows)
+
+
 def _snum(v: Any) -> int:
     """키움 숫자 문자열 → 부호 유지 정수 (순매수처럼 음수가 의미 있는 값)"""
     try:
@@ -219,12 +235,13 @@ async def collect_minute(client, db, code: str, days: int = 1, base_dt: Optional
 
 
 async def backfill_minute_step(client, db, code: str, state: Optional[Dict[str, Any]], max_days: int,
-                               pages: int = 20, nx: bool = False) -> Dict[str, Any]:
+                               pages: int = 20, nx: bool = False, session=None, key: Optional[str] = None) -> Dict[str, Any]:
     """분봉 과거 백필 1단계: 진행표의 가장 오래된 날짜(없으면 오늘)부터 과거로 최대 pages페이지 받아 저장.
     더 받을 게 없거나(키움 보관 한도) 목표 기간에 닿으면 완료 처리. 반환: 갱신된 진행 상태
-    nx=True: '코드_NX' 분봉의 애프터마켓 봉만 nxt_minute에 저장, 진행표 키도 '코드_NX'"""
+    nx=True: '코드_NX' 분봉의 애프터마켓 봉만 nxt_minute에 저장, 진행표 키도 '코드_NX'
+    session·key: 저장 시간대와 진행표 키를 바꿀 때 (NXT 장전 봉 백필 = NXT_PRE_SESSION, '코드_NXP')"""
     stk_cd = f"{code}_NX" if nx else code
-    session = NXT_AFTER_SESSION if nx else MINUTE_SESSION
+    session = session or (NXT_AFTER_SESSION if nx else MINUTE_SESSION)
     state = state or {"oldest_date": None, "rows_saved": 0, "done": 0}
     cutoff = (get_kst_now() - timedelta(days=max_days)).strftime('%Y%m%d')
     base_dt = state["oldest_date"] or get_kst_now().strftime('%Y%m%d')
@@ -263,7 +280,7 @@ async def backfill_minute_step(client, db, code: str, state: Optional[Dict[str, 
     if reason is None and oldest == state["oldest_date"]:
         done, reason = True, "no_progress"  # 같은 날짜만 반복되면 무한 반복 방지
     new_state = {"oldest_date": oldest, "rows_saved": int(state["rows_saved"]) + len(rows), "done": int(done)}
-    await db.upsert_minute_backfill(stk_cd, oldest, new_state["rows_saved"], done, reason if done else None)
+    await db.upsert_minute_backfill(key or stk_cd, oldest, new_state["rows_saved"], done, reason if done else None)
     return new_state
 
 

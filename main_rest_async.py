@@ -332,6 +332,9 @@ class AsyncTradingBot(CollectionWorkersMixin):
         # NXT 애프터마켓 분봉 과거 백필 (N3 2차 재검증용, NXT 일봉 동기화와 같은 시간대, 기간은 MINUTE_BACKFILL_DAYS)
         self.nxt_minute_backfill_enabled = os.getenv("NXT_MINUTE_BACKFILL_ENABLED", "true").lower() in ("1", "true", "yes")
         self.nxt_minute_backfill_task: Optional[asyncio.Task] = None
+        # DART 공시 수집 (공시 이벤트 연구용, collection_workers._dart_worker, DART_API_KEY 없으면 경고 1회 후 종료)
+        self.dart_enabled = os.getenv("DART_COLLECT_ENABLED", "true").lower() in ("1", "true", "yes")
+        self.dart_task: Optional[asyncio.Task] = None
 
         # 실시간 감시 로그 쓰로틀링 상태 맵 (종목코드 -> 마지막 로그 시간/괴리율)
         self._last_watch_log_time: Dict[str, float] = {}
@@ -596,6 +599,8 @@ class AsyncTradingBot(CollectionWorkersMixin):
             self.nxt_sync_task = asyncio.create_task(self._nxt_sync_worker())
         if self.nxt_minute_backfill_enabled and (not self.nxt_minute_backfill_task or self.nxt_minute_backfill_task.done()):
             self.nxt_minute_backfill_task = asyncio.create_task(self._nxt_minute_backfill_worker())
+        if self.dart_enabled and (not self.dart_task or self.dart_task.done()):
+            self.dart_task = asyncio.create_task(self._dart_worker())
         if self.minute_refetch_enabled and (not self.minute_refetch_task or self.minute_refetch_task.done()):
             self.minute_refetch_task = asyncio.create_task(self._minute_refetch_worker())
         if self.n3_enabled and not self.is_demo and (not self.n3_task or self.n3_task.done()):
@@ -2162,6 +2167,8 @@ class AsyncTradingBot(CollectionWorkersMixin):
             self.nxt_sync_task.cancel()
         if self.nxt_minute_backfill_task and not self.nxt_minute_backfill_task.done():
             self.nxt_minute_backfill_task.cancel()
+        if self.dart_task and not self.dart_task.done():
+            self.dart_task.cancel()
         if self.n3_task and not self.n3_task.done():
             self.n3_task.cancel()
         if self.minute_refetch_task and not self.minute_refetch_task.done():

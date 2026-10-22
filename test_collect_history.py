@@ -177,6 +177,39 @@ class TestMinuteBackfill(unittest.TestCase):
         self.assertEqual(db.minute, [])                                      # 정규장 분봉 테이블엔 안 씀
         self.assertEqual(db.progress["005930_NX"][3], "no_more")
 
+    def test_nxt_premarket_backfill_uses_own_session_and_key(self):
+        """장전 봉 백필: session=NXT_PRE_SESSION이면 08:00~08:50 봉만 저장, 진행표 키는 '코드_NXP'"""
+        pages = [({"stk_min_pole_chart_qry": minute_items(["20261013195900", "20261013085000", "20261013080000", "20261013090000"])},
+                  {"cont-yn": "N"})]
+        client, db = FakeClient(pages), BackfillDB()
+        db.nxt_minute = []
+
+        async def up(rows): db.nxt_minute += rows
+        db.upsert_nxt_minute_rows = up
+        with mock.patch.object(ch, "get_kst_now", return_value=self.NOW):
+            asyncio.run(ch.backfill_minute_step(client, db, "005930", None, 365, pages=5, nx=True,
+                                                session=ch.NXT_PRE_SESSION, key="005930_NXP"))
+        self.assertEqual(client.calls[0][1]["stk_cd"], "005930_NX")
+        self.assertEqual([r[1] for r in db.nxt_minute], ["20261013085000", "20261013080000"])
+        self.assertIn("005930_NXP", db.progress)
+        self.assertNotIn("005930_NX", db.progress)                           # 애프터 백필 진행표는 건드리지 않음
+
+    def test_nxt_minute_day_saves_premarket_and_after_of_that_day(self):
+        """매일 수집: 그날 장전(08:00~08:50)·애프터(15:30~20:00) 봉만, 전날 봉·정규장 시간 봉은 버리고 전날이 나오면 멈춤"""
+        pages = [({"stk_min_pole_chart_qry": minute_items(["20261022195900", "20261022120000", "20261022084500"])},
+                  {"cont-yn": "Y", "next-key": "K"}),
+                 ({"stk_min_pole_chart_qry": minute_items(["20261022080000", "20261021195900"])}, {"cont-yn": "Y", "next-key": "K2"})]
+        client, db = FakeClient(pages), FakeDB()
+        db.nxt_minute = []
+
+        async def up(rows): db.nxt_minute += rows
+        db.upsert_nxt_minute_rows = up
+        n = asyncio.run(ch.collect_nxt_minute_day(client, db, "005930", "20261022"))
+        self.assertEqual(len(client.calls), 2)                               # 전날 봉이 나온 페이지에서 멈춤
+        self.assertEqual(client.calls[0][1]["base_dt"], "20261022")
+        self.assertEqual(n, 3)
+        self.assertEqual([r[1] for r in db.nxt_minute], ["20261022195900", "20261022084500", "20261022080000"])
+
     def test_nxt_mode_progresses_on_days_without_after_market(self):
         """애프터 체결이 없는 구간도 받은 봉 날짜로 진행 (저장 0행이어도 무진전으로 끝내지 않음)"""
         pages = [({"stk_min_pole_chart_qry": minute_items(["20261010120000", "20261008090000"])}, {"cont-yn": "Y", "next-key": "K"})]

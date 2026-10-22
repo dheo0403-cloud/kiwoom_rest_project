@@ -295,6 +295,86 @@ class DatabaseManager:
             print(f"DB nxt_daily 조회 Error: {e}")
             return set()
 
+    async def ensure_dart(self):
+        """DART 공시(dart_disclosure)와 날짜별 백필 진행표(dart_days) — 없으면 생성. 공시 이벤트 연구용 (dart_disclosure.py)"""
+        if not self.pool: return
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS dart_disclosure (
+                            rcept_no VARCHAR(14) NOT NULL PRIMARY KEY,
+                            rcept_dt VARCHAR(8) NOT NULL,
+                            corp_code VARCHAR(8) NOT NULL,
+                            corp_name VARCHAR(100) NOT NULL,
+                            stock_code VARCHAR(6) NOT NULL DEFAULT '',
+                            corp_cls VARCHAR(1) NOT NULL,
+                            report_nm VARCHAR(300) NOT NULL,
+                            flr_nm VARCHAR(100) NOT NULL DEFAULT '',
+                            rm VARCHAR(20) NOT NULL DEFAULT '',
+                            first_seen_at DATETIME NULL,
+                            KEY idx_stock_dt (stock_code, rcept_dt),
+                            KEY idx_dt (rcept_dt)
+                        )''')
+                    await cursor.execute('''
+                        CREATE TABLE IF NOT EXISTS dart_days (
+                            day VARCHAR(8) NOT NULL PRIMARY KEY,
+                            rows_saved INT NOT NULL,
+                            fetched_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                        )''')
+                await conn.commit()
+        except Exception as e:
+            print(f"DB dart 테이블 생성 Error: {e}")
+
+    async def upsert_dart_rows(self, rows: list) -> bool:
+        """(rcept_no, rcept_dt, corp_code, corp_name, stock_code, corp_cls, report_nm, flr_nm, rm, first_seen_at) 일괄 upsert.
+        first_seen_at은 처음 기록한 값을 유지 (백필의 NULL이 장중에 본 시각을 지우지 않게). 성공 여부 반환"""
+        if not self.pool: return False
+        if not rows: return True
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.executemany('''
+                        INSERT INTO dart_disclosure (rcept_no, rcept_dt, corp_code, corp_name, stock_code, corp_cls,
+                                                     report_nm, flr_nm, rm, first_seen_at)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON DUPLICATE KEY UPDATE report_nm=VALUES(report_nm), rm=VALUES(rm), stock_code=VALUES(stock_code),
+                        first_seen_at=COALESCE(first_seen_at, VALUES(first_seen_at))''', rows)
+                await conn.commit()
+            return True
+        except Exception as e:
+            print(f"DB dart_disclosure 저장 Error: {e}")
+            return False
+
+    async def get_dart_rcept_nos(self, day: str) -> set:
+        """그날 이미 저장한 접수번호"""
+        if not self.pool: return set()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT rcept_no FROM dart_disclosure WHERE rcept_dt = %s", (day,))
+                    return {r['rcept_no'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB dart_disclosure 조회 Error: {e}")
+            return set()
+
+    async def get_dart_days(self) -> set:
+        """백필을 끝낸 날짜"""
+        if not self.pool: return set()
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT day FROM dart_days")
+                    return {r['day'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB dart_days 조회 Error: {e}")
+            return set()
+
+    async def mark_dart_day(self, day: str, rows_saved: int):
+        await self._executemany('''
+            INSERT INTO dart_days (day, rows_saved) VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE rows_saved=VALUES(rows_saved)''', [(day, rows_saved)], "DART Days")
+
     async def get_n3_universe(self, date: str) -> list:
         """N3 대상: 그날 KRX 거래대금 상위 300 보통주(종가 ≥ 1,000원) 중 NXT 종목 — [{code, name, close, value, prev_close}]
         (research/afterhours_explore.py와 같은 대상 정의)"""
