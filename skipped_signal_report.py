@@ -42,6 +42,58 @@ def score(cur, code: str, ymd: str, hhmmss: str, price: float):
     return bars[-1][2] / price - 1 - ROUND_TRIP_COST, "15:15청산"
 
 
+def _day_bars(cur, code: str, ymd: str):
+    """당일 분봉 [(HHMMSS, 고가, 종가)] 시간순"""
+    dash = f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:]}"
+    cur.execute("SELECT datetime, high, close FROM minute_ohlcv WHERE code=%s AND (datetime LIKE %s OR datetime LIKE %s)",
+                (code, ymd + "%", dash + "%"))
+    return sorted((re.sub(r"\D", "", str(dt))[8:14], float(hi), float(cl)) for dt, hi, cl in cur.fetchall())
+
+
+def entry_context(bars, hhmmss: str, price: float):
+    """진입 직전 흐름 (10/26 관찰 entry_far_below_dayhigh·entry_after_runup 재료)
+    → (당일 고점 대비 진입가 비율, 직전 30분 상승률). 진입 분봉 이전 정규장 분봉 기준, 계산 불가면 None"""
+    pre = [b for b in bars if "090000" <= b[0] < hhmmss]
+    if not pre:
+        return None, None
+    dd = price / max(b[1] for b in pre) - 1
+    run = pre[-1][2] / pre[-31][2] - 1 if len(pre) > 30 else None
+    return dd, run
+
+
+def after_exit_max(bars, hhmmss: str, price: float):
+    """청산 후 30분(분봉 30개) 최고가의 청산가 대비 상승률 (관찰 exit_breakeven_early 재료). 분봉이 없으면 None"""
+    after = [b for b in bars if hhmmss < b[0] <= "153000"][:30]
+    return max(b[1] for b in after) / price - 1 if after else None
+
+
+_EXIT_MSG = re.compile(r"\]\s*(.+?)\((\d{6})\)\s*\d+주 @ ([\d,]+)원 \((.+)\)$")
+
+
+def load_exits(start: str) -> pd.DataFrame:
+    """start(YYYYMMDD) 이후 봇 청산(logs '[긴급 매도 주문 접수]', KST)별 사유와 청산 후 30분 최고 상승률"""
+    conn = _connect()
+    rows, bars_cache = [], {}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT timestamp, message FROM logs WHERE timestamp >= %s AND message LIKE %s ORDER BY timestamp",
+                    (start, "%긴급 매도 주문 접수%"))
+        for ts, msg in cur.fetchall():
+            m = _EXIT_MSG.search(msg)
+            if not m:
+                continue
+            name, code, price, reason = m.group(1), m.group(2), float(m.group(3).replace(",", "")), m.group(4)
+            ymd, hhmmss = ts.strftime("%Y%m%d"), ts.strftime("%H%M%S")
+            if (code, ymd) not in bars_cache:
+                bars_cache[(code, ymd)] = _day_bars(cur, code, ymd)
+            rows.append(dict(date=ymd, hhmmss=hhmmss, code=code, name=name, price=price,
+                             reason=re.split(r"\(|_최고", reason)[0],  # 백테스트 청산 사유 분류와 같은 기준
+                             after=after_exit_max(bars_cache[(code, ymd)], hhmmss, price)))
+    finally:
+        conn.close()
+    return pd.DataFrame(rows, columns=["date", "hhmmss", "code", "name", "price", "reason", "after"])
+
+
 def load_scored(start: str) -> pd.DataFrame:
     """start(YYYYMMDD) 이후 거른 신호·실제 매수를 모아 채점한 표 (ret None = 채점 보류)"""
     conn = _connect()
@@ -63,12 +115,44 @@ def load_scored(start: str) -> pd.DataFrame:
                 continue
             seen.add(key)
             rows.append(dict(date=key[0], code=code, name=name, group="실제매수", hhmmss=ts.strftime("%H%M%S"), price=float(price)))
+        bars_cache = {}
         for r in rows:
             res = score(cur, r["code"], r["date"], r["hhmmss"], r["price"])
             r["ret"], r["exit"] = res if res else (None, "분봉없음")
+            key = (r["code"], r["date"])
+            if key not in bars_cache:
+                bars_cache[key] = _day_bars(cur, *key)
+            r["dd_high"], r["run30"] = entry_context(bars_cache[key], r["hhmmss"], r["price"])
     finally:
         conn.close()
-    return pd.DataFrame(rows, columns=["date", "code", "name", "group", "hhmmss", "price", "ret", "exit"])
+    return pd.DataFrame(rows, columns=["date", "code", "name", "group", "hhmmss", "price", "ret", "exit", "dd_high", "run30"])
+
+
+def _dd_bucket(x) -> str:
+    return "미산출" if pd.isna(x) else ("고점-5%이하" if x <= -0.05 else "고점-5%초과")
+
+
+def _run_bucket(x) -> str:
+    return "미산출" if pd.isna(x) else ("직전30분+2%이상" if x >= 0.02 else "직전30분+1~2%" if x >= 0.01 else "직전30분+1%미만")
+
+
+def context_sections(df: pd.DataFrame, exits: pd.DataFrame, label: str) -> list:
+    """진입 직전 흐름별 채점 성적과 청산 사유별 청산 후 흐름 (10/26 관찰 3건의 누적 재료)"""
+    d = df.copy()
+    d["kind"] = d["group"].where(d["group"] == "실제매수", "거른신호")
+    d["고점대비"] = d["kind"] + "|" + d["dd_high"].map(_dd_bucket)
+    d["직전30분"] = d["kind"] + "|" + d["run30"].map(_run_bucket)
+    lines = [_breakdown(d, "고점대비", f"■ {label} 진입가의 당일 고점 대비 (entry_far_below_dayhigh)"),
+             _breakdown(d, "직전30분", f"■ {label} 진입 직전 30분 상승률 (entry_after_runup)")]
+    e = exits.dropna(subset=["after"])
+    if e.empty:
+        lines.append(f"■ {label} 청산 후 30분 흐름 (exit_breakeven_early): (없음)")
+    else:
+        g = e.groupby("reason")["after"]
+        out = pd.DataFrame({"건수": g.size(), "청산후최고평균%": g.mean() * 100,
+                            "청산가+1%이상비율%": g.apply(lambda s: (s >= 0.01).mean() * 100)})
+        lines.append(f"■ {label} 청산 사유별 청산 후 30분 최고가 (exit_breakeven_early)\n{out.round(2).to_string()}")
+    return lines
 
 
 def summarize(df: pd.DataFrame) -> str:
@@ -93,6 +177,15 @@ def build_daily_report(days: int = 20) -> str:
     for r in td[td["group"] != "실제매수"].sort_values("hhmmss").itertuples():
         ret = f"{r.ret:+.2%}" if pd.notna(r.ret) else "-"
         lines.append(f"  {r.hhmmss[:4]} {r.name}({r.code}) {int(r.price):,}원 {r.group} → {ret} {r.exit}")
+    pct = lambda x: f"{x:+.2%}" if pd.notna(x) else "-"
+    lines.append("■ 오늘 실제 매수 진입 직전 흐름 (당일 고점 대비 / 직전 30분)")
+    for r in td[td["group"] == "실제매수"].sort_values("hhmmss").itertuples():
+        lines.append(f"  {r.hhmmss[:4]} {r.name}({r.code}) {int(r.price):,}원 고점대비 {pct(r.dd_high)} / 직전30분 {pct(r.run30)}")
+    exits = load_exits((now - timedelta(days=days)).strftime("%Y%m%d"))
+    lines.append("■ 오늘 청산 후 30분 최고가 (청산가 대비)")
+    for r in exits[exits["date"] == today].itertuples():
+        lines.append(f"  {r.hhmmss[:4]} {r.name}({r.code}) {int(r.price):,}원 {r.reason} → {pct(r.after)}")
+    lines += context_sections(df, exits, f"최근 {days}일")
     lines += [f"■ 최근 {days}일 누적", summarize(df),
               f"채점 보류(분봉 없음·미완료): 오늘 {int(td['ret'].isna().sum())}건 / 누적 {int(df['ret'].isna().sum())}건",
               f"그룹 표본 {MIN_SAMPLE}건 미만이면 그룹 간 차이로 결론 내지 않는다."]
@@ -123,6 +216,7 @@ def build_weekly_report(weeks: int = 4) -> str:
              _breakdown(buys, "exit", "■ 이번 주 실제 매수 — 청산 사유별"),
              f"■ 최근 {weeks}주 누적", summarize(df),
              _breakdown(df[df["group"] == "실제매수"], "hour", f"■ 최근 {weeks}주 실제 매수 — 진입 시간대별"),
+             *context_sections(df, load_exits((now - timedelta(weeks=weeks)).strftime("%Y%m%d")), f"최근 {weeks}주"),
              f"채점 보류: 이번 주 {int(wk['ret'].isna().sum())}건 / 누적 {int(df['ret'].isna().sum())}건"]
     return "\n".join(lines)
 

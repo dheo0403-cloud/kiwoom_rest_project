@@ -293,7 +293,7 @@ class AdaptiveVolatilityBreakoutStrategy:
                 if sell_stage >= 1 or highest_p >= buy_price * (1.0 + self.breakeven_trigger_pct):
                     chandelier_stop = max(buy_price * (1.0 + self.breakeven_buffer_pct), chandelier_stop)
 
-                if current_price <= chandelier_stop and highest_p >= buy_price * 1.015:
+                if current_price <= chandelier_stop:  # 가동 조건은 위 trailing_activation_pct (기존 1.015 고정값 = 기본값)
                     return "SELL_ALL", f"샹들리에_트레일링스탑_최고{int(highest_p):,}원→스탑{int(chandelier_stop):,}원({profit_rate:.2%})"
 
         # 5. 🎯 (옵션) ATR R-배수 및 단계별 분할 익절 (use_trailing_stop_only=False 일 때만 작동)

@@ -204,6 +204,23 @@ def test_scorecard_scoring_rules():
     assert score(Cur([("20261012110000", 9900.0, 9950.0)]), "A", "20261012", "100000", 10000.0) is None
 
 
+def test_scorecard_entry_context_and_exit_followup():
+    """진입 직전 흐름(고점 대비·직전 30분)은 진입 분봉 이전만, 청산 후 흐름은 이후 30개 분봉만 본다 (10/26 관찰 재료)"""
+    from skipped_signal_report import entry_context, after_exit_max, _EXIT_MSG
+    bars = [(f"09{m:02d}00", 100.0 + m, 100.0 + m) for m in range(40)]  # 09:00~09:39, 고가=종가=100+분
+    dd, run = entry_context(bars, "093500", 120.0)
+    assert abs(dd - (120.0 / 134.0 - 1)) < 1e-9  # 09:34 고가 134까지만 (진입 분봉 09:35 제외)
+    assert abs(run - (134.0 / 104.0 - 1)) < 1e-9  # 직전 분봉 종가 / 30분 전 종가
+    assert entry_context(bars, "090500", 100.0)[1] is None  # 30분 미만이면 상승률 미산출
+    assert entry_context(bars, "085900", 100.0) == (None, None)
+    assert abs(after_exit_max(bars, "093000", 130.0) - (139.0 / 130.0 - 1)) < 1e-9
+    assert after_exit_max(bars, "093900", 130.0) is None
+    m = _EXIT_MSG.search("🚨 [긴급 매도 주문 접수] 삼성 인버스 2X 코스피200 선물 ETN B(530148) 1주 @ 47,550원 "
+                         "(본절스탑_손실전환방어(최고2,190원→현재2,160원, 0.00%))")
+    assert m.group(1, 2, 3) == ("삼성 인버스 2X 코스피200 선물 ETN B", "530148", "47,550")
+    assert m.group(4).startswith("본절스탑_손실전환방어")
+
+
 async def test_buy_held_when_core_indicators_missing(monkeypatch):
     """ADX/VWAP 미산출(0)이면 진입 보류, 시간필터 skip 모드(데모/테스트)는 기존 동작"""
     import strategy
