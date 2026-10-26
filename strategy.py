@@ -62,7 +62,8 @@ class AdaptiveVolatilityBreakoutStrategy:
                  use_trailing_stop_only: bool = True,
                  breakeven_buffer_pct: float = 0.0025,
                  disabled_filters=(),
-                 max_hold_days: int = 0):
+                 max_hold_days: int = 0,
+                 min_hard_stop_pct: float = 0.0):
         self.db = db_manager
         self.buffer = buffer_manager
         self.k_breakout = k_breakout
@@ -79,6 +80,7 @@ class AdaptiveVolatilityBreakoutStrategy:
             raise ValueError(f"알 수 없는 필터: {sorted(unknown)}")
         self.disabled_filters = set(disabled_filters)            # 실험용으로 끈 매수 필터 (기본: 모두 사용)
         self.max_hold_days = max_hold_days                      # 0 = 당일 청산(실거래 기본), N = 보유 N거래일째 15:15 청산(백테스트 실험)
+        self.min_hard_stop_pct = min_hard_stop_pct              # ATR 스탑 거리 하한(매수가 대비), 0 = 하한 없음
 
     def set_buffer_manager(self, buffer_manager):
         """인메모리 링버퍼 매니저 설정"""
@@ -252,6 +254,8 @@ class AdaptiveVolatilityBreakoutStrategy:
 
         # 1. 🚨 [최우선] 엄격한 하드 스탑로스 (-3.0% 도달 시 CRITICAL 즉시 긴급 손절)
         hard_stop_distance = (self.atr_hard_stop_mult * atr14) if atr14 > 0 else (buy_price * 0.03)
+        # 분봉 ATR이 호가 차이보다 좁으면 1~2호가 잡음에 손절되므로 최소 폭을 둔다 (−3% 하드 손절은 그대로)
+        hard_stop_distance = max(hard_stop_distance, buy_price * self.min_hard_stop_pct)
         hard_stop_price = buy_price - hard_stop_distance
 
         if current_price <= hard_stop_price or profit_rate <= self.hard_stop_loss_rate:

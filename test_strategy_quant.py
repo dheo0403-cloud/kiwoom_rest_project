@@ -74,6 +74,19 @@ class TestAdaptiveQuantStrategy(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(action, "SELL_ALL")
         self.assertIn("ATR_하드스탑로스", reason)
 
+    async def test_min_hard_stop_pct_widens_narrow_atr_stop(self):
+        """ATR 스탑이 매수가 대비 최소 폭보다 좁으면 최소 폭까지 넓혀 1~2호가 잡음 손절을 막는지 검증"""
+        ind = {'atr14': 20.0, 'skip_time_filter': True}  # 2.0 × 20 = 40원 (0.1%)
+        action, _ = await self.strategy.check_sell_signal(code="381180", buy_price=40000, current_price=39950, ind=ind)
+        self.assertEqual(action, "SELL_ALL")  # 하한 없음(기본): 50원 하락에 손절
+
+        self.strategy.min_hard_stop_pct = 0.005  # 하한 200원
+        action, _ = await self.strategy.check_sell_signal(code="381180", buy_price=40000, current_price=39850, ind=ind)
+        self.assertEqual(action, "WAIT")
+        action, reason = await self.strategy.check_sell_signal(code="381180", buy_price=40000, current_price=39800, ind=ind)
+        self.assertEqual(action, "SELL_ALL")
+        self.assertIn("스탑가:39,800원", reason)
+
     async def test_chandelier_trailing_stop_signal(self):
         """샹들리에 엑시트(최고가 대비 -2.5 ATR) 트레일링 스탑 검증"""
         self.strategy.trailing_stop_drop_rate = -0.10  # 샹들리에 스탑 단독 검증용 버퍼 설정
