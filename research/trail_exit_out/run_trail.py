@@ -28,6 +28,6 @@ def run(job):
     print(f"{code} {var} rc={rc} {time.time() - t:.0f}s", flush=True)
     return path, rc
 
-with ThreadPoolExecutor(6) as ex:
+with ThreadPoolExecutor(int(os.getenv("TRAIL_WORKERS", "2"))) as ex:  # 10/26 동시 6개는 메모리 부족으로 중단됨
     list(ex.map(run, jobs))
 print("ALL DONE", flush=True)
