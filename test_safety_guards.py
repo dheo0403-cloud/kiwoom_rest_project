@@ -788,6 +788,21 @@ def test_api_control_does_not_start_second_trading_loop():
     assert db.saved[-1][1] == {"paused": 1}
 
 
+def test_api_status_follows_engine_pause_state():
+    """화면 엔진 상태는 API 서버 메모리가 아니라 오늘 bot_state.paused 기준 (10/26 장중 재시작 뒤 '엔진 정지됨' 표시 사례)"""
+    db = _StateDB()
+    ctx.client, ctx.db = MockKiwoomClient(), db
+    ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=db)
+    assert not ctx.bot.running  # API 서버 기동 직후 메모리 값은 정지
+    c = TestClient(app)
+    assert c.get("/api/status").json()["running"] is True  # 오늘 지시 없음 = 엔진 가동
+    assert c.get("/api/health").json()["bot_running"] is True
+    db.state = {"paused": 1}  # 대시보드 STOP·킬스위치
+    body = c.get("/api/status").json()
+    assert body["running"] is False and body["is_paused"] is True
+
+
 async def test_trading_engine_follows_remote_pause(monkeypatch):
     """매매 엔진: 오늘 paused=1이면 재시작해도 정지 유지, 매매 루프는 첫 회차에 멈추고, paused=0(START)이면 대기 중 재개"""
     from datetime import datetime

@@ -464,12 +464,21 @@ async def require_api_token(x_api_token: Optional[str] = Header(default=None)):
 # ================= REST 엔드포인트 라우터 정의 =================
 api_router = APIRouter()
 
+async def _engine_running() -> bool:
+    """화면 표시용 매매 엔진 상태 — 엔진이 따르는 오늘 bot_state.paused 기준
+    - API 서버 메모리(ctx.bot.running)는 08:50 웨이크업·START 전까지 False라, 장중 재시작 뒤 실제와 달라짐 (10/26 사례)
+    - 오늘 지시 없음 = 가동. DB 조회 실패도 지시 없음으로 보며, 매매 엔진(_remote_paused)과 같은 기준
+    - bot_state를 지원하지 않는 DB(테스트 목 등)면 기존처럼 메모리 값"""
+    if not hasattr(ctx.bot.db, 'load_bot_state'):
+        return ctx.bot.running
+    return not await ctx.bot._remote_paused()
+
 @api_router.get("/health")
 async def health_check():
     """서버 및 핵심 컴포넌트 헬스체크"""
     return {
         "status": "healthy",
-        "bot_running": ctx.bot.running if ctx.bot else False,
+        "bot_running": (await _engine_running()) if ctx.bot else False,
         "db_connected": (getattr(ctx.db, 'pool', None) is not None) if ctx.db else False,
         "mode": "DEMO" if (ctx.client and ctx.client.is_demo) else "REAL"
     }
@@ -494,9 +503,10 @@ async def get_bot_status():
         except Exception:
             circuit_open = False
 
+    running = await _engine_running()
     return {
-        "running": ctx.bot.running,
-        "is_paused": getattr(ctx.bot, 'is_paused', False),
+        "running": running,
+        "is_paused": not running,
         "is_demo": ctx.bot.is_demo,
         "market_filter_passed": ctx.bot.market_filter_passed,
         "kodex200_change_rate": ctx.bot.kodex200_change_rate,

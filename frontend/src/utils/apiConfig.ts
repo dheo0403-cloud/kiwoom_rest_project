@@ -48,6 +48,13 @@ function saveToken(token: string): void {
   try { window.localStorage.setItem(TOKEN_KEY, token); } catch { /* 저장 불가 환경이면 이번 요청에만 사용 */ }
 }
 
+function clearToken(): void {
+  try { window.localStorage.removeItem(TOKEN_KEY); } catch { /* 무시 */ }
+}
+
+// 헤더에 넣을 수 있는 값(공백 없는 ASCII)만 허용 — 한글 등이 섞이면 fetch가 요청 전에 TypeError로 실패한다 (10/26 사례)
+const VALID_TOKEN = /^[\x21-\x7E]+$/;
+
 export async function postApi(endpoint: string, body?: unknown): Promise<Response> {
   const send = (token: string) => fetch(getApiUrl(endpoint), {
     method: 'POST',
@@ -57,10 +64,22 @@ export async function postApi(endpoint: string, body?: unknown): Promise<Respons
     },
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
-  const res = await send(readToken());
+  // 예전에 저장된 잘못된 값은 버리고 서버가 401을 주면 다시 입력받는다
+  let saved = readToken();
+  if (saved && !VALID_TOKEN.test(saved)) {
+    clearToken();
+    saved = '';
+  }
+  const res = await send(saved);
   if (res.status !== 401) return res;
-  const entered = window.prompt('API 인증 토큰을 입력하세요 (이 브라우저에 저장됩니다)');
+  clearToken();
+  const entered = window.prompt('API 인증 토큰을 입력하세요 (이 브라우저에 저장됩니다)')?.trim();
   if (!entered) return res;
-  saveToken(entered.trim());
-  return send(entered.trim());
+  if (!VALID_TOKEN.test(entered)) {
+    alert('토큰에 쓸 수 없는 문자(한글·공백 등)가 있습니다. 영문·숫자로 된 토큰 한 줄만 붙여 넣으세요.');
+    return res;
+  }
+  const retry = await send(entered);
+  if (retry.status !== 401) saveToken(entered);  // 서버가 받아들인 토큰만 저장
+  return retry;
 }
