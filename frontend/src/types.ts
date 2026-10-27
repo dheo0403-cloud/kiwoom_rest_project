@@ -20,6 +20,13 @@ export interface ClosedTrade {
   return_pct: number;
   timestamp: string; // 매도 접수 시각 KST 'MM-DD HH:MM'
   strategy?: '장중' | 'N3';
+  buy_timestamp?: string; // 매수 접수 시각 KST 'MM-DD HH:MM'
+}
+
+export interface N3Summary {
+  trades: number;
+  wins: number;
+  pnl: number;
 }
 
 export interface EquityHistoryPoint {
@@ -42,6 +49,8 @@ export interface QuantPerformanceMetrics {
   total_profit: number;
   total_loss: number;
   recent_closed_trades: ClosedTrade[];
+  recent_n3_trades?: ClosedTrade[];
+  n3_summary?: N3Summary;
   equity_history: EquityHistoryPoint[];
 }
 

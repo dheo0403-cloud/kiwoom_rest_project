@@ -397,7 +397,11 @@ def test_trade_metrics_n3_lifo_and_kst_time():
     n3, a = m["recent_closed_trades"]
     assert (a["strategy"], a["buy_price"], a["timestamp"]) == ("장중", 32055, "10-22 09:54")
     assert (n3["strategy"], n3["buy_price"], n3["timestamp"]) == ("N3", 55500, "10-21 08:55")
+    assert n3["buy_timestamp"] == "10-20 19:50"
     assert m["total_trades"] == 2
+    # N3 전용 목록·요약 (장중 거래에 밀리지 않도록 따로 전달)
+    assert [t["strategy"] for t in m["recent_n3_trades"]] == ["N3"]
+    assert m["n3_summary"] == {"trades": 1, "wins": 1, "pnl": n3["pnl"]}
 
 
 def test_parse_unexecuted_orders_ka10075_schema():

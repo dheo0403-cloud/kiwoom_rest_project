@@ -1059,6 +1059,8 @@ class DatabaseManager:
             "total_profit": 0.0,
             "total_loss": 0.0,
             "recent_closed_trades": [],
+            "recent_n3_trades": [],
+            "n3_summary": {"trades": 0, "wins": 0, "pnl": 0.0},
             "equity_history": []
         }
 
@@ -1242,9 +1244,10 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
         strategy = 'N3' if r['side'].startswith('N3_') else '장중'
         book = (strategy, r['code'])
         if r['side'] in ('BUY', 'N3_BUY'):
-            lots.setdefault(book, []).append({'qty': r['qty'], 'price': r['price']})
+            lots.setdefault(book, []).append({'qty': r['qty'], 'price': r['price'], 'ts': r['timestamp']})
         elif r['side'] in ('SELL', 'N3_SELL') and lots.get(book):
             rem, cost, matched = r['qty'], 0.0, 0
+            buy_ts = lots[book][-1]['ts']  # 가장 최근 매수 접수 시각(LIFO 첫 매칭분)
             while rem > 0 and lots[book]:
                 lot = lots[book][-1]
                 take = min(rem, lot['qty'])
@@ -1264,6 +1267,7 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
                     'pnl': round(net_pnl, 0),
                     'return_pct': round(((r['price'] / avg_buy) - 1.0) * 100.0, 2) if avg_buy > 0 else 0.0,
                     'timestamp': r['timestamp'],
+                    'buy_timestamp': buy_ts,
                 })
 
     wins = [t for t in closed_trades if t['pnl'] > 0]
@@ -1278,6 +1282,9 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
         peak = max(peak, cum)
         mdd_amount = min(mdd_amount, cum - peak)
 
+    # N3는 하루 0~몇 건이라 장중 거래에 밀려 최근 목록에서 빠지므로 따로 전달
+    n3 = [t for t in closed_trades if t['strategy'] == 'N3']
+
     return {
         "daily_return_pct": 0.0,
         "cumulative_realized_pnl": round(cum, 0),
@@ -1290,5 +1297,11 @@ def compute_trade_metrics(orders, recent_limit: int = 10) -> dict:
         "total_profit": round(tot_profit, 0),
         "total_loss": round(tot_loss, 0),
         "recent_closed_trades": list(reversed(closed_trades[-recent_limit:])),
+        "recent_n3_trades": list(reversed(n3[-5:])),
+        "n3_summary": {
+            "trades": len(n3),
+            "wins": sum(1 for t in n3 if t['pnl'] > 0),
+            "pnl": round(sum(t['pnl'] for t in n3), 0),
+        },
         "equity_history": [],
     }

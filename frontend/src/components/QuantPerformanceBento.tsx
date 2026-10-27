@@ -103,6 +103,12 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
   // 당일(KST) 매도분만 표시 — timestamp는 서버가 준 KST 'MM-DD HH:MM'
   const todayMd = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Seoul' }).slice(5);
   const recentTrades: ClosedTrade[] = (safePerf.recent_closed_trades || []).filter((t) => t.timestamp?.startsWith(todayMd));
+  // N3(저녁 매수 → 다음 날 시가 매도)는 매도한 날에만 위 목록에 나오므로 최근 건을 따로 표시
+  const n3Trades: ClosedTrade[] = safePerf.recent_n3_trades || [];
+  const n3Summary = safePerf.n3_summary;
+  const pnlColor = (win: boolean) => win
+    ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
+    : (colorMode === 'KRX' ? 'text-blue-400' : 'text-rose-400');
 
   return (
     <div className="bento-card p-4 flex flex-col bg-slate-900/80 border border-slate-800 mb-3.5 relative overflow-hidden">
@@ -335,9 +341,7 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
             ) : (
               recentTrades.map((trade, idx) => {
                 const isWin = (trade.pnl || 0) >= 0;
-                const pColor = isWin
-                  ? (colorMode === 'KRX' ? 'text-rose-400' : 'text-emerald-400')
-                  : (colorMode === 'KRX' ? 'text-blue-400' : 'text-rose-400');
+                const pColor = pnlColor(isWin);
 
                 return (
                   <div key={idx} className="flex items-center justify-between bg-slate-900/60 px-2.5 py-1.5 rounded text-[11px] border border-slate-800/60 font-mono">
@@ -360,6 +364,49 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
                   </div>
                 );
               })
+            )}
+          </div>
+
+          {/* 최근 N3 실거래 (저녁 매수 → 다음 날 09:00 시가 매도) */}
+          <div className="mt-2.5 pt-2 border-t border-slate-800">
+            <div className="flex items-center justify-between text-[11px] mb-1.5">
+              <span className="font-bold text-indigo-300">최근 N3 실거래</span>
+              {n3Summary && n3Summary.trades > 0 && (
+                <span className="text-[10px] text-slate-400 font-mono">
+                  {n3Summary.trades}건 · {n3Summary.wins}승 ·{' '}
+                  <strong className={pnlColor(n3Summary.pnl >= 0)}>
+                    {n3Summary.pnl >= 0 ? '+' : ''}{Math.round(n3Summary.pnl).toLocaleString()}원
+                  </strong>
+                </span>
+              )}
+            </div>
+            {n3Trades.length === 0 ? (
+              <div className="py-1 text-center text-slate-500 text-[11px]">N3 청산 내역이 없습니다.</div>
+            ) : (
+              <div className="space-y-1">
+                {n3Trades.map((trade) => {
+                  const isWin = (trade.pnl || 0) >= 0;
+                  const pColor = pnlColor(isWin);
+                  return (
+                    <div key={`${trade.code}-${trade.timestamp}`} className="flex items-center justify-between bg-slate-900/60 px-2.5 py-1 rounded text-[11px] border border-indigo-500/20 font-mono">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {/* 좁은 화면은 날짜만(MM-DD→MM-DD), 넓은 화면은 시각까지 */}
+                        <span className="text-[10px] text-slate-500 shrink-0 sm:hidden">
+                          {trade.buy_timestamp ? `${trade.buy_timestamp.slice(0, 5)}→` : ''}{trade.timestamp.slice(0, 5)}
+                        </span>
+                        <span className="text-[10px] text-slate-500 shrink-0 hidden sm:inline">
+                          {trade.buy_timestamp ? `${trade.buy_timestamp} → ` : ''}{trade.timestamp}
+                        </span>
+                        <span className="text-white font-bold truncate">{trade.name || trade.code}</span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className={`font-bold ${pColor}`}>{isWin ? '+' : ''}{(trade.return_pct || 0).toFixed(2)}%</span>
+                        <span className={`text-[10px] ${pColor}`}>({isWin ? '+' : ''}{Math.round(trade.pnl || 0).toLocaleString()}원)</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
         </div>
