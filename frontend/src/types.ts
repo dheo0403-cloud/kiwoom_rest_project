@@ -37,6 +37,46 @@ export interface EquityHistoryPoint {
   yield: number;
 }
 
+// 포탈 '모의계좌' 탭 (/api/mock/summary — 모의 TOM 봇 DB 읽기 전용, 시각은 KST 문자열)
+export interface MockTomPosition {
+  code: string;
+  name: string;
+  qty: number;
+  entry_ts: string;
+  planned_exit?: string;
+}
+
+export interface MockOrder {
+  id: number;
+  code: string;
+  name: string;
+  side: string;
+  qty: number;
+  price: number;
+  timestamp: string;
+}
+
+export interface MockLog {
+  id: number;
+  level: string;
+  message: string;
+  timestamp: string;
+}
+
+export interface MockSummary {
+  configured: boolean;
+  db?: string;
+  error?: string;
+  hold_days?: number;
+  slots?: number;
+  next_month_end?: string;
+  balance?: EquityHistoryPoint[];
+  positions?: Position[];
+  orders?: MockOrder[];
+  logs?: MockLog[];
+  tom_open?: MockTomPosition[];
+}
+
 export interface QuantPerformanceMetrics {
   daily_return_pct: number;
   cumulative_realized_pnl: number;

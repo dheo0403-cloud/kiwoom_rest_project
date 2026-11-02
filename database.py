@@ -1207,6 +1207,40 @@ class DatabaseManager:
             print(f"DB Logs 조회 에러: {e}")
             return []
 
+    async def get_mock_summary(self, mock_db: str, log_limit: int = 50) -> dict:
+        """포탈 '모의계좌' 탭용 모의 DB 읽기 (식별자 검사 끝난 이름): 잔고 추이·보유·주문·로그·TOM 보유 기록.
+        시각은 KST 'YYYY-MM-DD HH:MM:SS' 문자열 (order_history는 UTC로 저장돼 +9시간). DB가 없거나 오류면 {'error': ...}"""
+        if not self.pool: return {"error": "DB 연결 없음"}
+        db = f"`{mock_db}`"
+        kst = lambda t: (t + timedelta(hours=9)).strftime('%Y-%m-%d %H:%M:%S') if t else None
+        fmt = lambda t: t.strftime('%Y-%m-%d %H:%M:%S') if hasattr(t, 'strftime') else (str(t) if t else None)
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute(f"SELECT date, total_asset, deposit, profit_loss, yield FROM {db}.balance ORDER BY date DESC LIMIT 90")
+                    balance = [dict(r) for r in await cursor.fetchall()]
+                    await cursor.execute(f"SELECT code, name, qty, buy_price, current_price FROM {db}.portfolio")
+                    positions = [dict(r) for r in await cursor.fetchall()]
+                    await cursor.execute(f"SELECT id, code, name, side, qty, price, timestamp FROM {db}.order_history ORDER BY id DESC LIMIT 50")
+                    orders = [{**dict(r), "timestamp": kst(r["timestamp"])} for r in await cursor.fetchall()]
+                    await cursor.execute(f"SELECT id, level, message, timestamp FROM {db}.logs ORDER BY id DESC LIMIT %s", (log_limit,))
+                    logs = [{**dict(r), "timestamp": fmt(r["timestamp"])} for r in await cursor.fetchall()]
+                    await cursor.execute(f'''
+                        SELECT b.code, MAX(b.name) AS name, SUM(b.qty) AS qty, MIN(b.timestamp) AS entry_ts
+                        FROM {db}.order_history b
+                        WHERE b.side = 'TOM_BUY'
+                          AND NOT EXISTS (SELECT 1 FROM {db}.order_history s WHERE s.code = b.code
+                                          AND s.side = 'TOM_SELL' AND s.timestamp > b.timestamp)
+                        GROUP BY b.code''')
+                    tom_open = [{**dict(r), "entry_ts": kst(r["entry_ts"])} for r in await cursor.fetchall()]
+            for r in balance:
+                r["date"] = fmt(r["date"])
+            balance.reverse()  # 날짜 오름차순 (차트용)
+            return {"balance": balance, "positions": positions, "orders": orders, "logs": logs, "tom_open": tom_open}
+        except Exception as e:
+            print(f"DB 모의 요약 조회 Error: {e}")
+            return {"error": str(e)[:200]}
+
     # ================= 동기 버전 (Dashboard 용) =================
     def add_manual_order_sync(self, code, side, qty):
         """(동기) 대시보드에서 수동 주문 접수"""

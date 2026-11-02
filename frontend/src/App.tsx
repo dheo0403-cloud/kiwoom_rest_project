@@ -10,6 +10,7 @@ import { TradingViewChartBento } from './components/TradingViewChartBento';
 import { AccountSideBento } from './components/AccountSideBento';
 import { EmergencyModal } from './components/EmergencyModal';
 import { ParamsModal } from './components/ParamsModal';
+import { MockAccountView } from './components/MockAccountView';
 import { useTradingWebSocket } from './hooks/useWebSocket';
 import { WatchlistItem } from './types';
 import { getApiUrl, postApi } from './utils/apiConfig';
@@ -36,6 +37,14 @@ export function App() {
   const [isKillSwitchOpen, setIsKillSwitchOpen] = useState<boolean>(false);
   const [isParamsOpen, setIsParamsOpen] = useState<boolean>(false);
   const [isTriggeringKill, setIsTriggeringKill] = useState<boolean>(false);
+  // 화면 탭: 실계좌(기존 화면) / 모의계좌(TOM). 마지막 선택만 이 브라우저에 기억
+  const [view, setView] = useState<'live' | 'mock'>(() => {
+    try { return window.localStorage.getItem('kiwoom_view') === 'mock' ? 'mock' : 'live'; } catch { return 'live'; }
+  });
+  const selectView = (v: 'live' | 'mock') => {
+    setView(v);
+    try { window.localStorage.setItem('kiwoom_view', v); } catch { /* 저장 불가 환경이면 이번 화면에만 */ }
+  };
 
   // Fetch watchlist from REST API
   const fetchWatchlist = async () => {
@@ -133,6 +142,19 @@ export function App() {
 
       {/* Main Cockpit Container */}
       <main className="flex-1 p-2.5 sm:p-4 max-w-[1920px] w-full mx-auto flex flex-col">
+        {/* 화면 탭: 실계좌 / 모의계좌 */}
+        <div className="flex gap-1.5 mb-3" role="tablist">
+          {([['live', '실계좌'], ['mock', '모의계좌 (TOM)']] as const).map(([v, label]) => (
+            <button key={v} role="tab" aria-selected={view === v} data-testid={`tab-${v}`} onClick={() => selectView(v)}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold border transition-colors ${view === v
+                ? (v === 'mock' ? 'bg-violet-500/15 border-violet-500/40 text-violet-200' : 'bg-blue-500/15 border-blue-500/40 text-blue-200')
+                : 'border-white/10 text-slate-400 hover:text-slate-200'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {view === 'mock' ? <MockAccountView colorMode={colorMode} /> : <>
         {/* 1. 4-Card Top Bento KPI Metrics */}
         <KpiMetricsRow portfolio={displayPortfolio} colorMode={colorMode} strategyParams={botStatus.strategy_params} />
 
@@ -206,6 +228,7 @@ export function App() {
             </div>
           </div>
         </div>
+        </>}
       </main>
 
       {/* Modals */}

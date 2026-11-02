@@ -57,6 +57,22 @@ def trading_days_after(start: date, end: date, is_holiday: Callable[[datetime], 
     return n
 
 
+def add_trading_days(start: date, n: int, is_holiday: Callable[[datetime], bool]) -> date:
+    """start 뒤 n번째 거래일 (예정 청산일 표시용)"""
+    d = start
+    for _ in range(n):
+        d = next_trading_day(d, is_holiday)
+    return d
+
+
+def next_month_end(day: date, is_holiday: Callable[[datetime], bool]) -> date:
+    """day(포함) 이후 첫 월말 거래일 (다음 판단일 표시용)"""
+    d = day
+    while is_holiday(datetime(d.year, d.month, d.day)) or not is_month_end(d, is_holiday):
+        d += timedelta(days=1)
+    return d
+
+
 def _frames(rows):
     """[(code, 'YYYYMMDD', close, value)] → (거래대금, 종가) 날짜×종목 표"""
     df = pd.DataFrame(rows, columns=["code", "date", "close", "value"])

@@ -28,6 +28,7 @@ from database import DatabaseManager, format_kst_time_str, get_kst_now
 from main_rest_async import AsyncTradingBot
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
 from indicators import TechnicalIndicators
+import tom_trader
 
 # ================= Pydantic 요청/응답 모델 =================
 
@@ -837,6 +838,31 @@ async def get_recent_logs_endpoint(limit: int = 100):
         logs = await ctx.db.get_recent_logs(limit=limit)
         return {"logs": logs, "count": len(logs)}
     return {"logs": [], "count": 0}
+
+
+def _mock_db_name() -> Optional[str]:
+    """모의 TOM 봇의 DB 이름 (MOCK_DB_NAME, 식별자만 허용 — SQL에 그대로 들어감). 없으면 None"""
+    name = os.getenv("MOCK_DB_NAME", "").strip()
+    return name if re.fullmatch(r"[A-Za-z0-9_]+", name) else None
+
+
+@api_router.get("/mock/summary")
+async def get_mock_summary():
+    """포탈 '모의계좌' 탭: 모의 TOM 봇의 DB를 읽기만 (주문·제어 없음). 실계좌 봇·DB에는 영향 없음"""
+    name = _mock_db_name()
+    if not name:
+        return {"configured": False}
+    if not ctx.db or not hasattr(ctx.db, 'get_mock_summary'):
+        return {"configured": True, "db": name, "error": "DB 연결 없음"}
+    data = await ctx.db.get_mock_summary(name)
+    hol = AsyncTradingBot.is_korean_market_holiday
+    today = get_kst_now().date()
+    for p in data.get("tom_open", []):
+        if p.get("entry_ts"):
+            entry = datetime.strptime(p["entry_ts"][:10], "%Y-%m-%d").date()
+            p["planned_exit"] = tom_trader.add_trading_days(entry, tom_trader.HOLD_DAYS, hol).isoformat()
+    return {"configured": True, "db": name, "hold_days": tom_trader.HOLD_DAYS, "slots": tom_trader.SLOTS,
+            "next_month_end": tom_trader.next_month_end(today, hol).isoformat(), **data}
 
 
 @api_router.post("/order/manual", dependencies=[Depends(require_api_token)])

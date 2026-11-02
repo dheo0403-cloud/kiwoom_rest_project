@@ -25,6 +25,39 @@ def test_trading_days_after_counts_holidays():
     assert tt.trading_days_after(date(2026, 12, 24), date(2026, 12, 28), H) == 1
 
 
+def test_schedule_helpers():
+    assert tt.add_trading_days(date(2026, 11, 30), 15, H) == date(2026, 12, 21)
+    assert tt.next_month_end(date(2026, 11, 2), H) == date(2026, 11, 30)
+    assert tt.next_month_end(date(2026, 11, 30), H) == date(2026, 11, 30)
+    assert tt.next_month_end(date(2026, 12, 1), H) == date(2026, 12, 30)
+
+
+def test_mock_summary_api_read_only(monkeypatch):
+    """모의계좌 탭 API: MOCK_DB_NAME이 없거나 식별자가 아니면 꺼짐, 있으면 모의 DB 읽기 + 예정 청산일·다음 월말"""
+    from fastapi.testclient import TestClient
+    from api_server import app, ctx
+
+    class _SumDB:
+        called = None
+
+        async def get_mock_summary(self, name):
+            _SumDB.called = name
+            return {"balance": [], "positions": [], "orders": [], "logs": [],
+                    "tom_open": [{"code": "111110", "name": "가", "qty": 3, "entry_ts": "2026-11-30 15:21:05"}]}
+
+    ctx.db = _SumDB()
+    c = TestClient(app)
+    monkeypatch.delenv("MOCK_DB_NAME", raising=False)
+    assert c.get("/api/mock/summary").json() == {"configured": False}
+    monkeypatch.setenv("MOCK_DB_NAME", "x; DROP TABLE logs")
+    assert c.get("/api/mock/summary").json() == {"configured": False}
+    monkeypatch.setenv("MOCK_DB_NAME", "kiwoom_mock_db")
+    body = c.get("/kiwoom/api/mock/summary").json()
+    assert _SumDB.called == "kiwoom_mock_db" and body["configured"] and body["hold_days"] == 15
+    assert body["tom_open"][0]["planned_exit"] == "2026-12-21"
+    assert body["next_month_end"] >= "2026-11-30"
+
+
 def _rows(days, spec):
     """spec: {code: (close_fn(i, d), value_fn(i, d))}"""
     return [(c, d, cf(i, d), vf(i, d)) for i, d in enumerate(days) for c, (cf, vf) in spec.items()]
