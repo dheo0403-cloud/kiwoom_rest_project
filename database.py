@@ -21,15 +21,17 @@ def get_kst_now() -> datetime:
     """한국 표준시 (Asia/Seoul) 현재 일시 반환"""
     return datetime.now(KST)
 
-def format_kst_time_str(dt=None) -> str:
-    """임의의 datetime/문자열을 한국 표준시(KST) 'HH:MM:SS' 포맷으로 보정 변환"""
+def format_kst_time_str(dt=None, with_date: bool = False) -> str:
+    """임의의 datetime/문자열을 한국 표준시(KST) 'HH:MM:SS' 포맷으로 보정 변환
+    - with_date=True면 'MM-DD HH:MM:SS' (대시보드 로그: 어제·오늘 로그 구분용)"""
+    fmt = '%m-%d %H:%M:%S' if with_date else '%H:%M:%S'
     if dt is None:
-        return get_kst_now().strftime('%H:%M:%S')
+        return get_kst_now().strftime(fmt)
     if isinstance(dt, datetime):
         if dt.tzinfo is None:
             # log_message가 KST 벽시계 시각을 그대로 저장(pymysql은 tzinfo 무시)하므로 naive 값은 KST로 간주
             dt = dt.replace(tzinfo=KST)
-        return dt.astimezone(KST).strftime('%H:%M:%S')
+        return dt.astimezone(KST).strftime(fmt)
     if isinstance(dt, str):
         try:
             if len(dt) == 8 and ':' in dt:
@@ -37,7 +39,7 @@ def format_kst_time_str(dt=None) -> str:
             d = datetime.fromisoformat(dt.replace('Z', '+00:00'))
             if d.tzinfo is None:
                 d = d.replace(tzinfo=KST)
-            return d.astimezone(KST).strftime('%H:%M:%S')
+            return d.astimezone(KST).strftime(fmt)
         except Exception:
             return dt
     return str(dt)
@@ -1195,7 +1197,7 @@ class DatabaseManager:
                     res = []
                     for r in rows:
                         created = r.get('timestamp') or r.get('created_at') or r.get('time')
-                        ts = format_kst_time_str(created)
+                        ts = format_kst_time_str(created, with_date=True)
                         res.append({
                             'id': str(r.get('id', '')),
                             'level': r.get('level', 'INFO'),

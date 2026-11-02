@@ -372,7 +372,8 @@ export function useTradingWebSocket() {
   const addManualLog = useCallback((level: LogMessage['level'], message: string) => {
     const newLog: LogMessage = {
       id: Math.random().toString(36).substr(2, 9),
-      timestamp: new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false }),
+      // 서버 로그와 같은 'MM-DD HH:MM:SS' (sv-SE 로캘 = 'YYYY-MM-DD HH:MM:SS')
+      timestamp: new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Seoul' }).slice(5),
       level,
       message
     };

@@ -152,7 +152,7 @@ async def daily_market_scheduler_loop():
                             "id": str(int(time.time() * 1000)),
                             "level": "SYSTEM",
                             "message": wake_log,
-                            "timestamp": format_kst_time_str(now)
+                            "timestamp": format_kst_time_str(now, with_date=True)
                         }
                     })
                     print(f"✅ [API Server Scheduler] 장전 동기화 완료 (매매는 main_rest_async 엔진이 담당)")
@@ -192,7 +192,7 @@ async def log_broadcast_loop():
                         for r in new_logs:
                             last_log_id = max(last_log_id, int(r['id']))
                             created = r.get('timestamp') or r.get('created_at') or r.get('time')
-                            ts = format_kst_time_str(created)
+                            ts = format_kst_time_str(created, with_date=True)
 
                             log_item = {
                                 "id": str(r.get('id', '')),
@@ -1003,7 +1003,7 @@ async def reset_circuit_breaker_endpoint():
             "id": str(int(time.time() * 1000)),
             "level": "SYSTEM",
             "message": log_msg,
-            "timestamp": format_kst_time_str(get_kst_now())
+            "timestamp": format_kst_time_str(get_kst_now(), with_date=True)
         }
     })
     return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}
