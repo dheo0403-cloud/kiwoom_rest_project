@@ -194,3 +194,13 @@ jobs:
             kubectl rollout status deployment/$DEPLOYMENT_NAME --timeout=180s
           fi
           echo "🎉 [AKS Deployment] $DEPLOYMENT_NAME 서비스 무중단 배포가 성공적으로 완료되었습니다."
+
+      - name: 11. Rollout Restart Mock Bot (kiwoom-bot-mock, 있을 때만)
+        run: |
+          # 모의계좌 TOM 봇도 같은 이미지 — 없으면(아직 미설치·삭제) 건너뜀, 실패해도 실계좌 배포 결과는 그대로
+          if kubectl get deployment kiwoom-bot-mock -n mzc-apps >/dev/null 2>&1; then
+            kubectl rollout restart deployment/kiwoom-bot-mock -n mzc-apps
+            kubectl rollout status deployment/kiwoom-bot-mock -n mzc-apps --timeout=180s || echo "⚠️ [AKS Mock] kiwoom-bot-mock 롤아웃 확인 실패 (실계좌 봇은 정상 배포됨)"
+          else
+            echo "ℹ️ [AKS Mock] kiwoom-bot-mock 없음 → 건너뜀"
+          fi
