@@ -596,7 +596,8 @@ class AsyncTradingBot(CollectionWorkersMixin):
         await self._restore_today_state()
         await self._sync_account_balance()
         self.is_running = True
-        if not self.us_market_task or self.us_market_task.done():
+        # 미국 시장 데이터는 장중 엔진 필터용 — 장중 엔진을 끈 모의(TOM) 봇은 받지 않음(모의 DB에 us_daily 없음)
+        if self.intraday_engine_enabled and (not self.us_market_task or self.us_market_task.done()):
             self.us_market_task = asyncio.create_task(self._us_market_worker())
         if self.minute_backfill_enabled and (not self.minute_backfill_task or self.minute_backfill_task.done()):
             self.minute_backfill_task = asyncio.create_task(self._minute_backfill_worker())

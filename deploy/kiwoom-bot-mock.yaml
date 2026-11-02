@@ -1,0 +1,81 @@
+# 모의계좌 TOM(월말-월초 스윙) 전용 봇 — 실계좌 봇(kiwoom-bot)과 같은 이미지, 다른 계좌·DB
+# - 키움: KIWOOM_MODE=MOCK → mockapi.kiwoom.com + KIWOOM_MOCK_* 키 (실계좌 키·토큰과 무관)
+# - DB: 주문·잔고·로그는 kiwoom_mock_db, 시세(daily_ohlcv·stock_master)는 kiwoom_quant_db를 읽기만
+# - 장중 엔진·수집 작업은 모두 끔 → TOM만 15:21~15:28에 판단. N3는 코드상 실계좌 전용이라 모의에서 안 돎
+# - 외부 노출 없음(Service·Ingress 없음). 화면은 실계좌 봇 포탈의 '모의계좌' 탭이 MOCK_DB_NAME으로 읽음
+# 적용(승인 후): kubectl apply -f deploy/kiwoom-bot-mock.yaml   중지: kubectl scale deployment/kiwoom-bot-mock -n mzc-apps --replicas=0
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kiwoom-bot-mock
+  namespace: mzc-apps
+  labels:
+    app: kiwoom-bot-mock
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate  # 같은 모의 계좌에 봇 2개가 동시에 뜨지 않게
+  selector:
+    matchLabels:
+      app: kiwoom-bot-mock
+  template:
+    metadata:
+      labels:
+        app: kiwoom-bot-mock
+    spec:
+      containers:
+        - name: kiwoom-bot-mock
+          image: portalregistries.azurecr.io/kiwoom-bot:latest
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8501
+              name: web-dashboard
+              protocol: TCP
+          env:
+            - { name: KIWOOM_MODE, value: "MOCK" }
+            - { name: TRADING_MODE, value: "mock" }
+            - { name: DB_NAME, value: "kiwoom_mock_db" }
+            - { name: MARKET_DB_NAME, value: "kiwoom_quant_db" }
+            - { name: TOM_ENABLED, value: "true" }
+            - { name: INTRADAY_ENGINE_ENABLED, value: "false" }
+            - { name: INTRADAY_BUY_ENABLED, value: "false" }
+            - { name: N3_ENABLED, value: "false" }
+            - { name: MINUTE_BACKFILL_ENABLED, value: "false" }
+            - { name: INVESTOR_SYNC_ENABLED, value: "false" }
+            - { name: NXT_SYNC_ENABLED, value: "false" }
+            - { name: NXT_MINUTE_BACKFILL_ENABLED, value: "false" }
+            - { name: DART_COLLECT_ENABLED, value: "false" }
+            - { name: MINUTE_REFETCH_ENABLED, value: "false" }
+            - { name: DAILY_REPORT_ENABLED, value: "false" }
+            # DB 접속·시간대는 운영 봇과 같은 ConfigMap·Secret을 참조
+            - name: TZ
+              valueFrom: { configMapKeyRef: { name: common-config, key: TZ } }
+            - name: DB_HOST
+              valueFrom: { configMapKeyRef: { name: common-config, key: DB_HOST } }
+            - name: DB_PORT
+              valueFrom: { configMapKeyRef: { name: common-config, key: DB_PORT } }
+            - name: DB_USER
+              valueFrom: { secretKeyRef: { name: db-credentials, key: DB_USER } }
+            - name: DB_PASSWORD
+              valueFrom: { secretKeyRef: { name: db-credentials, key: DB_PASSWORD } }
+            - name: KIWOOM_MOCK_APP_KEY
+              valueFrom: { secretKeyRef: { name: kiwoom-credentials, key: KIWOOM_MOCK_APP_KEY } }
+            - name: KIWOOM_MOCK_APP_SECRET
+              valueFrom: { secretKeyRef: { name: kiwoom-credentials, key: KIWOOM_MOCK_APP_SECRET } }
+            - name: KIWOOM_MOCK_ACCOUNT
+              valueFrom: { secretKeyRef: { name: kiwoom-credentials, key: KIWOOM_MOCK_ACCOUNT } }
+            - name: KIWOOM_MOCK_PASSWORD
+              valueFrom: { secretKeyRef: { name: kiwoom-credentials, key: KIWOOM_MOCK_PASSWORD } }
+            - name: API_AUTH_TOKEN
+              valueFrom: { secretKeyRef: { name: kiwoom-api-auth, key: API_AUTH_TOKEN } }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { cpu: 500m, memory: 768Mi }
+          readinessProbe:
+            tcpSocket: { port: 8501 }
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket: { port: 8501 }
+            initialDelaySeconds: 30
+            periodSeconds: 20
