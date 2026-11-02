@@ -27,6 +27,7 @@ from macro_regime_filter import MacroRegimeFilter, MarketRegime
 from collection_workers import CollectionWorkersMixin
 from us_market import refresh_us_daily, summarize as summarize_us
 from n3_trader import N3Trader
+from tom_trader import TomTrader
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 env_path = os.path.join(current_dir, '.env')
@@ -291,6 +292,12 @@ class AsyncTradingBot(CollectionWorkersMixin):
         self.n3_enabled = os.getenv("N3_ENABLED", "true").lower() in ("1", "true", "yes")
         self.n3 = None
         self.n3_task = None
+        # TOM 월말 스윙 (tom_trader.py, AICompany 20261030_154931) — 모의계좌에서만 켠다 (실계좌면 켜도 무시)
+        self.tom_enabled = os.getenv("TOM_ENABLED", "false").lower() in ("1", "true", "yes")
+        self.tom_task = None
+        # 장중 엔진(감시 매수·손절·15:15 타임컷·미체결 30초 취소·장 마감 수집) 스위치 — 모의 TOM 전용 봇은 false
+        # (켜 두면 TOM 스윙 보유분을 15:15 타임컷·손절이 팔고, 종가 단일가 주문을 30초 뒤 취소한다)
+        self.intraday_engine_enabled = os.getenv("INTRADAY_ENGINE_ENABLED", "true").lower() in ("1", "true", "yes")
         self.history_collect_hour = int(os.getenv("HISTORY_COLLECT_HOUR", "16"))  # KST, 종가 확정 뒤
         # 일일 채점 리포트 (장 마감 수집 직후, 오늘 + 최근 N일 누적)
         self.daily_report_enabled = os.getenv("DAILY_REPORT_ENABLED", "true").lower() in ("1", "true", "yes")
@@ -606,6 +613,10 @@ class AsyncTradingBot(CollectionWorkersMixin):
         if self.n3_enabled and not self.is_demo and (not self.n3_task or self.n3_task.done()):
             self.n3 = N3Trader(self)
             self.n3_task = asyncio.create_task(self.n3.run())
+        if self.tom_enabled and not self.is_demo:
+            await self.db.log_message("WARNING", "[TOM] TOM_ENABLED=true지만 실계좌 모드 → TOM 켜지 않음 (모의계좌 전용)")
+        elif self.tom_enabled and (not self.tom_task or self.tom_task.done()):
+            self.tom_task = asyncio.create_task(TomTrader(self).run())
         self.notifier.send_message(f"🚀 [Kiwoom Quant Bot] 비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
         await self.db.log_message("SYSTEM", f"비동기 트레이딩 데몬 가동 완료 (모드: {self.client.mode})")
 
@@ -2098,6 +2109,11 @@ class AsyncTradingBot(CollectionWorkersMixin):
                     await self.wait_until_next_market_open(8, 50)
                     continue
 
+                # 장중 엔진을 끈 봇(모의 TOM 전용)은 매매 루프·장 마감 수집 없이 대기만 (TOM은 별도 태스크)
+                if not self.intraday_engine_enabled:
+                    await asyncio.sleep(30.0)
+                    continue
+
                 # 2. 사용자에 의해 당일 수동 일시정지된 경우 -> 익일 영업일 08:50까지 대기 (익일 아침 자동 재개)
                 if self.is_paused or not self.is_running:
                     print(f"⏸️ [수동 일시정지 상태] 봇이 일시정지되어 있습니다. 익일 영업일 아침 08:50에 자동으로 '실행(RUNNING)' 상태로 복구됩니다.")
@@ -2171,6 +2187,8 @@ class AsyncTradingBot(CollectionWorkersMixin):
             self.dart_task.cancel()
         if self.n3_task and not self.n3_task.done():
             self.n3_task.cancel()
+        if self.tom_task and not self.tom_task.done():
+            self.tom_task.cancel()
         if self.minute_refetch_task and not self.minute_refetch_task.done():
             self.minute_refetch_task.cancel()
         try:

@@ -430,6 +430,66 @@ class DatabaseManager:
             print(f"DB N3 진입 조회 Error: {e}")
             return -1
 
+    async def get_tom_open(self) -> list:
+        """TOM(모의) 보유 기록: 마지막 TOM_SELL 뒤 TOM_BUY가 남은 종목 — [{code, name, qty, entry_ts(UTC)}]. DB 오류면 None"""
+        if not self.pool: return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute('''
+                        SELECT b.code, MAX(b.name) AS name, SUM(b.qty) AS qty, MIN(b.timestamp) AS entry_ts
+                        FROM order_history b
+                        WHERE b.side = 'TOM_BUY'
+                          AND NOT EXISTS (SELECT 1 FROM order_history s WHERE s.code = b.code
+                                          AND s.side = 'TOM_SELL' AND s.timestamp > b.timestamp)
+                        GROUP BY b.code''')
+                    return [dict(r) for r in await cursor.fetchall()]
+        except Exception as e:
+            print(f"DB TOM 보유 조회 Error: {e}")
+            return None
+
+    async def count_side_since(self, side: str, utc_start: str) -> int:
+        """utc_start(UTC 'YYYY-MM-DD HH:MM:SS') 이후 side 주문 기록 건수 — 재시작 뒤 같은 날 중복 진입 방지. DB 오류면 -1"""
+        if not self.pool: return -1
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT COUNT(*) AS n FROM order_history WHERE side = %s AND timestamp >= %s",
+                                         (side, utc_start))
+                    return int((await cursor.fetchone())['n'])
+        except Exception as e:
+            print(f"DB {side} 건수 조회 Error: {e}")
+            return -1
+
+    async def get_tom_market_rows(self, market_db: str, start: str, before: str) -> list:
+        """TOM 판단용 시세: market_db(식별자 검사 끝난 이름)의 보통주(ETF 제외·코드 끝자리 0) 일봉
+        [(code, date, close, value)], start ≤ date < before. 메모리를 아끼려고 dict 대신 tuple. 오류면 []"""
+        if not self.pool: return []
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor(aiomysql.Cursor) as cursor:
+                    await cursor.execute(f'''
+                        SELECT d.code, d.date, d.close, d.value FROM `{market_db}`.daily_ohlcv d
+                        JOIN `{market_db}`.stock_master m ON m.code = d.code
+                        WHERE m.is_etf = 0 AND RIGHT(d.code, 1) = '0' AND d.date >= %s AND d.date < %s''', (start, before))
+                    return list(await cursor.fetchall())
+        except Exception as e:
+            print(f"DB TOM 시세 조회 Error: {e}")
+            return []
+
+    async def get_stock_names(self, market_db: str, codes: list) -> dict:
+        """{code: name} (market_db의 stock_master). 오류면 {}"""
+        if not self.pool or not codes: return {}
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    ph = ",".join(["%s"] * len(codes))
+                    await cursor.execute(f"SELECT code, name FROM `{market_db}`.stock_master WHERE code IN ({ph})", list(codes))
+                    return {r['code']: r['name'] for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB 종목명 조회 Error: {e}")
+            return {}
+
     async def ensure_minute_refetch(self):
         """수정주가 재수집 대기열 (기업 이벤트로 과거 일봉이 바뀐 종목 → 분봉을 오늘 기준일로 다시 받음) — 없으면 생성"""
         if not self.pool: return
