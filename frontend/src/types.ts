@@ -75,6 +75,32 @@ export interface MockSummary {
   orders?: MockOrder[];
   logs?: MockLog[];
   tom_open?: MockTomPosition[];
+  rehearsal?: MockRehearsal | null;
+}
+
+// 리허설 비교: A = 실계좌 금액으로 살 수 있는 종목 전부, B = 원래 TOM 10자리
+export interface MockRehearsalGroup {
+  stocks: number;
+  invest: number;
+  value: number;
+  ret: number | null;
+}
+
+export interface MockRehearsalRow {
+  code: string;
+  name: string;
+  qty_a: number;
+  qty_b: number;
+  entry: number | null;
+  now: number | null;
+  sold: boolean;
+  ret: number | null;
+}
+
+export interface MockRehearsal {
+  budget: number | null;
+  groups: { A: MockRehearsalGroup; B: MockRehearsalGroup };
+  rows: MockRehearsalRow[];
 }
 
 export interface QuantPerformanceMetrics {

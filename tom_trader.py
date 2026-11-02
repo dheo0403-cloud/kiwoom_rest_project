@@ -167,6 +167,43 @@ def _rehearsal_budget() -> int:
         return 0
 
 
+def rehearsal_compare(message: str, positions: List[dict], orders: List[dict]) -> Optional[dict]:
+    """포탈 '리허설 비교' 카드: 리허설 로그('그룹 B(...): 코드 N주, ... / 그룹 A(...): ...')의 그룹별 수량 +
+    매수가(잔고 평균단가, 없으면 TOM_BUY 지정가) + 현재가(잔고, 팔았으면 TOM_SELL 가격)로 그룹별 수익률. 로그가 없으면 None.
+    orders: [{code, name, side, price}] 시간순(리허설 진입 이후)"""
+    if not message or " / 그룹 A" not in message:
+        return None
+    b_part, a_part = message.split(" / 그룹 A", 1)
+    qty = lambda part: {c: int(q) for c, q in re.findall(r"(\d{6}) (\d+)주", part)}
+    groups = {"B": qty(b_part.split(":", 1)[-1]), "A": qty(a_part.split(":", 1)[-1])}
+    m = re.search(r"종목당 ([\d,]+)원", a_part)
+    pos = {p["code"]: p for p in positions or []}
+    names, buy, sell = {}, {}, {}
+    for o in orders or []:
+        names.setdefault(o["code"], o.get("name"))
+        if o["side"] == "TOM_BUY":
+            buy.setdefault(o["code"], float(o.get("price") or 0))
+        elif o["side"] == "TOM_SELL" and float(o.get("price") or 0) > 0:
+            sell[o["code"]] = float(o["price"])
+    rows = []
+    for code in sorted(set(groups["A"]) | set(groups["B"])):
+        p = pos.get(code)
+        entry = float(p["buy_price"]) if p and float(p.get("buy_price") or 0) > 0 else buy.get(code)
+        now = float(p["current_price"]) if p and float(p.get("current_price") or 0) > 0 else sell.get(code)
+        rows.append({"code": code, "name": names.get(code) or (p or {}).get("name") or code,
+                     "qty_a": groups["A"].get(code, 0), "qty_b": groups["B"].get(code, 0),
+                     "entry": entry, "now": now, "sold": code in sell and not p,
+                     "ret": (now / entry - 1) * 100 if entry and now else None})
+    summary = {}
+    for g, key in (("A", "qty_a"), ("B", "qty_b")):
+        ok = [r for r in rows if r[key] and r["entry"] and r["now"]]
+        invest = sum(r[key] * r["entry"] for r in ok)
+        value = sum(r[key] * r["now"] for r in ok)
+        summary[g] = {"stocks": sum(1 for r in rows if r[key]), "invest": invest, "value": value,
+                      "ret": (value / invest - 1) * 100 if invest else None}
+    return {"budget": int(m.group(1).replace(",", "")) if m else None, "groups": summary, "rows": rows}
+
+
 class TomTrader:
     def __init__(self, bot):
         self.bot, self.db, self.client = bot, bot.db, bot.client

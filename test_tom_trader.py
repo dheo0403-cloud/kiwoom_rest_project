@@ -288,6 +288,7 @@ def test_mock_summary_ends_stale_snapshot_first():
         async def __aexit__(self, *a): pass
         async def execute(self, q, args=None): calls.append("execute")
         async def fetchall(self): return []
+        async def fetchone(self): return None
 
     class Conn:
         async def commit(self): calls.append("commit")
@@ -303,7 +304,7 @@ def test_mock_summary_ends_stale_snapshot_first():
     db = AsyncDatabase.__new__(AsyncDatabase)
     db.pool = Pool()
     out = asyncio.run(db.get_mock_summary("kiwoom_mock_db"))
-    assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 5
+    assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 6 and out["rehearsal_log"] is None
 
 
 def test_rehearsal_day_enters_once_ignoring_risk_off(monkeypatch):
@@ -360,3 +361,26 @@ def test_rehearsal_orders_both_groups_merged(monkeypatch):
     assert buys["444440"][2] == 1_000_000 // lim4
     assert buys["111110"][2] == 1_000_000 // lim1 + 91000 // lim1         # 싼 종목은 B+A 합산
     assert any("그룹 A" in m for _, m in db.logs)
+
+
+def test_rehearsal_compare_groups():
+    msg = ("[TOM/모의 리허설] 그룹 B(원래 10자리): 000810 1주, 011200 41주 / "
+           "그룹 A(종목당 91,000원): 011200 3주, 396300 10주")
+    positions = [{"code": "011200", "name": "HMM", "qty": 44, "buy_price": 24000, "current_price": 26400},
+                 {"code": "000810", "name": "삼성화재", "qty": 1, "buy_price": 660000, "current_price": 594000}]
+    orders = [{"code": "000810", "name": "삼성화재", "side": "TOM_BUY", "price": 664000},
+              {"code": "011200", "name": "HMM", "side": "TOM_BUY", "price": 24100},
+              {"code": "396300", "name": "HT로보틱스", "side": "TOM_BUY", "price": 8670},
+              {"code": "396300", "name": "HT로보틱스", "side": "TOM_SELL", "price": 9537}]   # 이미 팔림 → 매도가로 평가
+    out = tt.rehearsal_compare(msg, positions, orders)
+    rows = {r["code"]: r for r in out["rows"]}
+    assert out["budget"] == 91000
+    assert (rows["011200"]["qty_a"], rows["011200"]["qty_b"]) == (3, 41)
+    assert rows["000810"]["qty_a"] == 0 and rows["396300"]["qty_b"] == 0
+    assert rows["396300"]["sold"] and abs(rows["396300"]["ret"] - 10.0) < 1e-9
+    a, b = out["groups"]["A"], out["groups"]["B"]
+    assert a["stocks"] == 2 and a["invest"] == 3 * 24000 + 10 * 8670
+    assert abs(a["ret"] - ((3 * 26400 + 10 * 9537) / (3 * 24000 + 10 * 8670) - 1) * 100) < 1e-9
+    assert abs(b["ret"] - ((594000 + 41 * 26400) / (660000 + 41 * 24000) - 1) * 100) < 1e-9
+    assert tt.rehearsal_compare(None, positions, orders) is None
+    assert tt.rehearsal_compare("[TOM/모의] 다른 로그", positions, orders) is None

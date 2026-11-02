@@ -861,6 +861,8 @@ async def get_mock_summary():
         if p.get("entry_ts"):
             entry = datetime.strptime(p["entry_ts"][:10], "%Y-%m-%d").date()
             p["planned_exit"] = tom_trader.add_trading_days(entry, tom_trader.HOLD_DAYS, hol).isoformat()
+    data["rehearsal"] = tom_trader.rehearsal_compare(data.pop("rehearsal_log", None), data.get("positions", []),
+                                                     data.pop("rehearsal_orders", []))
     return {"configured": True, "db": name, "hold_days": tom_trader.HOLD_DAYS, "slots": tom_trader.SLOTS,
             "next_month_end": tom_trader.next_month_end(today, hol).isoformat(), **data}
 

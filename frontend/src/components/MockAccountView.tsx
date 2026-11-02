@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { FlaskConical, CalendarClock, Wallet, ListOrdered, ScrollText } from 'lucide-react';
-import { MockSummary } from '../types';
+import { MockSummary, MockRehearsal } from '../types';
 import { getApiUrl } from '../utils/apiConfig';
 
 interface MockAccountViewProps {
@@ -77,6 +77,8 @@ export const MockAccountView: React.FC<MockAccountViewProps> = ({ colorMode }) =
         <div className="text-[10px] text-slate-500">잔고 기록 {data.balance?.length || 0}일 · 마지막 {latest?.date?.slice(0, 10) || '—'} · DB {data.db}</div>
       </div>
 
+      {data.rehearsal && <RehearsalCard r={data.rehearsal} upDown={upDown} />}
+
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3.5">
         {/* TOM 보유 (예정 청산일) */}
         <div className="bento-card p-4 lg:col-span-7 flex flex-col min-h-[220px]">
@@ -146,6 +148,56 @@ export const MockAccountView: React.FC<MockAccountViewProps> = ({ colorMode }) =
             </div>
           ))}
         </div>
+      </div>
+    </div>
+  );
+};
+
+// 리허설 비교: 그룹 A(실계좌 금액으로 살 수 있는 종목) vs B(원래 TOM 10자리) — 같은 날 사서 같은 날 판다
+const RehearsalCard: React.FC<{ r: MockRehearsal; upDown: (v: number) => string }> = ({ r, upDown }) => {
+  const pct = (v: number | null) => (v === null || v === undefined ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
+  const group = (key: 'A' | 'B', title: string, sub: string) => {
+    const g = r.groups[key];
+    return (
+      <div className="rounded-lg bg-white/[0.03] border border-white/5 px-3 py-2" data-testid={`reh-group-${key}`}>
+        <div className="text-[10px] text-slate-500">{title}</div>
+        <div className={`font-mono font-bold mt-0.5 text-base ${g.ret !== null ? upDown(g.ret) : 'text-slate-200'}`}>{pct(g.ret)}</div>
+        <div className="text-[10px] text-slate-500 mt-0.5">{sub} · {g.stocks}종목 · 매수 {won(g.invest)} → {won(g.value)}</div>
+      </div>
+    );
+  };
+  return (
+    <div className="bento-card p-4 flex flex-col gap-3" data-testid="reh-card">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="text-xs font-bold text-slate-300">리허설 비교</span>
+        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-300">전략 성과 평가 제외</span>
+        <span className="text-[11px] text-slate-500">같은 날 사서 15거래일째 같이 팖 · 실계좌 금액으로도 같은 수익이 나는지 확인</span>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-[12px]">
+        {group('A', 'A. 실계좌 금액 기준', `종목당 ${r.budget ? won(r.budget) : '—'}`)}
+        {group('B', 'B. 원래 TOM (10종목)', '종목당 총자산의 1/10')}
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-[11px] font-mono">
+          <thead className="text-slate-500 text-left">
+            <tr><th className="py-1 pr-2">종목</th><th className="pr-2 text-right">A 수량</th><th className="pr-2 text-right">B 수량</th>
+              <th className="pr-2 text-right">매수가</th><th className="pr-2 text-right">현재가</th><th className="text-right">수익률</th></tr>
+          </thead>
+          <tbody className="text-slate-300">
+            {r.rows.map(row => (
+              <tr key={row.code} className="border-t border-white/5">
+                <td className="py-1 pr-2 whitespace-nowrap">{row.name} <span className="text-slate-500">{row.code}</span>
+                  {row.qty_a === 0 && <span className="ml-1 text-[10px] text-amber-400">B만</span>}
+                  {row.sold && <span className="ml-1 text-[10px] text-slate-500">매도</span>}</td>
+                <td className="pr-2 text-right">{row.qty_a || '—'}</td>
+                <td className="pr-2 text-right">{row.qty_b || '—'}</td>
+                <td className="pr-2 text-right">{row.entry ? Math.round(row.entry).toLocaleString() : '—'}</td>
+                <td className="pr-2 text-right">{row.now ? Math.round(row.now).toLocaleString() : '—'}</td>
+                <td className={`text-right ${row.ret !== null ? upDown(row.ret) : ''}`}>{pct(row.ret)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
       </div>
     </div>
   );
