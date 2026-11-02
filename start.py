@@ -51,9 +51,8 @@ def run_trading_bot(is_real):
     """비동기 퀀트 트레이딩 봇 데몬 실행 (Background)"""
     print(f"🚀 [TradingBot] 비동기 퀀트 봇을 실행합니다... (모드: {'실전' if is_real else '모의'})", flush=True)
     python_exe = sys.executable
-    cmd = [python_exe, "-u", "main_rest_async.py"]
-    if is_real:
-        cmd.append("--real")
+    # 모의는 --mock을 꼭 넘긴다 — 데몬은 --real 기본값이 True라 플래그가 없으면 실전으로 뜸(11/2 모의 Pod 사례)
+    cmd = [python_exe, "-u", "main_rest_async.py", "--real" if is_real else "--mock"]
     return subprocess.Popen(cmd)
 
 

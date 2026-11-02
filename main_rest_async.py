@@ -2211,7 +2211,9 @@ async def main():
     parser.add_argument('--capital', type=float, default=10_000_000, help='초기 운용 자본금')
     args = parser.parse_args()
 
-    is_demo = True if args.mock else (not args.real)
+    # 환경변수(IS_REAL=false / KIWOOM_MODE=MOCK)가 모의면 플래그와 무관하게 모의 — start.py·API 서버와 같은 기준
+    env_is_mock = os.getenv("IS_REAL", "true").lower() in ("false", "0", "no") or os.getenv("KIWOOM_MODE", "REAL").upper() in ("MOCK", "DEMO")
+    is_demo = True if (args.mock or env_is_mock) else (not args.real)
     bot = AsyncTradingBot(is_demo=is_demo, initial_capital=args.capital)
     try:
         await bot.run_daemon()

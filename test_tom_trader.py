@@ -239,3 +239,40 @@ def test_month_end_entry_end_to_end():
     # 전 거래일(11/27) 일봉이 없으면(수집 누락) 진입 안 함
     db, client = _run([], [], date(2026, 11, 30), rows=[r for r in rows if r[1] < "20261127"], quotes=quotes)
     assert client.sent == [] and "수집 누락" in db.logs[-1][1]
+
+
+def test_start_passes_mode_flag_to_daemon(monkeypatch):
+    # 모의 Pod(KIWOOM_MODE=MOCK)에서 데몬이 실전으로 뜨던 문제(11/2): 플래그 없으면 데몬 --real 기본값이 True
+    import start
+    cmds = []
+    monkeypatch.setattr(start.subprocess, "Popen", lambda cmd: cmds.append(cmd))
+    start.run_trading_bot(False)
+    start.run_trading_bot(True)
+    assert cmds[0][-1] == "--mock" and cmds[1][-1] == "--real"
+
+
+def test_daemon_main_honors_mock_env(monkeypatch):
+    import sys
+    import main_rest_async as m
+    seen = []
+
+    class FakeBot:
+        def __init__(self, is_demo, initial_capital):
+            seen.append(is_demo)
+
+        async def run_daemon(self):
+            pass
+
+        async def shutdown(self):
+            pass
+
+    monkeypatch.setattr(m, "AsyncTradingBot", FakeBot)
+    monkeypatch.setattr(sys, "argv", ["main_rest_async.py"])
+    monkeypatch.delenv("IS_REAL", raising=False)
+    monkeypatch.delenv("KIWOOM_MODE", raising=False)
+    asyncio.run(m.main())                      # 실계좌 Pod: 모드 변수 없음 → 실전 그대로
+    monkeypatch.setenv("KIWOOM_MODE", "MOCK")
+    asyncio.run(m.main())                      # 모의 Pod: 플래그가 없어도 모의
+    monkeypatch.setattr(sys, "argv", ["main_rest_async.py", "--real"])
+    asyncio.run(m.main())                      # 환경변수가 모의면 --real이 있어도 모의
+    assert seen == [False, True, True]
