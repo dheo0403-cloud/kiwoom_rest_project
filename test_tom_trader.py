@@ -329,3 +329,34 @@ def test_rehearsal_day_enters_once_ignoring_risk_off(monkeypatch):
     monkeypatch.setenv("TOM_REHEARSAL_DATE", "11월3일")
     db, client = _run([], [], date(2026, 11, 3), rows=rows, quotes=quotes)
     assert client.sent == [] and not db.rows_called
+
+
+def test_rehearsal_budget_buys_every_affordable_pick(monkeypatch):
+    # 11/2 대표: 리허설은 10자리 대신 실계좌 금액(종목당 91,000원)으로 살 수 있는 종목 전부
+    picks = tt.pick_tom_orders(["111110", "222220", "333330"], {c: [1.0] * 70 for c in ("111110", "222220", "333330")},
+                               {"111110": 20000, "222220": 95000, "333330": 50000}, set(), 3, 91000, 10_000_000)
+    assert [(p["code"], p["qty"]) for p in picks] == [("111110", 4), ("333330", 1)]   # 95,000원짜리는 1주도 못 삼
+    monkeypatch.setenv("TOM_REHEARSAL_BUDGET", "91000")
+    assert tt._rehearsal_budget() == 91000
+    monkeypatch.setenv("TOM_REHEARSAL_BUDGET", "구만원")
+    assert tt._rehearsal_budget() == 0
+
+
+def test_rehearsal_orders_both_groups_merged(monkeypatch):
+    # 그룹 B(원래 규칙, 종목당 총자산/10)와 그룹 A(종목당 91,000원, 살 수 있는 종목 전부)를 합친 주문
+    days = [d.strftime("%Y%m%d") for d in pd.bdate_range("2026-01-01", "2026-11-02")]
+    spec = {"111110": (lambda i, d: 10000 * (1 + 0.002 * i), lambda i, d: 1e9 + 1),
+            "444440": (lambda i, d: 100000 * (1 + 0.002 * i), lambda i, d: 1e9 + 4),
+            "222220": (lambda i, d: max(1000.0, 30000 * (1 - 0.003 * i)), lambda i, d: 1e9 + 2)}
+    rows = _rows(days, spec)
+    last = {c: r[2] for r in rows for c in [r[0]] if r[1] == days[-1]}
+    quotes = {"111110": int(last["111110"]) + 100, "444440": int(last["444440"]) + 1000, "222220": 1000}
+    monkeypatch.setenv("TOM_REHEARSAL_DATE", "2026-11-03")
+    monkeypatch.setenv("TOM_REHEARSAL_BUDGET", "91000")
+    db, client = _run([], [], date(2026, 11, 3), rows=rows, quotes=quotes)
+    buys = {s[1]: s for s in client.sent if s[0] == "BUY"}
+    lim1, lim4 = buys["111110"][3], buys["444440"][3]
+    assert lim4 > 91000                                                   # 비싼 종목은 B만
+    assert buys["444440"][2] == 1_000_000 // lim4
+    assert buys["111110"][2] == 1_000_000 // lim1 + 91000 // lim1         # 싼 종목은 B+A 합산
+    assert any("그룹 A" in m for _, m in db.logs)

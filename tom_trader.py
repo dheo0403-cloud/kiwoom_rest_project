@@ -158,6 +158,15 @@ def _rehearsal_day() -> Optional[date]:
         return None
 
 
+def _rehearsal_budget() -> int:
+    """TOM_REHEARSAL_BUDGET(원): 리허설 때 종목당 예산 = 실계좌 금액(11/2 대표: 91,000원).
+    10자리 제한 없이 이 돈으로 1주 이상 살 수 있는 조건 통과 종목을 전부 산다 → 종목마다 '실계좌 전액을 이 종목에' 결과. 0이면 평소 규칙"""
+    try:
+        return max(0, int(os.getenv("TOM_REHEARSAL_BUDGET") or 0))
+    except ValueError:
+        return 0
+
+
 class TomTrader:
     def __init__(self, bot):
         self.bot, self.db, self.client = bot, bot.db, bot.client
@@ -271,6 +280,20 @@ class TomTrader:
         budget = total / SLOTS
         slots = max(0, SLOTS - len(held))
         picks = pick_tom_orders(universe, prior, prices, held, slots, budget, cash)
+        if rehearsal and _rehearsal_budget():
+            # 리허설 비교(11/2 대표): B=원래 TOM 10자리 + A=실계좌 금액으로 살 수 있는 종목 전부, 남은 주문가능금액 안에서.
+            # 같은 종목은 한 주문으로 합치고(같은 지정가·같은 매도일) 그룹별 수량은 로그로 남겨 11/24 뒤 따로 계산
+            small = pick_tom_orders(universe, prior, prices, held, len(universe), float(_rehearsal_budget()),
+                                    cash - sum(p["qty"] * p["price"] for p in picks))
+            await self.log("SYSTEM", "[TOM/모의 리허설] 그룹 B(원래 10자리): " + ", ".join(f"{p['code']} {p['qty']}주" for p in picks)
+                           + f" / 그룹 A(종목당 {_rehearsal_budget():,}원): " + ", ".join(f"{p['code']} {p['qty']}주" for p in small))
+            merged = {p["code"]: dict(p) for p in picks}
+            for p in small:
+                if p["code"] in merged:
+                    merged[p["code"]]["qty"] += p["qty"]
+                else:
+                    merged[p["code"]] = dict(p)
+            picks = [merged[c] for c in sorted(merged)]
         names = await self.db.get_stock_names(_market_db(), [p["code"] for p in picks])
         await self.log("SYSTEM", f"[TOM/모의{' 리허설' if rehearsal else ''}] {today:%m/%d} {'리허설' if rehearsal else '월말'} 판단: 대상 {len(universe)}종목, 시세 {len(prices)}종목, "
                                  f"보유 {len(held)}, 빈 자리 {slots}, 종목당 예산 {int(budget):,}원(주문가능 {int(cash):,}원) → 주문 {len(picks)}건: "
