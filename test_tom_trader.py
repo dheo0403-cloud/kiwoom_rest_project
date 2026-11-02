@@ -276,3 +276,31 @@ def test_daemon_main_honors_mock_env(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["main_rest_async.py", "--real"])
     asyncio.run(m.main())                      # 환경변수가 모의면 --real이 있어도 모의
     assert seen == [False, True, True]
+
+
+def test_mock_summary_ends_stale_snapshot_first():
+    # 11/2: 실계좌 Pod 풀 연결이 옛 읽기 스냅샷을 잡고 있어 모의 봇이 쓴 잔고·로그가 포탈에 안 보였음
+    from database import AsyncDatabase
+    calls = []
+
+    class Cur:
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def execute(self, q, args=None): calls.append("execute")
+        async def fetchall(self): return []
+
+    class Conn:
+        async def commit(self): calls.append("commit")
+        def cursor(self): return Cur()
+
+    class Acq:
+        async def __aenter__(self): return Conn()
+        async def __aexit__(self, *a): pass
+
+    class Pool:
+        def acquire(self): return Acq()
+
+    db = AsyncDatabase.__new__(AsyncDatabase)
+    db.pool = Pool()
+    out = asyncio.run(db.get_mock_summary("kiwoom_mock_db"))
+    assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 5

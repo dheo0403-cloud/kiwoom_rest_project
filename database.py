@@ -1216,6 +1216,8 @@ class DatabaseManager:
         fmt = lambda t: t.strftime('%Y-%m-%d %H:%M:%S') if hasattr(t, 'strftime') else (str(t) if t else None)
         try:
             async with self.pool.acquire() as conn:
+                # 풀 연결에 남은 읽기 트랜잭션(autocommit 꺼짐 → 옛 스냅샷)을 끝내야 다른 Pod(모의 봇)가 쓴 새 행이 보임
+                await conn.commit()
                 async with conn.cursor() as cursor:
                     await cursor.execute(f"SELECT date, total_asset, deposit, profit_loss, yield FROM {db}.balance ORDER BY date DESC LIMIT 90")
                     balance = [dict(r) for r in await cursor.fetchall()]
