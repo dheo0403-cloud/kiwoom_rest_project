@@ -304,3 +304,28 @@ def test_mock_summary_ends_stale_snapshot_first():
     db.pool = Pool()
     out = asyncio.run(db.get_mock_summary("kiwoom_mock_db"))
     assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 5
+
+
+def test_rehearsal_day_enters_once_ignoring_risk_off(monkeypatch):
+    # 11/2 대표 결정: 11/3 1회 리허설(월말 아님·하락장 필터 무시), 그 외 날은 원래 규칙
+    days = [d.strftime("%Y%m%d") for d in pd.bdate_range("2026-01-01", "2026-11-02")]
+    # 시장 전체는 하락(위험 회피 켜짐) — 한 종목만 60일선·20일 전보다 위
+    spec = {"111110": (lambda i, d: 10000 * (1 + 0.002 * i), lambda i, d: 1e9 + 1),
+            "222220": (lambda i, d: max(1000.0, 30000 * (1 - 0.003 * i)), lambda i, d: 1e9 + 2),
+            "333330": (lambda i, d: max(1000.0, 30000 * (1 - 0.003 * i)), lambda i, d: 1e9 + 3)}
+    rows = _rows(days, spec)
+    v, c = tt._frames(rows)
+    assert tt.market_risk_off(c, tt.month_universes(v, c)) is True
+    quotes = {"111110": int(rows[-3][2]) + 100, "222220": 1000, "333330": 1000}
+    monkeypatch.setenv("TOM_REHEARSAL_DATE", "2026-11-03")
+    db, client = _run([], [], date(2026, 11, 3), rows=rows, quotes=quotes)
+    buys = [s for s in client.sent if s[0] == "BUY"]
+    assert [s[1] for s in buys] == ["111110"] and buys[0][4] == "00"
+    assert any("리허설" in m for _, m in db.logs)
+    # 리허설 다음 날은 월말이 아니라 진입 안 함
+    db, client = _run([], [], date(2026, 11, 4), rows=rows, quotes=quotes)
+    assert client.sent == [] and not db.rows_called
+    # 설정이 없으면 같은 날도 진입 안 함 / 잘못된 값은 무시
+    monkeypatch.setenv("TOM_REHEARSAL_DATE", "11월3일")
+    db, client = _run([], [], date(2026, 11, 3), rows=rows, quotes=quotes)
+    assert client.sent == [] and not db.rows_called

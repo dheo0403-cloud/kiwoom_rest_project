@@ -148,6 +148,16 @@ def _market_db() -> str:
     return name
 
 
+def _rehearsal_day() -> Optional[date]:
+    """TOM_REHEARSAL_DATE(YYYY-MM-DD): 그날 1회만 월말처럼 진입(하락장 필터 무시) — 주문 경로 사전 검증용(11/2 대표 결정).
+    매도는 평소대로 15거래일째. 리허설 거래는 전략 성과 평가에서 뺀다(로그 '리허설' 표시, 진입일이 월말이 아님)"""
+    raw = (os.getenv("TOM_REHEARSAL_DATE") or "").strip()
+    try:
+        return date.fromisoformat(raw) if raw else None
+    except ValueError:
+        return None
+
+
 class TomTrader:
     def __init__(self, bot):
         self.bot, self.db, self.client = bot, bot.db, bot.client
@@ -215,10 +225,11 @@ class TomTrader:
                 keep.add(code)  # 실패하면 다음 거래일 15:21에 다시 시도
                 msg = (res or {}).get("return_msg") or (res or {}).get("msg1") or "응답 없음"
                 await self.log("ERROR", f"[TOM/모의] 매도 거절: {name}({code}) {qty}주 - {msg} → 다음 거래일 재시도")
-        if is_month_end(today, is_holiday):
-            await self.enter(today, keep | exited)
+        rehearsal = today == _rehearsal_day() and not is_month_end(today, is_holiday)
+        if is_month_end(today, is_holiday) or rehearsal:
+            await self.enter(today, keep | exited, rehearsal)
 
-    async def enter(self, today: date, held: set):
+    async def enter(self, today: date, held: set, rehearsal: bool = False):
         kst0 = datetime(today.year, today.month, today.day)
         bought = await self.db.count_side_since("TOM_BUY", (kst0 - timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S"))
         if bought != 0:
@@ -243,9 +254,11 @@ class TomTrader:
         if not universe or risk_off is None:
             await self.log("WARNING", f"[TOM/모의] 대상 {len(universe)}종목·하락장 판단 {risk_off} (데이터 부족) → 진입 안 함")
             return
-        if risk_off:
+        if risk_off and not rehearsal:
             await self.log("SYSTEM", f"[TOM/모의] {today:%m/%d} 월말이지만 하락장 필터(시장 지수 < {MARKET_MA_DAYS}일 평균) → 진입 안 함")
             return
+        if rehearsal:
+            await self.log("SYSTEM", f"[TOM/모의 리허설] {today:%m/%d} 주문 경로 검증용 1회 진입 (월말 아님, 하락장 필터 {'켜짐 → 무시' if risk_off else '꺼짐'}) — 전략 성과 평가 제외")
         prior = {c: close[c].dropna().tolist() for c in universe if c in close.columns}
         prices: Dict[str, float] = {}
         for i in range(0, len(universe), QUOTE_CHUNK):
@@ -259,7 +272,7 @@ class TomTrader:
         slots = max(0, SLOTS - len(held))
         picks = pick_tom_orders(universe, prior, prices, held, slots, budget, cash)
         names = await self.db.get_stock_names(_market_db(), [p["code"] for p in picks])
-        await self.log("SYSTEM", f"[TOM/모의] {today:%m/%d} 월말 판단: 대상 {len(universe)}종목, 시세 {len(prices)}종목, "
+        await self.log("SYSTEM", f"[TOM/모의{' 리허설' if rehearsal else ''}] {today:%m/%d} {'리허설' if rehearsal else '월말'} 판단: 대상 {len(universe)}종목, 시세 {len(prices)}종목, "
                                  f"보유 {len(held)}, 빈 자리 {slots}, 종목당 예산 {int(budget):,}원(주문가능 {int(cash):,}원) → 주문 {len(picks)}건: "
                                  + ", ".join(f"{names.get(p['code'], p['code'])}({p['code']}) {p['qty']}주@{p['price']:,}" for p in picks))
         for p in picks:
