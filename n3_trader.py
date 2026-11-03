@@ -7,6 +7,7 @@ N3 애프터마켓 반등 매매 (research/afterhours_minute_plan.md 2차 재검
 - 주문 기록 side: N3_BUY / N3_CANCEL(19:58 취소 수량) / N3_SELL — 일중 전략 채점과 분리, 재시작해도 DB로 상태 복원
 """
 import asyncio
+import time
 from datetime import datetime, timedelta, time as dtime
 from typing import Any, Dict, List
 
@@ -84,9 +85,30 @@ def exit_qty(held_qty: int, n3_qty: int) -> int:
     return min(held_qty, n3_qty) if held_qty > 0 else n3_qty
 
 
+# 주문 사이 최소 간격(초) — 11/3 TOM 모의 리허설에서 주문 10건을 연달아 보내자 서버가 429로 한 건 걸러 한 건씩 거부
+# (주문은 중복 접수 위험 때문에 재시도 1회뿐이라 그대로 '응답 없음'), 3초 쉰 다음 주문은 모두 성공 → 여러 건 주문 루프는 간격을 둔다
+ORDER_GAP_SECONDS = 1.0
+
+
+class OrderPacer:
+    """여러 건 주문을 보낼 때 주문 사이 간격을 지켜 client.send_order 호출 (429 호출 제한 방지)"""
+    def __init__(self, client, gap: float = ORDER_GAP_SECONDS):
+        self.client, self.gap, self.last = client, gap, float("-inf")
+
+    async def send_order(self, *args, **kwargs):
+        wait = self.gap - (time.monotonic() - self.last)
+        if wait > 0:
+            await asyncio.sleep(wait)
+        try:
+            return await self.client.send_order(*args, **kwargs)
+        finally:
+            self.last = time.monotonic()
+
+
 class N3Trader:
     def __init__(self, bot):
         self.bot, self.db, self.client = bot, bot.db, bot.client
+        self.orders = OrderPacer(bot.client)
         self.entered_on = self.cancelled_on = self.exited_on = None
         self.exit_codes: Dict[str, datetime] = {}  # 장전 매도 중인 종목 → 일중 엔진이 건드리지 않을 시각
 
@@ -168,7 +190,7 @@ class N3Trader:
         while get_kst_now().time() < T_BUY:  # 판단(19:50) 뒤 19:51부터 체결 (설계 M1)
             await asyncio.sleep(1.0)
         for p in picks:
-            res = await self.client.send_order(p["code"], p["qty"], p["price"], order_type="00", side="BUY",
+            res = await self.orders.send_order(p["code"], p["qty"], p["price"], order_type="00", side="BUY",
                                                priority=RequestPriority.HIGH, exchange="NXT")
             if is_order_ok(res) or res is None:
                 # 응답 없음은 접수됐을 수도 있어 기록해 둔다 (미체결이면 19:58 취소, 다음 날 매도가능 0주로 닫힘)
@@ -216,7 +238,7 @@ class N3Trader:
             pos = held.get(code) or {}
             qty = exit_qty(int(pos.get("qty") or 0), int(o["qty"] or 0))
             self.exit_codes[code] = until
-            res = await self.client.send_order(code, qty, 0, order_type="03", side="SELL",
+            res = await self.orders.send_order(code, qty, 0, order_type="03", side="SELL",
                                                priority=RequestPriority.CRITICAL, exchange="KRX")
             msg = str((res or {}).get("return_msg") or (res or {}).get("msg1") or "응답 없음")
             if is_order_ok(res):

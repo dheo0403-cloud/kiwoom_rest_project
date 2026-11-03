@@ -20,7 +20,7 @@ import pandas as pd
 
 from async_kiwoom_client import RequestPriority, floor_tick, is_order_ok
 from database import get_kst_now
-from n3_trader import exit_qty, parse_watch_quotes
+from n3_trader import OrderPacer, exit_qty, parse_watch_quotes
 
 HOLD_DAYS = 15        # 진입 뒤 이 거래일째 종가 청산 (탐색 구간 1위 조합)
 SLOTS = 10            # 동시 보유 종목 수 (harness SLOTS)
@@ -167,27 +167,43 @@ def _rehearsal_budget() -> int:
         return 0
 
 
-def rehearsal_compare(message: str, positions: List[dict], orders: List[dict]) -> Optional[dict]:
+def rehearsal_compare(message, positions: List[dict], orders: List[dict]) -> Optional[dict]:
     """포탈 '리허설 비교' 카드: 리허설 로그('그룹 B(...): 코드 N주, ... / 그룹 A(...): ...')의 그룹별 수량 +
-    매수가(잔고 평균단가, 없으면 TOM_BUY 지정가) + 현재가(잔고, 팔았으면 TOM_SELL 가격)로 그룹별 수익률. 로그가 없으면 None.
-    orders: [{code, name, side, price}] 시간순(리허설 진입 이후)"""
-    if not message or " / 그룹 A" not in message:
+    매수가(잔고 평균단가, 없으면 마지막 TOM_BUY 지정가) + 현재가(잔고, 팔았으면 TOM_SELL 가격)로 그룹별 수익률. 로그가 없으면 None.
+    message: 로그 1건 또는 시간순 목록 — 뒤 리허설에서 다시 주문한 종목은 그 수량으로 바꾼다(11/3 미체결 → 11/4 재주문).
+    매수가 체결되지 않아 기록만 닫힌 종목(잔고 없음 + TOM_SELL 0원)은 빼고 계산.
+    orders: [{code, name, side, price}] 시간순(첫 리허설 진입 이후)"""
+    msgs = [m for m in ([message] if isinstance(message, str) else (message or [])) if m and " / 그룹 A" in m]
+    if not msgs:
         return None
-    b_part, a_part = message.split(" / 그룹 A", 1)
     qty = lambda part: {c: int(q) for c, q in re.findall(r"(\d{6}) (\d+)주", part)}
-    groups = {"B": qty(b_part.split(":", 1)[-1]), "A": qty(a_part.split(":", 1)[-1])}
-    m = re.search(r"종목당 ([\d,]+)원", a_part)
+    groups, m = {"B": {}, "A": {}}, None
+    for msg in msgs:
+        b_part, a_part = msg.split(" / 그룹 A", 1)
+        b, a = qty(b_part.split(":", 1)[-1]), qty(a_part.split(":", 1)[-1])
+        for c in set(a) | set(b):  # 다시 주문한 종목은 앞 리허설 수량을 지우고 새 수량으로
+            groups["A"].pop(c, None)
+            groups["B"].pop(c, None)
+        groups["B"].update(b)
+        groups["A"].update(a)
+        m = re.search(r"종목당 ([\d,]+)원", a_part) or m
     pos = {p["code"]: p for p in positions or []}
-    names, buy, sell = {}, {}, {}
+    names, buy, sell, unfilled = {}, {}, {}, set()
     for o in orders or []:
         names.setdefault(o["code"], o.get("name"))
+        price = float(o.get("price") or 0)
         if o["side"] == "TOM_BUY":
-            buy.setdefault(o["code"], float(o.get("price") or 0))
-        elif o["side"] == "TOM_SELL" and float(o.get("price") or 0) > 0:
-            sell[o["code"]] = float(o["price"])
+            buy[o["code"]] = price
+            unfilled.discard(o["code"])
+        elif o["side"] == "TOM_SELL" and price > 0:
+            sell[o["code"]] = price
+        elif o["side"] == "TOM_SELL":
+            unfilled.add(o["code"])  # 0원 = 매수 미체결로 기록만 닫음
     rows = []
     for code in sorted(set(groups["A"]) | set(groups["B"])):
         p = pos.get(code)
+        if not p and code in unfilled:
+            continue
         entry = float(p["buy_price"]) if p and float(p.get("buy_price") or 0) > 0 else buy.get(code)
         now = float(p["current_price"]) if p and float(p.get("current_price") or 0) > 0 else sell.get(code)
         rows.append({"code": code, "name": names.get(code) or (p or {}).get("name") or code,
@@ -207,6 +223,7 @@ def rehearsal_compare(message: str, positions: List[dict], orders: List[dict]) -
 class TomTrader:
     def __init__(self, bot):
         self.bot, self.db, self.client = bot, bot.db, bot.client
+        self.orders = OrderPacer(bot.client)  # 주문 사이 1초 (11/3 리허설 429로 10건 중 5건 실패)
         self.done_on = None
 
     async def log(self, level: str, msg: str):
@@ -262,7 +279,7 @@ class TomTrader:
                 keep.add(code)
                 continue
             qty = exit_qty(int(pos.get("qty") or 0), int(o["qty"] or 0))
-            res = await self.client.send_order(code, qty, 0, order_type="03", side="SELL", priority=RequestPriority.HIGH)
+            res = await self.orders.send_order(code, qty, 0, order_type="03", side="SELL", priority=RequestPriority.HIGH)
             if is_order_ok(res):
                 exited.add(code)
                 await self.db.log_order(code, name, "TOM_SELL", qty, int(pos.get("current_price") or 0))
@@ -337,7 +354,7 @@ class TomTrader:
                                  + ", ".join(f"{names.get(p['code'], p['code'])}({p['code']}) {p['qty']}주@{p['price']:,}" for p in picks))
         for p in picks:
             name = names.get(p["code"], p["code"])
-            res = await self.client.send_order(p["code"], p["qty"], p["price"], order_type="00", side="BUY",
+            res = await self.orders.send_order(p["code"], p["qty"], p["price"], order_type="00", side="BUY",
                                                priority=RequestPriority.HIGH)
             if is_order_ok(res) or res is None:
                 # 응답 없음은 접수됐을 수도 있어 기록 (미체결이면 다음 거래일에 잔고 없음으로 닫힘)

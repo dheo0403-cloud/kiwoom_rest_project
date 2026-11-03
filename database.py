@@ -1237,10 +1237,12 @@ class DatabaseManager:
                                           AND s.side = 'TOM_SELL' AND s.timestamp > b.timestamp)
                         GROUP BY b.code''')
                     tom_open = [{**dict(r), "entry_ts": kst(r["entry_ts"])} for r in await cursor.fetchall()]
-                    # 리허설 비교 카드: 마지막 리허설 그룹 로그 + 그 뒤 TOM 주문 기록(최근 50건 목록과 별도 — 매도일까지 밀려나지 않게)
-                    await cursor.execute(f"SELECT message, timestamp FROM {db}.logs WHERE message LIKE %s ORDER BY id DESC LIMIT 1",
+                    # 리허설 비교 카드: 리허설 그룹 로그 전부(시간순, 미체결 재주문 11/4 포함) + 첫 리허설 뒤 TOM 주문 기록
+                    # (최근 50건 목록과 별도 — 매도일까지 밀려나지 않게)
+                    await cursor.execute(f"SELECT message, timestamp FROM {db}.logs WHERE message LIKE %s ORDER BY id DESC LIMIT 10",
                                          ("[TOM/모의 리허설] 그룹 B%",))
-                    reh = await cursor.fetchone()
+                    reh_rows = list(await cursor.fetchall())[::-1]  # 최근 10건을 시간순으로
+                    reh = reh_rows[0] if reh_rows else None
                     reh_orders = []
                     if reh:
                         reh_utc = reh["timestamp"] - timedelta(hours=9)  # logs는 KST, order_history는 UTC
@@ -1251,7 +1253,7 @@ class DatabaseManager:
                 r["date"] = fmt(r["date"])
             balance.reverse()  # 날짜 오름차순 (차트용)
             return {"balance": balance, "positions": positions, "orders": orders, "logs": logs, "tom_open": tom_open,
-                    "rehearsal_log": reh["message"] if reh else None, "rehearsal_orders": reh_orders}
+                    "rehearsal_log": [r["message"] for r in reh_rows], "rehearsal_orders": reh_orders}
         except Exception as e:
             print(f"DB 모의 요약 조회 Error: {e}")
             return {"error": str(e)[:200]}

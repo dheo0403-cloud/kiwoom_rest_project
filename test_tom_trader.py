@@ -304,7 +304,7 @@ def test_mock_summary_ends_stale_snapshot_first():
     db = AsyncDatabase.__new__(AsyncDatabase)
     db.pool = Pool()
     out = asyncio.run(db.get_mock_summary("kiwoom_mock_db"))
-    assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 6 and out["rehearsal_log"] is None
+    assert "error" not in out and calls[0] == "commit" and calls.count("execute") == 6 and out["rehearsal_log"] == []
 
 
 def test_rehearsal_day_enters_once_ignoring_risk_off(monkeypatch):
@@ -384,3 +384,66 @@ def test_rehearsal_compare_groups():
     assert abs(b["ret"] - ((594000 + 41 * 26400) / (660000 + 41 * 24000) - 1) * 100) < 1e-9
     assert tt.rehearsal_compare(None, positions, orders) is None
     assert tt.rehearsal_compare("[TOM/모의] 다른 로그", positions, orders) is None
+    assert tt.rehearsal_compare([], positions, orders) is None
+
+
+def test_rehearsal_compare_reorder_after_unfilled():
+    """11/3 미체결(429) 종목을 11/4 다시 주문 → 새 수량으로 바뀌고, 다시 안 산 미체결 종목은 빠진다"""
+    first = ("[TOM/모의 리허설] 그룹 B(원래 10자리): 000810 1주, 011200 42주, 028300 24주 / "
+             "그룹 A(종목당 91,000원): 011200 3주, 028300 2주")
+    second = ("[TOM/모의 리허설] 그룹 B(원래 10자리): 011200 40주 / "
+              "그룹 A(종목당 91,000원): 011200 4주")
+    positions = [{"code": "000810", "name": "삼성화재", "qty": 1, "buy_price": 651000, "current_price": 660000},
+                 {"code": "011200", "name": "HMM", "qty": 44, "buy_price": 23000, "current_price": 23500}]
+    orders = [{"code": "000810", "name": "삼성화재", "side": "TOM_BUY", "price": 664000},
+              {"code": "011200", "name": "HMM", "side": "TOM_BUY", "price": 23650},   # 11/3 응답 없음
+              {"code": "028300", "name": "HLB", "side": "TOM_BUY", "price": 41500},   # 11/3 응답 없음
+              {"code": "011200", "name": "HMM", "side": "TOM_SELL", "price": 0},      # 11/4 미체결 닫음
+              {"code": "028300", "name": "HLB", "side": "TOM_SELL", "price": 0},
+              {"code": "011200", "name": "HMM", "side": "TOM_BUY", "price": 23450}]   # 11/4 재주문
+    out = tt.rehearsal_compare([first, second], positions, orders)
+    rows = {r["code"]: r for r in out["rows"]}
+    assert set(rows) == {"000810", "011200"}                       # HLB(재주문 안 함, 미체결)는 제외
+    assert (rows["011200"]["qty_b"], rows["011200"]["qty_a"]) == (40, 4)
+    assert out["groups"]["A"]["stocks"] == 1 and out["groups"]["B"]["stocks"] == 2
+
+
+def test_rehearsal_reorder_skips_held_and_closes_unfilled(monkeypatch):
+    """리허설 다음 날 다시 리허설: 체결된 종목은 보유로 빼고, 미체결 기록은 닫은 뒤 빈 자리만 다시 주문"""
+    days = [d.strftime("%Y%m%d") for d in pd.bdate_range("2026-01-01", "2026-11-03")]
+    spec = {c: (lambda i, d, k=k: 10000 * (1 + 0.001 * i) + k, lambda i, d, k=k: 1e9 + k)
+            for k, c in enumerate(["111110", "222220", "333330"])}
+    rows = _rows(days, spec)
+    quotes = {"111110": 13000, "222220": 13000, "333330": 13000}
+    entry = datetime(2026, 11, 3, 6, 21)
+    opened = [{"code": "111110", "name": "가", "qty": 76, "entry_ts": entry},   # 체결됨(보유)
+              {"code": "222220", "name": "나", "qty": 76, "entry_ts": entry}]   # 429로 미체결
+    pos = [{"code": "111110", "qty": 76, "current_price": 13000}]
+    monkeypatch.setenv("TOM_REHEARSAL_DATE", "2026-11-04")
+    monkeypatch.delenv("TOM_REHEARSAL_BUDGET", raising=False)
+    db, client = _run(opened, pos, date(2026, 11, 4), rows=rows, quotes=quotes)
+    assert ("222220", "TOM_SELL", 0, 0) in db.orders                      # 미체결 기록 닫음
+    assert [s[1] for s in client.sent if s[0] == "BUY"] == ["222220", "333330"]  # 보유 111110 제외
+
+
+def test_order_pacer_keeps_gap(monkeypatch):
+    """여러 건 주문 사이 ORDER_GAP_SECONDS 이상 간격 (첫 주문은 바로)"""
+    import n3_trader
+    clock, slept = [100.0], []
+
+    async def fake_sleep(s):
+        slept.append(s)
+        clock[0] += s
+
+    monkeypatch.setattr(n3_trader.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(n3_trader.asyncio, "sleep", fake_sleep)
+    client = _Client()
+    pacer = n3_trader.OrderPacer(client, gap=1.0)
+
+    async def go():
+        for c in ("A", "B", "C"):
+            await pacer.send_order(c, 1, 100)
+            clock[0] += 0.2  # 응답 처리 0.2초
+    asyncio.run(go())
+    assert [s[1] for s in client.sent] == ["A", "B", "C"]
+    assert len(slept) == 2 and all(abs(s - 0.8) < 1e-9 for s in slept)
