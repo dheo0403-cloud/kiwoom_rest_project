@@ -14,6 +14,7 @@ from typing import Any, Dict, List
 
 import limits
 from async_kiwoom_client import RequestPriority, is_order_ok, orderbook_price, parse_executions, parse_unexecuted_orders
+from collect_history import _num
 from database import get_kst_now
 
 LIVE_FROM = "20261016"     # 이 날짜 전에는 판단·로그만 (10/15 밤 ka10095 `_NX` 응답 확인용)
@@ -29,8 +30,38 @@ T_JUDGE, T_BUY, T_CANCEL, T_NIGHT_END = dtime(19, 50), dtime(19, 51), dtime(19, 
 T_EXIT, T_EXIT_END = dtime(8, 55), dtime(9, 30)
 T_FILL, T_FILL_END = dtime(9, 1), dtime(9, 40)  # 장전 매도 체결가 확인 구간 (09:30 지연 매도까지 포함, 끝 시각이 마지막 확인)
 FILL_CHECK_SECONDS = 60.0  # 체결가 확인 간격
-# 1회성(2026-11-05): 과거 N3_SELL 기록가 정정 전 실제 체결 대조용 {매도일: 종목코드} — 조회·로그만, 대조가 끝나면 다음 배포에서 삭제
-PAST_SELLS = {"20261021": "323280", "20261023": "376900", "20261028": "445680", "20261102": "190510"}
+# 1회성(2026-11-05): 일봉 종가 원인 확인용 (research/daily_close_after_market_cause.md) — 조회·로그만, 확인이 끝나면 다음 배포에서 삭제
+SOURCE_CHECK_CODES = ("005930", "009830", "028050", "069500")  # 대형주, NXT 일봉 없는 주식 2개, ETF
+SOURCE_CHECK_DAYS = ("20260911", "20261015", "20261104")       # 애프터마켓 시작 전, ETF 불일치일, 최근 불일치일
+SOURCE_CHECK_SESSIONS = (("장전", "0800", "0859"), ("정규", "0900", "1530"), ("사이", "1531", "1559"), ("애프터", "1600", "2000"))
+
+
+def source_check_lines(code: str, day: str, chart: Any, price: Any, minute: Any) -> List[str]:
+    """ka10081·ka10086·ka10080 원본에서 그날 값을 뽑아 비교용 로그 문장으로 만든다"""
+    tag = f"[일봉 원인 확인] {day} {code}"
+    d = next((r for r in (chart or {}).get("stk_dt_pole_chart_qry") or [] if r.get("dt") == day), None)
+    p = next((r for r in (price or {}).get("daly_stkpc") or [] if r.get("date") == day), None)
+    rows = (minute or {}).get("stk_min_pole_chart_qry") or []
+    bars = sorted((r for r in rows if str(r.get("cntr_tm") or "").startswith(day)), key=lambda r: r["cntr_tm"])
+    lines = [f"{tag} ka10081 시{d.get('open_pric')} 고{d.get('high_pric')} 저{d.get('low_pric')} 종{d.get('cur_prc')} "
+             f"전일비{d.get('pred_pre')} 량{d.get('trde_qty')} 대금{d.get('trde_prica')}" if d
+             else f"{tag} ka10081 그날 행 없음 {(chart or {}).get('return_msg') or ''}".strip(),
+             f"{tag} ka10086 시{p.get('open_pric')} 고{p.get('high_pric')} 저{p.get('low_pric')} 종{p.get('close_pric')} "
+             f"전일비{p.get('pred_rt')} 량{p.get('trde_qty')} 대금{p.get('amt_mn')}" if p
+             else f"{tag} ka10086 그날 행 없음 {(price or {}).get('return_msg') or ''}".strip()]
+    if not bars:
+        return lines + [f"{tag} ka10080 그날 봉 없음 (받은 봉 {len(rows)}개)"]
+    parts = []
+    for label, start, end in SOURCE_CHECK_SESSIONS:
+        s = [r for r in bars if start <= r["cntr_tm"][8:12] <= end]
+        if s:
+            parts.append(f"{label} {len(s)}봉 고{max(_num(r.get('high_pric')) for r in s)} 저{min(_num(r.get('low_pric')) for r in s)} "
+                         f"량{sum(_num(r.get('trde_qty')) for r in s)} 끝{s[-1]['cntr_tm'][8:12]}={_num(s[-1].get('cur_prc'))}")
+    first = next((r for r in bars if r["cntr_tm"][8:12] == "0900"), None)
+    close = next((r for r in bars if r["cntr_tm"][8:12] == "1530"), None)
+    lines.append(f"{tag} ka10080 09:00시가 {_num(first.get('open_pric')) if first else '없음'}, "
+                 f"15:30종가 {_num(close.get('cur_prc')) if close else '없음'}, 첫봉 {bars[0]['cntr_tm'][8:12]} | " + " | ".join(parts))
+    return lines
 
 
 def signal_drop(u: dict, q: dict):
@@ -130,27 +161,23 @@ class N3Trader:
         if notify:
             self.bot.notifier.send_message(msg)
 
-    async def log_past_fills(self):
-        """1회성: 과거 N3 매도일의 매매일지(ka10170)를 로그로 남긴다. 주문·DB 기록 변경 없음"""
-        for day, code in PAST_SELLS.items():
-            data = await self.client.get_trade_diary(day)
-            if data is None:
-                await self.log("WARNING", f"[N3/체결 대조] {day} {code} 매매일지 조회 실패")
-                continue
-            rows = data.get("tdy_trde_diary") or []
-            r = next((x for x in rows if str(x.get("stk_cd") or "").replace("A", "").strip() == code), None)
-            if r is None:
-                await self.log("WARNING", f"[N3/체결 대조] {day} {code} 일지에 없음 (읽은 행 {len(rows)}개)")
-                continue
-            await self.log("SYSTEM", f"[N3/체결 대조] {day} {r.get('stk_nm')}({code}) 매수 {r.get('buy_avg_pric')}원 {r.get('buy_qty')}주, "
-                                     f"매도 {r.get('sel_avg_pric')}원 {r.get('sell_qty')}주, 수수료·세금 {r.get('cmsn_alm_tax')}원, "
-                                     f"손익 {r.get('pl_amt')}원, 수익률 {r.get('prft_rt')}%")
+    async def log_daily_source_check(self):
+        """1회성: 일봉 종가 원인 확인용 키움 원본 값을 로그로 남긴다. 주문·DB 시세 변경 없음. 실패해도 N3 매매에 영향 없음"""
+        try:
+            url = self.client.base_url
+            for day in SOURCE_CHECK_DAYS:
+                for code in SOURCE_CHECK_CODES:
+                    chart, _ = await self.client.request("ka10081", f"{url}/api/dostk/chart", {"stk_cd": code, "base_dt": day, "upd_stkpc_tp": "1"})
+                    price, _ = await self.client.request("ka10086", f"{url}/api/dostk/mrkcond", {"stk_cd": code, "qry_dt": day, "indc_tp": "0"})
+                    minute, _ = await self.client.request("ka10080", f"{url}/api/dostk/chart",
+                                                          {"stk_cd": code, "tic_scope": "1", "upd_stkpc_tp": "1", "base_dt": day})
+                    for line in source_check_lines(code, day, chart, price, minute):
+                        await self.log("SYSTEM", line)
+        except Exception as e:
+            await self.log("WARNING", f"[일봉 원인 확인] 예외: {e}")
 
     async def run(self):
-        try:
-            await self.log_past_fills()
-        except Exception as e:  # 조회 실패가 N3 매매를 막지 않게 한다
-            await self.log("WARNING", f"[N3/체결 대조] 예외: {e}")
+        self.source_check_task = asyncio.create_task(self.log_daily_source_check())  # 조회가 늦어도 N3 판단을 막지 않게 따로 실행
         while not self.bot.is_shutdown:
             try:
                 now = get_kst_now()
