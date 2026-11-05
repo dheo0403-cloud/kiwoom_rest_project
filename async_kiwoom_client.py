@@ -188,6 +188,20 @@ def parse_unexecuted_orders(data: Any) -> List[Dict[str, Any]]:
     return orders
 
 
+def parse_executions(data: Any) -> Dict[str, Dict[str, float]]:
+    """ka10076 체결 응답 → {주문번호(앞자리 0 제거): {price(가중평균 체결가), qty(체결량 합계)}} (체결량 0인 행 제외)"""
+    rows = (data or {}).get('cntr') if isinstance(data, dict) else None
+    out: Dict[str, Dict[str, float]] = {}
+    for r in rows if isinstance(rows, list) else []:
+        ord_no = str(r.get('ord_no') or '').strip().lstrip('0')
+        price, qty = orderbook_price(r, 'cntr_pric'), orderbook_price(r, 'cntr_qty')
+        if ord_no and price > 0 and qty > 0:
+            f = out.setdefault(ord_no, {"price": 0.0, "qty": 0})
+            f["price"] = (f["price"] * f["qty"] + price * qty) / (f["qty"] + qty)
+            f["qty"] += qty
+    return out
+
+
 class AsyncKiwoomClient:
     """
     고도화된 비동기 키움증권 REST 클라이언트
@@ -552,6 +566,12 @@ class AsyncKiwoomClient:
             data_ka, _ = await self.request("ka10075", url, payload_ka, priority=priority)
             if is_tr_ok(data_ka):
                 return data_ka
+        return data if is_tr_ok(data) else None
+
+    async def get_executions(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
+        """당일 매도 체결 내역 조회 (ka10076: 전체 종목, 매도만, 통합 거래소, 첫 페이지만)"""
+        payload = {"qry_tp": "0", "sell_tp": "1", "ord_no": "", "stex_tp": "0"}
+        data, _ = await self.request("ka10076", f"{self.base_url}/api/dostk/acnt", payload, priority=priority)
         return data if is_tr_ok(data) else None
 
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:

@@ -379,26 +379,49 @@ class DatabaseManager:
 
     async def get_n3_universe(self, date: str) -> list:
         """N3 대상: 그날 KRX 거래대금 상위 300 보통주(종가 ≥ 1,000원) 중 NXT 종목 — [{code, name, close, value, prev_close}]
-        (research/afterhours_explore.py와 같은 대상 정의)"""
+        (research/afterhours_explore.py와 같은 대상 정의)
+        close = 그날 KRX 15:30 분봉 종가. 9/14부터 daily_ohlcv 종가가 15:30 종가와 어긋나(약 90% 종목) 신호 기준으로 쓰지 않는다.
+        15:30 분봉이 없는 종목은 대상에서 뺀다."""
         if not self.pool: return []
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
                     await cursor.execute('''
-                        SELECT t.code, t.name, t.close, t.value,
+                        SELECT t.code, t.name, b.close, t.value,
                                (SELECT p.close FROM daily_ohlcv p WHERE p.code = t.code AND p.date < %s
                                 ORDER BY p.date DESC LIMIT 1) AS prev_close
-                        FROM (SELECT d.code, m.name, d.close, d.value FROM daily_ohlcv d
+                        FROM (SELECT d.code, m.name, d.value FROM daily_ohlcv d
                               JOIN stock_master m ON m.code = d.code
                               WHERE d.date = %s AND d.close >= 1000 AND m.is_etf = 0 AND m.market IN ('KOSPI', 'KOSDAQ')
                                 AND d.code REGEXP '^[0-9]{5}0$' AND m.name NOT LIKE '%%스팩%%'
                               ORDER BY d.value DESC LIMIT 300) t
+                        JOIN minute_ohlcv b ON b.code = t.code AND b.datetime = %s
                         WHERE t.code IN (SELECT DISTINCT code FROM nxt_daily)
-                        ORDER BY t.value DESC''', (date, date))
+                        ORDER BY t.value DESC''', (date, date, f"{date}153000"))
                     return [dict(r) for r in await cursor.fetchall()]
         except Exception as e:
             print(f"DB N3 대상 조회 Error: {e}")
             return []
+
+    async def update_n3_sell_fill(self, code: str, price: int, qty: int) -> bool:
+        """오늘 접수한 이 종목의 N3_SELL 행을 실제 체결가·체결 수량으로 바꾼다. 오늘 행이 없거나 DB 오류면 False
+        (접수 기록이 실패한 날 과거 거래를 덮어쓰지 않도록 오늘 행만, order_history.timestamp는 UTC)"""
+        if not self.pool: return False
+        kst0 = get_kst_now().replace(hour=0, minute=0, second=0, microsecond=0)
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT id FROM order_history WHERE side = 'N3_SELL' AND code = %s AND qty > 0 AND timestamp >= %s "
+                                         "ORDER BY id DESC LIMIT 1", (code, (kst0 - timedelta(hours=9)).strftime("%Y-%m-%d %H:%M:%S")))
+                    row = await cursor.fetchone()
+                    if not row:
+                        return False
+                    await cursor.execute("UPDATE order_history SET price = %s, qty = %s WHERE id = %s", (price, qty, row["id"]))
+                await conn.commit()
+            return True
+        except Exception as e:
+            print(f"DB N3 체결가 갱신 Error: {e}")
+            return False
 
     async def get_n3_open(self) -> list:
         """마지막 N3_SELL 뒤의 N3 매수 접수 − 19:58 취소 수량이 남은 종목 (최근 10일) — [{code, name, qty}]. DB 오류면 None"""

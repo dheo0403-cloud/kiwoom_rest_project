@@ -1,6 +1,8 @@
 """N3 애프터마켓 매매 판단 로직 테스트 (n3_trader.py)"""
+import asyncio
 from datetime import timedelta
 
+from async_kiwoom_client import parse_executions
 from database import get_kst_now
 from n3_trader import N3Trader, parse_watch_quotes, pick_n3_orders
 
@@ -64,6 +66,103 @@ def test_exit_qty_caps_to_n3_quantity():
     assert exit_qty(105, 5) == 5
     assert exit_qty(3, 5) == 3
     assert exit_qty(0, 4) == 4
+
+
+def test_parse_executions_weighted_and_leading_zero():
+    data = {"return_code": 0, "cntr": [
+        {"ord_no": "0000037", "cntr_pric": "17100", "cntr_qty": "1"},
+        {"ord_no": "0000037", "cntr_pric": "+17400", "cntr_qty": "2"},
+        {"ord_no": "0000038", "cntr_pric": "18000", "cntr_qty": "0"},   # 체결 전 주문
+        {"ord_no": "", "cntr_pric": "18000", "cntr_qty": "1"},
+    ]}
+    assert parse_executions(data) == {"37": {"price": 17300.0, "qty": 3}}
+    assert parse_executions(None) == {}
+    assert parse_executions({"return_code": 0}) == {}
+
+
+class _FillDb:
+    def __init__(self, ok=True):
+        self.ok, self.updates, self.logs, self.orders = ok, [], [], []
+
+    async def update_n3_sell_fill(self, code, price, qty):
+        self.updates.append((code, price, qty))
+        return self.ok
+
+    async def log_message(self, level, msg):
+        self.logs.append((level, msg))
+
+    async def log_order(self, code, name, side, qty, price):
+        self.orders.append((code, side, qty, price))
+
+    async def get_n3_open(self):
+        return [{"code": "190510", "name": "나무가", "qty": 1}]
+
+
+class _FillClient:
+    def __init__(self, data=None):
+        self.data = data
+
+    async def get_executions(self, priority=None):
+        return self.data
+
+    async def send_order(self, *a, **k):
+        return {"return_code": 0, "ord_no": "0000123"}
+
+
+class _Notifier:
+    def send_message(self, msg):
+        pass
+
+
+def _fill_trader(data, ok=True):
+    class _Portfolio:
+        async def get_snapshot(self):
+            return {"positions": [{"code": "190510", "qty": 1, "current_price": 18030}]}
+
+    class _Bot:
+        db, client, notifier, portfolio = _FillDb(ok), _FillClient(data), _Notifier(), _Portfolio()
+    t = N3Trader(_Bot())
+    t.orders.gap = 0
+    return t
+
+
+def test_record_fills_updates_only_full_fill():
+    """전량 체결만 고치고, 일부 체결은 다음 확인까지 기다린다"""
+    t = _fill_trader({"cntr": [{"ord_no": "0000001", "cntr_pric": "17170", "cntr_qty": "1"},
+                               {"ord_no": "0000002", "cntr_pric": "5000", "cntr_qty": "1"}]})
+    t.pending_fills = {"1": {"code": "190510", "name": "나무가", "qty": 1}, "2": {"code": "222220", "name": "B", "qty": 3}}
+    asyncio.run(t.record_fills())
+    assert t.db.updates == [("190510", 17170, 1)]
+    assert list(t.pending_fills) == ["2"]
+
+
+def test_record_fills_final_uses_partial_and_warns_missing():
+    t = _fill_trader({"cntr": [{"ord_no": "2", "cntr_pric": "5000", "cntr_qty": "1"}]})
+    t.pending_fills = {"2": {"code": "222220", "name": "B", "qty": 3}, "3": {"code": "333330", "name": "C", "qty": 1}}
+    asyncio.run(t.record_fills(final=True))
+    assert t.db.updates == [("222220", 5000, 1)]  # 체결분 수량만 기록
+    assert t.pending_fills == {}
+    assert any(l == "WARNING" and "잔량 2주" in m for l, m in t.db.logs)
+    assert any(l == "WARNING" and "333330" in m for l, m in t.db.logs)
+
+
+def test_record_fills_keeps_pending_when_query_or_update_fails():
+    t = _fill_trader(None)
+    t.pending_fills = {"1": {"code": "190510", "name": "나무가", "qty": 1}}
+    asyncio.run(t.record_fills())
+    assert list(t.pending_fills) == ["1"] and t.db.updates == []
+    t = _fill_trader({"cntr": [{"ord_no": "1", "cntr_pric": "17170", "cntr_qty": "1"}]}, ok=False)
+    t.pending_fills = {"1": {"code": "190510", "name": "나무가", "qty": 1}}
+    asyncio.run(t.record_fills())
+    assert list(t.pending_fills) == ["1"]
+
+
+def test_exit_registers_order_number_for_fill_check():
+    """접수 때는 임시 기록가로 N3_SELL을 남기고, 주문번호를 체결가 확인 대기에 넣는다"""
+    t = _fill_trader(None)
+    assert asyncio.run(t.exit_positions()) is True
+    assert t.db.orders == [("190510", "N3_SELL", 1, 18030)]
+    assert t.pending_fills == {"123": {"code": "190510", "name": "나무가", "qty": 1}}
 
 
 def test_protects_until_deadline():

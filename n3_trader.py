@@ -1,10 +1,11 @@
 """
 N3 애프터마켓 반등 매매 (research/afterhours_minute_plan.md 2차 재검증 합격 규칙, 2026-10-15 실거래 투입)
 
-- 19:50 판단: 그날 KRX 거래대금 상위 300 보통주 중 NXT 종목, A' = NXT 현재가 / KRX 종가 − 1 ≤ −3% (15:40 이후 NXT 체결 있음)
+- 19:50 판단: 그날 KRX 거래대금 상위 300 보통주 중 NXT 종목, A' = NXT 현재가 / KRX 종가(15:30 분봉) − 1 ≤ −3% (15:40 이후 NXT 체결 있음)
 - 19:51 매수: 거래대금 순으로 빈 슬롯만큼 NXT 지정가(매도1호가), 종목당 예산 = 주문가능금액 / 최대 종목 수
 - 19:58 미체결 취소, 다음 거래일 08:55 KRX 장전 시장가 매도(09:00 시가 체결, 놓치면 09:30까지 재시도)
 - 주문 기록 side: N3_BUY / N3_CANCEL(19:58 취소 수량) / N3_SELL — 일중 전략 채점과 분리, 재시작해도 DB로 상태 복원
+- N3_SELL 가격: 접수 때는 잔고 현재가(전날 종가)로 넣고, 09:01~09:40 ka10076으로 실제 체결가를 받아 고친다
 """
 import asyncio
 import time
@@ -12,7 +13,7 @@ from datetime import datetime, timedelta, time as dtime
 from typing import Any, Dict, List
 
 import limits
-from async_kiwoom_client import RequestPriority, is_order_ok, orderbook_price, parse_unexecuted_orders
+from async_kiwoom_client import RequestPriority, is_order_ok, orderbook_price, parse_executions, parse_unexecuted_orders
 from database import get_kst_now
 
 LIVE_FROM = "20261016"     # 이 날짜 전에는 판단·로그만 (10/15 밤 ka10095 `_NX` 응답 확인용)
@@ -26,6 +27,8 @@ EXCLUDED = {"000500", "000880", "036800", "047920", "068270", "183300", "196170"
             "247540", "290650", "328130", "340570", "356860", "466100", "476830", "484870", "494120"}
 T_JUDGE, T_BUY, T_CANCEL, T_NIGHT_END = dtime(19, 50), dtime(19, 51), dtime(19, 58), dtime(20, 0)
 T_EXIT, T_EXIT_END = dtime(8, 55), dtime(9, 30)
+T_FILL, T_FILL_END = dtime(9, 1), dtime(9, 40)  # 장전 매도 체결가 확인 구간 (09:30 지연 매도까지 포함, 끝 시각이 마지막 확인)
+FILL_CHECK_SECONDS = 60.0  # 체결가 확인 간격
 
 
 def signal_drop(u: dict, q: dict):
@@ -111,6 +114,8 @@ class N3Trader:
         self.orders = OrderPacer(bot.client)
         self.entered_on = self.cancelled_on = self.exited_on = None
         self.exit_codes: Dict[str, datetime] = {}  # 장전 매도 중인 종목 → 일중 엔진이 건드리지 않을 시각
+        self.pending_fills: Dict[str, dict] = {}   # 주문번호(앞자리 0 제거) → 체결가 확인 대기 중인 매도 {code, name, qty}
+        self.next_fill_check = 0.0
 
     def protects(self, code: str) -> bool:
         """일중 매매 루프가 이 종목 청산·미체결 정리를 건너뛰어야 하는지 (장전 매도 체결 대기)"""
@@ -132,6 +137,9 @@ class N3Trader:
                     if T_EXIT <= t < T_EXIT_END and self.exited_on != today:
                         if await self.exit_positions():
                             self.exited_on = today
+                    if self.pending_fills and t >= T_FILL and time.monotonic() >= self.next_fill_check:
+                        self.next_fill_check = time.monotonic() + FILL_CHECK_SECONDS
+                        await self.record_fills(final=t >= T_FILL_END)
                     if T_JUDGE <= t < T_CANCEL and self.entered_on != today:
                         self.entered_on = today
                         await self.enter(today)
@@ -162,7 +170,7 @@ class N3Trader:
             return
         universe = await self.db.get_n3_universe(today)
         if len(universe) < MIN_UNIVERSE:
-            await self.log("WARNING", f"[N3] {today} 대상 {len(universe)}종목(< {MIN_UNIVERSE}, 일봉 수집 전?) → 진입 안 함", notify=live)
+            await self.log("WARNING", f"[N3] {today} 대상 {len(universe)}종목(< {MIN_UNIVERSE}, 일봉·15:30 분봉 수집 전?) → 진입 안 함", notify=live)
             return
         quotes: Dict[str, dict] = {}
         codes = [u["code"] for u in universe]
@@ -242,7 +250,13 @@ class N3Trader:
                                                priority=RequestPriority.CRITICAL, exchange="KRX")
             msg = str((res or {}).get("return_msg") or (res or {}).get("msg1") or "응답 없음")
             if is_order_ok(res):
+                # 접수 시점 기록가는 임시값(잔고 현재가) → record_fills가 실제 체결가로 고친다
                 await self.db.log_order(code, name, "N3_SELL", qty, int(pos.get("current_price") or pos.get("buy_price") or 0))
+                ord_no = str(res.get("ord_no") or "").strip().lstrip("0")
+                if ord_no:
+                    self.pending_fills[ord_no] = {"code": code, "name": name, "qty": qty}
+                else:
+                    await self.log("WARNING", f"[N3] {name}({code}) 매도 응답에 주문번호 없음 → 체결가 확인 못 함 (기록가는 전날 종가 근처)")
                 await self.log("TRADE", f"🌅 [N3 매도 접수] {name}({code}) {qty}주 KRX 시장가 "
                                         f"({'장중 지연 매도' if late else '09:00 시가 체결'})", notify=True)
             elif "800033" in msg and not pos:
@@ -253,3 +267,24 @@ class N3Trader:
                 self.exit_codes.pop(code, None)  # 실패하면 일중 엔진 청산 규칙(손절·15:15)에 맡기고 내일 다시 시도
                 await self.log("ERROR", f"[N3] 장전 매도 거절: {name}({code}) {qty}주 - {msg} → 일중 엔진 청산 규칙에 맡김", notify=True)
         return True
+
+    async def record_fills(self, final: bool = False):
+        """장전 매도의 실제 체결가·수량으로 N3_SELL 기록을 고친다. 전량 체결된 주문만 처리하고 나머지는 다음 확인으로 넘긴다.
+        final=True(09:40 마지막 확인): 일부 체결이면 체결분만 기록하고 잔량을 알리며, 끝내 확인 못 한 주문은 경고 후 대기에서 뺀다"""
+        data = await self.client.get_executions(priority=RequestPriority.HIGH)
+        fills = parse_executions(data)
+        for ord_no, p in list(self.pending_fills.items()):
+            f = fills.get(ord_no)
+            if f and (f["qty"] >= p["qty"] or final):
+                price, qty = int(round(f["price"])), int(f["qty"])
+                if await self.db.update_n3_sell_fill(p["code"], price, qty):
+                    self.pending_fills.pop(ord_no)
+                    partial = qty < p["qty"]
+                    await self.log("WARNING" if partial else "SYSTEM",
+                                   f"[N3] 매도 체결 확인: {p['name']}({p['code']}) {qty}/{p['qty']}주 평균 {price:,}원"
+                                   + (f" → 잔량 {p['qty'] - qty}주 미체결, 확인 필요" if partial else ""), notify=partial)
+                    continue
+            if final:
+                self.pending_fills.pop(ord_no)
+                await self.log("WARNING", f"[N3] {p['name']}({p['code']}) 체결가 확인 실패(주문번호 {ord_no}, 조회 {'성공' if data else '실패'}) "
+                                          f"→ N3_SELL 기록가는 실제 체결가가 아님", notify=True)
