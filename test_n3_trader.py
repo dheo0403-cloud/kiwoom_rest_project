@@ -165,51 +165,6 @@ def test_exit_registers_order_number_for_fill_check():
     assert t.pending_fills == {"123": {"code": "190510", "name": "나무가", "qty": 1}}
 
 
-def test_source_check_lines_splits_sessions():
-    """1회성 원인 확인: 그날 행만 쓰고, 분봉은 시간대별로 나눠 요약한다"""
-    chart = {"stk_dt_pole_chart_qry": [{"dt": "20261103"}, {"dt": "20261104", "open_pric": "100", "high_pric": "130", "low_pric": "90",
-                                                            "cur_prc": "125", "pred_pre": "+5", "trde_qty": "60", "trde_prica": "1"}]}
-    price = {"daly_stkpc": [{"date": "20261104", "open_pric": "+100", "high_pric": "+110", "low_pric": "-90", "close_pric": "+105",
-                             "pred_rt": "+5", "trde_qty": "50", "amt_mn": "1"}]}
-    minute = {"stk_min_pole_chart_qry": [
-        {"cntr_tm": "20261104200000", "open_pric": "125", "high_pric": "130", "low_pric": "120", "cur_prc": "+125", "trde_qty": "10"},
-        {"cntr_tm": "20261104153000", "open_pric": "105", "high_pric": "110", "low_pric": "105", "cur_prc": "-105", "trde_qty": "20"},
-        {"cntr_tm": "20261104090000", "open_pric": "+100", "high_pric": "100", "low_pric": "90", "cur_prc": "95", "trde_qty": "30"},
-        {"cntr_tm": "20261103200000", "open_pric": "1", "high_pric": "1", "low_pric": "1", "cur_prc": "1", "trde_qty": "999"}]}
-    from n3_trader import source_check_lines
-    a, b, c = source_check_lines("005930", "20261104", chart, price, minute)
-    assert "ka10081" in a and "종125" in a and "ka10086" in b and "종+105" in b
-    assert "09:00시가 100, 15:30종가 105, 첫봉 0900" in c
-    assert "정규 2봉 고110 저90 량50 끝1530=105" in c and "애프터 1봉 고130 저120 량10 끝2000=125" in c
-
-
-def test_source_check_lines_handles_empty_responses():
-    from n3_trader import source_check_lines
-    lines = source_check_lines("005930", "20261104", None, {}, {"stk_min_pole_chart_qry": [{"cntr_tm": "20261103150000"}]})
-    assert lines == ["[일봉 원인 확인] 20261104 005930 ka10081 그날 행 없음", "[일봉 원인 확인] 20261104 005930 ka10086 그날 행 없음",
-                     "[일봉 원인 확인] 20261104 005930 ka10080 그날 봉 없음 (받은 봉 1개)"]
-
-
-def test_source_check_only_queries_and_survives_errors():
-    """조회 TR 3종만 부르고 주문·기록은 건드리지 않으며, 예외가 나도 밖으로 나가지 않는다"""
-    t = _fill_trader(None)
-    calls = []
-
-    async def request(api_id, url, payload, **k):
-        calls.append(api_id)
-        return {}, None
-    t.client.base_url, t.client.request = "http://x", request
-    asyncio.run(t.log_daily_source_check())
-    assert set(calls) == {"ka10081", "ka10086", "ka10080"} and len(calls) == 36
-    assert t.db.orders == [] and t.db.updates == []
-
-    async def broken(*a, **k):
-        raise RuntimeError("boom")
-    t.client.request = broken
-    asyncio.run(t.log_daily_source_check())
-    assert any(l == "WARNING" and "boom" in m for l, m in t.db.logs)
-
-
 def test_protects_until_deadline():
     class _Bot:
         db = client = None

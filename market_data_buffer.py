@@ -183,7 +183,10 @@ class MarketDataBuffer:
         """실시간 틱 수신 시 해당 종목 버퍼 갱신 및 완성된 분봉 DB 저장 큐에 인큐"""
         buf = self.get_or_create(code)
         completed_candle = buf.update_tick(price, volume, dt_str)
-        if completed_candle and self._is_running:
+        # 날짜가 바뀐 첫 틱으로 완성된 전날 마지막 봉은 저장하지 않는다:
+        # 장 마감 때 flush_all로 이미 저장했고, 지금 저장하면 그 뒤 수집한 공식 15:30 분봉을 임시 값으로 덮어쓴다
+        same_day = completed_candle and completed_candle['datetime'][:10] == buf.current_candle['datetime'][:10]
+        if same_day and self._is_running:
             self.db_queue.put_nowait(completed_candle)
 
     def load_initial_candles(self, code: str, candle_list: List[Dict[str, Any]]):

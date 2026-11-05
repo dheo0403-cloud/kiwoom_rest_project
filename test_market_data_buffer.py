@@ -18,6 +18,19 @@ class MockDatabase:
         self.inserted_candles.extend(candle_list)
 
 
+def test_previous_day_candle_not_queued_on_next_day_first_tick():
+    """전날 마지막 봉이 다음 날 첫 틱에 저장되어 공식 15:30 분봉을 덮어쓰면 안 된다. 같은 날 완성 봉은 저장"""
+    mb = MarketDataBuffer(db_manager=MockDatabase())
+    mb._is_running = True
+    mb.update_tick("005930", 70000, 5000, "2026-09-04 15:30:00")
+    mb.update_tick("005930", 71000, 200, "2026-09-05 09:00:00")   # 날짜 바뀜 → 전날 봉 저장 안 함
+    assert mb.db_queue.empty()
+    assert mb.buffers["005930"].candles[-1]["datetime"] == "2026-09-04 15:30:00"  # 지표 계산용 링버퍼에는 유지
+    mb.update_tick("005930", 71100, 300, "2026-09-05 09:01:00")   # 같은 날 → 09:00 봉 저장
+    assert mb.db_queue.get_nowait()["datetime"] == "2026-09-05 09:00:00"
+    assert mb.db_queue.empty()
+
+
 class TestCircularCandleBuffer(unittest.TestCase):
     def setUp(self):
         self.buffer = CircularCandleBuffer(code="005930", maxlen=10)
