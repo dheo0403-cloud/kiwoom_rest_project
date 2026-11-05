@@ -165,6 +165,25 @@ def test_exit_registers_order_number_for_fill_check():
     assert t.pending_fills == {"123": {"code": "190510", "name": "나무가", "qty": 1}}
 
 
+def test_log_past_fills_reads_only_and_logs_each_day():
+    """1회성 대조: 있으면 체결값을, 없거나 실패하면 경고를 남기고 주문·DB 기록은 건드리지 않는다"""
+    t = _fill_trader(None)
+    answers = {"20261021": {"tdy_trde_diary": [{"stk_cd": "323280", "stk_nm": "태성", "buy_avg_pric": "55500", "buy_qty": "1",
+                                                "sel_avg_pric": "57500", "sell_qty": "1", "cmsn_alm_tax": "120", "pl_amt": "1880", "prft_rt": "+3.39"}]},
+               "20261023": {"tdy_trde_diary": [{"stk_cd": "111110"}]}, "20261028": None, "20261102": {}}
+
+    async def diary(day, priority=None):
+        return answers[day]
+    t.client.get_trade_diary = diary
+    asyncio.run(t.log_past_fills())
+    msgs = [m for _, m in t.db.logs]
+    assert any("태성(323280) 매수 55500원 1주, 매도 57500원 1주" in m for m in msgs)
+    assert any("20261023 376900 일지에 없음 (읽은 행 1개)" in m for m in msgs)
+    assert any("20261028 445680 매매일지 조회 실패" in m for m in msgs)
+    assert any("20261102 190510 일지에 없음 (읽은 행 0개)" in m for m in msgs)
+    assert t.db.orders == [] and t.db.updates == []
+
+
 def test_protects_until_deadline():
     class _Bot:
         db = client = None

@@ -574,6 +574,12 @@ class AsyncKiwoomClient:
         data, _ = await self.request("ka10076", f"{self.base_url}/api/dostk/acnt", payload, priority=priority)
         return data if is_tr_ok(data) else None
 
+    async def get_trade_diary(self, base_dt: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        """매매일지 조회 (ka10170: 해당일 매도 전체, 현금·신용 전체, 최근 2개월까지 제공)"""
+        payload = {"base_dt": base_dt, "ottks_tp": "2", "ch_crd_tp": "0"}
+        data, _ = await self.request("ka10170", f"{self.base_url}/api/dostk/acnt", payload, priority=priority)
+        return data if is_tr_ok(data) else None
+
     async def get_price(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
         """현재가 시세 조회"""
         clean_code = str(code).replace('A', '').strip()

@@ -29,6 +29,8 @@ T_JUDGE, T_BUY, T_CANCEL, T_NIGHT_END = dtime(19, 50), dtime(19, 51), dtime(19, 
 T_EXIT, T_EXIT_END = dtime(8, 55), dtime(9, 30)
 T_FILL, T_FILL_END = dtime(9, 1), dtime(9, 40)  # 장전 매도 체결가 확인 구간 (09:30 지연 매도까지 포함, 끝 시각이 마지막 확인)
 FILL_CHECK_SECONDS = 60.0  # 체결가 확인 간격
+# 1회성(2026-11-05): 과거 N3_SELL 기록가 정정 전 실제 체결 대조용 {매도일: 종목코드} — 조회·로그만, 대조가 끝나면 다음 배포에서 삭제
+PAST_SELLS = {"20261021": "323280", "20261023": "376900", "20261028": "445680", "20261102": "190510"}
 
 
 def signal_drop(u: dict, q: dict):
@@ -128,7 +130,27 @@ class N3Trader:
         if notify:
             self.bot.notifier.send_message(msg)
 
+    async def log_past_fills(self):
+        """1회성: 과거 N3 매도일의 매매일지(ka10170)를 로그로 남긴다. 주문·DB 기록 변경 없음"""
+        for day, code in PAST_SELLS.items():
+            data = await self.client.get_trade_diary(day)
+            if data is None:
+                await self.log("WARNING", f"[N3/체결 대조] {day} {code} 매매일지 조회 실패")
+                continue
+            rows = data.get("tdy_trde_diary") or []
+            r = next((x for x in rows if str(x.get("stk_cd") or "").replace("A", "").strip() == code), None)
+            if r is None:
+                await self.log("WARNING", f"[N3/체결 대조] {day} {code} 일지에 없음 (읽은 행 {len(rows)}개)")
+                continue
+            await self.log("SYSTEM", f"[N3/체결 대조] {day} {r.get('stk_nm')}({code}) 매수 {r.get('buy_avg_pric')}원 {r.get('buy_qty')}주, "
+                                     f"매도 {r.get('sel_avg_pric')}원 {r.get('sell_qty')}주, 수수료·세금 {r.get('cmsn_alm_tax')}원, "
+                                     f"손익 {r.get('pl_amt')}원, 수익률 {r.get('prft_rt')}%")
+
     async def run(self):
+        try:
+            await self.log_past_fills()
+        except Exception as e:  # 조회 실패가 N3 매매를 막지 않게 한다
+            await self.log("WARNING", f"[N3/체결 대조] 예외: {e}")
         while not self.bot.is_shutdown:
             try:
                 now = get_kst_now()
