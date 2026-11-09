@@ -388,7 +388,8 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
                   const isWin = (trade.pnl || 0) >= 0;
                   const pColor = pnlColor(isWin);
                   return (
-                    <div key={`${trade.code}-${trade.timestamp}`} className="flex items-center justify-between bg-slate-900/60 px-2.5 py-1 rounded text-[11px] border border-indigo-500/20 font-mono">
+                    <div key={`${trade.code}-${trade.timestamp}`} className="bg-slate-900/60 px-2.5 py-1 rounded text-[11px] border border-indigo-500/20 font-mono">
+                    <div className="flex items-center justify-between">
                       <div className="flex items-center gap-2 min-w-0">
                         {/* 좁은 화면은 날짜만(MM-DD→MM-DD), 넓은 화면은 시각까지 */}
                         <span className="text-[10px] text-slate-500 shrink-0 sm:hidden">
@@ -403,6 +404,11 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
                         <span className={`font-bold ${pColor}`}>{isWin ? '+' : ''}{(trade.return_pct || 0).toFixed(2)}%</span>
                         <span className={`text-[10px] ${pColor}`}>({isWin ? '+' : ''}{Math.round(trade.pnl || 0).toLocaleString()}원)</span>
                       </div>
+                    </div>
+                    {/* 매수가·매도가 (실제 체결가 기준) */}
+                    <div className="text-[10px] text-slate-400 mt-0.5" data-testid="n3-prices">
+                      매수 {Math.round(trade.buy_price || 0).toLocaleString()}원 × {trade.qty}주 → 매도 {Math.round(trade.sell_price || 0).toLocaleString()}원
+                    </div>
                     </div>
                   );
                 })}
