@@ -18,6 +18,50 @@ def test_adjusted_dates_detects_changed_past_close_only():
     assert adjusted_dates({}, rows, "20261015") == []
 
 
+def test_adjusted_dates_ignores_after_market_close_change():
+    # 애프터마켓으로 종가만 바뀐 날(시가 같음)은 수정주가로 보지 않는다
+    old = {"20261104": 60000}  # 저장된 시가
+    rows = [("028050", "20261104", 60000, 66900, 59000, 66900, 100, 1000)]
+    assert adjusted_dates(old, rows, "20261105") == []
+
+
+def test_apply_regular_close():
+    from collect_history import apply_regular_close
+    rows = [("028050", "20261104", 60000, 66900, 59000, 66900, 100, 1000),   # 15:30 65,500 → 교체
+            ("028050", "20261103", 60000, 61000, 59000, 60500, 100, 1000),   # 15:30 없음 → 그대로
+            ("028050", "20261102", 30000, 31000, 29000, 30500, 100, 1000)]   # 15:30 61,000은 범위 밖(원주가) → 그대로
+    out = apply_regular_close(rows, {"20261104": 65500, "20261102": 61000})
+    assert [r[5] for r in out] == [65500, 60500, 30500]
+    assert out[0][:5] == rows[0][:5] and out[0][6:] == rows[0][6:]  # 종가 외 값은 그대로
+
+
+def test_collect_daily_uses_regular_close_after_market_start():
+    import collect_history as ch
+    from unittest import mock
+
+    class _Client:
+        base_url = "http://x"
+
+    items = [{"dt": "20261104", "open_pric": "60000", "high_pric": "66900", "low_pric": "59000", "cur_prc": "66900",
+              "trde_qty": "100", "trde_prica": "1"},
+             {"dt": "20260911", "open_pric": "50000", "high_pric": "52000", "low_pric": "49000", "cur_prc": "51000",
+              "trde_qty": "100", "trde_prica": "1"}]
+
+    class _DB:
+        saved, asked = [], []
+        async def get_regular_closes(self, code, dates):
+            self.asked.extend(dates)
+            return {"20261104": 65500, "20260911": 50500}
+        async def upsert_daily_rows(self, rows): self.saved.extend(rows)
+
+    async def _paged(*a, **k): return items
+    db = _DB()
+    with mock.patch.object(ch, "_paged", _paged):
+        asyncio.run(ch.collect_daily(_Client(), db, "028050"))
+    assert db.asked == ["20261104"]  # 9/14 이전 날짜는 조회하지 않음
+    assert {r[1]: r[5] for r in db.saved} == {"20261104": 65500, "20260911": 51000}
+
+
 class _FakeDB:
     def __init__(self, ranges, minute):
         self.ranges, self.minute, self.saved = ranges, minute, []

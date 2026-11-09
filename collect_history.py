@@ -90,21 +90,40 @@ async def collect_daily(client, db, code: str, years: float = 0.0, base_dt: Opti
     items = await _paged(client, "ka10081", "/api/dostk/chart",
                          {"stk_cd": code, "base_dt": base_dt, "upd_stkpc_tp": "1"}, "stk_dt_pole_chart_qry", stop)
     rows = [r for r in parse_daily(code, items) if not cutoff or r[1] >= cutoff]
+    if hasattr(db, "get_regular_closes"):
+        dates = [r[1] for r in rows if r[1] >= AFTER_MARKET_START]
+        if dates:
+            rows = apply_regular_close(rows, await db.get_regular_closes(code, dates))
     if not cutoff and hasattr(db, "queue_minute_refetch"):
         await _detect_adjustment(db, code, rows)
     await db.upsert_daily_rows(rows)
     return len(rows)
 
 
-ADJUST_TOLERANCE = 0.005  # 저장된 과거 종가와 새 수정주가가 0.5% 넘게 다르면 기업 이벤트(분할·증자 등)로 본다
+ADJUST_TOLERANCE = 0.005  # 저장된 과거 시가와 새 수정주가가 0.5% 넘게 다르면 기업 이벤트(분할·증자 등)로 본다
+AFTER_MARKET_START = "20260914"  # KRX 애프터마켓(16~20시) 시작일 — 이날부터 키움 일봉 종가에 애프터 체결이 섞임
+
+
+def apply_regular_close(rows: List[tuple], closes: Dict[str, int]) -> List[tuple]:
+    """일봉 행의 종가를 그날 정규장 15:30 분봉 종가(closes)로 바꾼다.
+    15:30 값이 그날 일봉 저가~고가(애프터 포함) 밖이면 분봉이 수정주가 전 원주가일 수 있으므로 원래 값을 둔다.
+    고가·저가·거래량·거래대금은 바꾸지 않는다(분봉 전체 집계가 필요해 비용이 큼)"""
+    out = []
+    for r in rows:
+        c = closes.get(r[1]) if r[1] >= AFTER_MARKET_START else None
+        if c and r[4] * (1 - ADJUST_TOLERANCE) <= c <= r[3] * (1 + ADJUST_TOLERANCE):
+            r = r[:5] + (c,) + r[6:]
+        out.append(r)
+    return out
 
 
 def adjusted_dates(old: Dict[str, int], rows: List[tuple], today: str) -> List[str]:
-    """오늘 이전 날짜 중 저장된 종가(old)와 새로 받은 종가가 ADJUST_TOLERANCE 넘게 다른 날짜"""
+    """오늘 이전 날짜 중 저장된 시가(old)와 새로 받은 시가가 ADJUST_TOLERANCE 넘게 다른 날짜.
+    종가는 애프터마켓 때문에 다음 날 값이 바뀌어 오탐이 났다(11/5 확인: 시가는 애프터마켓과 무관, 12/12 일치)"""
     out = []
     for r in rows:
         prev = old.get(r[1])
-        if r[1] < today and prev and r[5] > 0 and abs(r[5] / prev - 1) > ADJUST_TOLERANCE:
+        if r[1] < today and prev and r[2] > 0 and abs(r[2] / prev - 1) > ADJUST_TOLERANCE:
             out.append(r[1])
     return out
 
@@ -113,7 +132,7 @@ async def _detect_adjustment(db, code: str, rows: List[tuple]):
     """일봉 첫 페이지(수정주가)를 저장하기 전에 최근 저장분과 비교 → 과거 값이 바뀌었으면 분봉 재수집 대기열에 넣는다
     (키움 차트는 base_dt가 권리발생일 이후일 때만 수정주가를 적용해, 이벤트 전에 받아 둔 분봉은 원주가로 남음)"""
     today = get_kst_now().strftime('%Y%m%d')
-    old = await db.get_daily_closes(code, (get_kst_now() - timedelta(days=14)).strftime('%Y%m%d'))
+    old = await db.get_daily_closes(code, (get_kst_now() - timedelta(days=14)).strftime('%Y%m%d'), col="open")
     changed = adjusted_dates(old, rows, today)
     if changed:
         await db.queue_minute_refetch([(code, f"일봉 과거 종가 변경 {changed[0]}~{changed[-1]} ({len(changed)}일)")])

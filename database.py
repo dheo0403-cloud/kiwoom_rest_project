@@ -556,16 +556,36 @@ class DatabaseManager:
         await self._executemany("UPDATE minute_refetch SET done_at=CURRENT_TIMESTAMP, rows_saved=%s WHERE code=%s",
                                 [(rows, code)], "Minute Refetch Done")
 
-    async def get_daily_closes(self, code: str, since: str, table: str = "daily_ohlcv") -> dict:
-        """date(YYYYMMDD) → 저장된 종가 (since 이후)"""
-        if not self.pool or table not in ("daily_ohlcv", "nxt_daily"): return {}
+    async def get_daily_closes(self, code: str, since: str, table: str = "daily_ohlcv", col: str = "close") -> dict:
+        """date(YYYYMMDD) → 저장된 종가(col='open'이면 시가) (since 이후)"""
+        if not self.pool or table not in ("daily_ohlcv", "nxt_daily") or col not in ("close", "open"): return {}
         try:
             async with self.pool.acquire() as conn:
                 async with conn.cursor() as cursor:
-                    await cursor.execute(f"SELECT date, close FROM {table} WHERE code=%s AND date >= %s", (code, since))
-                    return {r['date']: int(r['close']) for r in await cursor.fetchall()}
+                    await cursor.execute(f"SELECT date, {col} FROM {table} WHERE code=%s AND date >= %s", (code, since))
+                    return {r['date']: int(r[col]) for r in await cursor.fetchall()}
         except Exception as e:
             print(f"DB 일봉 종가 조회 Error: {e}")
+            return {}
+
+    async def get_regular_closes(self, code: str, dates: list) -> dict:
+        """date(YYYYMMDD) → 그날 정규장 15:30 분봉 종가 (거래량 0 봉 제외, ETF는 빈 dict).
+        9/14 KRX 애프터마켓 시작 후 키움 일봉 종가에 16~20시 체결이 섞여 정규장 종가로 바꾸는 데 쓴다
+        (research/daily_close_after_market_cause.md). 분봉 시각은 14자리와 19자(9/8~10/7 실시간분)가 섞여 있어 둘 다 찾는다"""
+        if not self.pool or not dates: return {}
+        keys = [f"{d}153000" for d in dates] + [f"{d[:4]}-{d[4:6]}-{d[6:]} 15:30:00" for d in dates]
+        ph = ",".join(["%s"] * len(keys))
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT 1 FROM stock_master WHERE code=%s AND is_etf=1", (code,))
+                    if await cursor.fetchone():
+                        return {}
+                    await cursor.execute(f"SELECT datetime, close FROM minute_ohlcv WHERE code=%s AND datetime IN ({ph}) "
+                                         "AND volume > 0", (code, *keys))
+                    return {str(r['datetime']).replace('-', '')[:8]: int(r['close']) for r in await cursor.fetchall()}
+        except Exception as e:
+            print(f"DB 15:30 분봉 조회 Error: {e}")
             return {}
 
     async def get_daily_ranges(self, code: str, since: str, table: str = "daily_ohlcv") -> list:
