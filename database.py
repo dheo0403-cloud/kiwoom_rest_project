@@ -1227,6 +1227,21 @@ class DatabaseManager:
             print(f"DB Quant Metrics 조회 에러: {e}")
             return self._empty_quant_metrics()
 
+    async def get_latest_log_like(self, pattern: str):
+        """message LIKE pattern 인 가장 최근 로그 1건 {message, timestamp(KST 'MM-DD HH:MM')} — 없거나 DB 오류면 None"""
+        if not self.pool: return None
+        try:
+            async with self.pool.acquire() as conn:
+                async with conn.cursor() as cursor:
+                    await cursor.execute("SELECT * FROM logs WHERE message LIKE %s ORDER BY id DESC LIMIT 1", (pattern,))
+                    r = await cursor.fetchone()
+                    if not r: return None
+                    created = r.get('timestamp') or r.get('created_at') or r.get('time')
+                    return {'message': r.get('message', ''), 'timestamp': format_kst_time_str(created, with_date=True)}
+        except Exception as e:
+            print(f"DB 최근 로그 검색 Error: {e}")
+            return None
+
     async def get_recent_logs(self, limit: int = 100):
         """최근 시스템/매매/감시 로그 조회 (최신순 정렬)"""
         if not self.pool: return []

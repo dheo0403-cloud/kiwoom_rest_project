@@ -610,6 +610,18 @@ class TechnicalIndicators:
         }
 
     @staticmethod
+    def parse_volume_power(data: Any) -> Optional[float]:
+        """ka10046 응답에서 최신 체결강도(%)를 꺼낸다. 행이 없거나 0·해석 불가면 None (가짜 기본값 금지)"""
+        rows = data.get('cntr_str_tm') if isinstance(data, dict) else None
+        if not isinstance(rows, list) or not rows or not isinstance(rows[0], dict):
+            return None
+        try:
+            value = abs(float(str(rows[0].get('cntr_str') or '').replace(',', '').strip()))
+        except ValueError:
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
     def calculate_volume_power(accum_buy_vol: float, accum_sell_vol: float) -> float:
         """
         체결강도(Volume Power / Buying Strength) 산출 (%)

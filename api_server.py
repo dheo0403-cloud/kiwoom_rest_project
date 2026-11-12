@@ -12,7 +12,7 @@ import re
 import os
 import secrets
 import time
-from datetime import datetime
+from datetime import datetime, time as dtime
 from typing import Dict, Any, List, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, BackgroundTasks, APIRouter, Depends, Header
@@ -29,6 +29,7 @@ from main_rest_async import AsyncTradingBot
 from macro_regime_filter import MacroRegimeFilter, MarketRegime
 from indicators import TechnicalIndicators
 import tom_trader
+import n3_trader
 
 # ================= Pydantic 요청/응답 모델 =================
 
@@ -579,6 +580,135 @@ async def get_quant_performance():
     return DatabaseManager._empty_quant_metrics()
 
 
+# 화면은 탭마다 3초 간격으로 /quant/status를 부르므로, 키움 조회(ka10004·ka10046) 결과를 잠시 재사용해 요청 한도를 아낀다
+MICRO_CACHE_SECONDS = 15.0
+_micro_cache: Dict[str, tuple] = {}  # code → (조회 시각 monotonic, 호가 불균형, 체결강도)
+
+async def _micro_indicators(code: str):
+    """호가 잔량 불균형과 체결강도. 응답이 없거나 해석 불가면 각각 None (가짜 기본값 금지)"""
+    hit = _micro_cache.get(code)
+    busy = _engine_busy(get_kst_now().time())
+    if hit and (busy or time.monotonic() - hit[0] < MICRO_CACHE_SECONDS):
+        return hit[1], hit[2]
+    if busy:
+        return None, None
+    imbalance = volume_power = None
+    if ctx.client and hasattr(ctx.client, 'get_orderbook'):
+        try:
+            ob = await ctx.client.get_orderbook(code, priority=RequestPriority.LOW)
+            if ob:
+                parsed = TechnicalIndicators.calculate_orderbook_imbalance(ob)
+                # 정규장 마감 후에는 KRX 총잔량이 0으로 와서 None
+                if (parsed.get('total_bid_qty', 0) or 0) + (parsed.get('total_ask_qty', 0) or 0) > 0:
+                    imbalance = parsed
+        except Exception:
+            pass
+    if ctx.client and hasattr(ctx.client, 'get_volume_power'):
+        try:
+            volume_power = TechnicalIndicators.parse_volume_power(
+                await ctx.client.get_volume_power(code, priority=RequestPriority.LOW))
+        except Exception:
+            pass
+    if len(_micro_cache) > 50:  # code는 요청 인자라 무한히 쌓이지 않게
+        _micro_cache.clear()
+    _micro_cache[code] = (time.monotonic(), imbalance, volume_power)
+    return imbalance, volume_power
+
+# ===== N3 실시간 패널 (포털 표시 전용 — 매매 엔진의 판단·주문과 무관) =====
+_n3_cache: Dict[str, tuple] = {}  # 키 → (조회 시각 monotonic, 값)
+
+# 매매 엔진의 N3 판단·주문 시각에는 포털이 키움을 부르지 않는다 (요청 한도는 앱 키 단위라 엔진 요청이 429로 밀릴 수 있음)
+ENGINE_BUSY_WINDOWS = [(dtime(8, 54), dtime(9, 2)), (dtime(19, 49), dtime(19, 54)), (dtime(19, 57), dtime(19, 59))]
+
+def _engine_busy(t: dtime) -> bool:
+    return any(a <= t < b for a, b in ENGINE_BUSY_WINDOWS)
+
+async def _cached(key: str, ttl: float, fetch, busy: bool = False):
+    """ttl초 안의 같은 키 재호출은 키움·DB를 다시 부르지 않는다 (탭마다 폴링하므로).
+    busy=True(엔진 주문 시각)면 오래된 값이라도 그대로 쓰고, 없으면 None"""
+    hit = _n3_cache.get(key)
+    if hit and (busy or time.monotonic() - hit[0] < ttl):
+        return hit[1]
+    if busy:
+        return None
+    value = await fetch()
+    _n3_cache[key] = (time.monotonic(), value)
+    return value
+
+async def _n3_quotes(codes: List[str], nxt: bool) -> Dict[str, Dict[str, Any]]:
+    """ka10095 일괄 시세 (nxt=True면 '_NX' 접미사로 NXT 시세). 실패한 묶음은 빠진다"""
+    quotes: Dict[str, Dict[str, Any]] = {}
+    if not (ctx.client and hasattr(ctx.client, 'get_watch_quotes')):
+        return quotes
+    for i in range(0, len(codes), n3_trader.QUOTE_CHUNK):
+        chunk = [f"{c}_NX" if nxt else c for c in codes[i:i + n3_trader.QUOTE_CHUNK]]
+        quotes.update(n3_trader.parse_watch_quotes(await ctx.client.get_watch_quotes(chunk, priority=RequestPriority.LOW)))
+    return quotes
+
+async def _n3_candidates(today: str) -> Dict[str, Any]:
+    """감시 시간(15:40~20:00) 후보 미리보기와 '지금 판단하면' 주문 예상 (엔진 enter()와 같은 계산)"""
+    universe = await ctx.db.get_n3_universe(today) if hasattr(ctx.db, 'get_n3_universe') else []
+    if len(universe) < n3_trader.MIN_UNIVERSE:
+        return {"note": f"대상 {len(universe)}종목 — 일봉·15:30 분봉 수집 후 표시 (보통 16시대)"}
+    quotes = await _n3_quotes([u["code"] for u in universe], nxt=True)
+    preview = n3_trader.candidate_preview(universe, quotes)
+    snap = await get_current_portfolio_snapshot()
+    cash = float(snap.get("current_capital") or 0)
+    total = min(cash, float(snap.get("total_asset") or cash))
+    slots = max(0, limits.MAX_STOCKS - len(snap.get("positions") or []))
+    budget = total / limits.MAX_STOCKS
+    picks = n3_trader.pick_n3_orders(universe, quotes, slots, budget, total)
+    preview.update(slots=slots, budget=int(budget),
+                   picks=[{k: p[k] for k in ("code", "name", "qty", "price")} for p in picks])
+    return preview
+
+async def _n3_holdings(night: bool) -> List[Dict[str, Any]]:
+    """N3 보유(다음 날 장전 매도 대기) 종목의 현재가·체결강도·호가 불균형. 밤·장전에는 NXT 시세"""
+    opened = await ctx.db.get_n3_open() if hasattr(ctx.db, 'get_n3_open') else None
+    if not opened:
+        return []
+    held = {p.get("code"): p for p in (await get_current_portfolio_snapshot()).get("positions") or []}
+    quotes = await _n3_quotes([o["code"] for o in opened], nxt=night)
+    out = []
+    for o in opened:
+        pos, q = held.get(o["code"]) or {}, quotes.get(o["code"]) or {}
+        buy = float(pos.get("buy_price") or 0) or None
+        cur = float(q.get("cur") or pos.get("current_price") or 0) or None
+        imbalance, volume_power = await _micro_indicators(f"{o['code']}_NX" if night else o["code"])
+        out.append({"code": o["code"], "name": o["name"], "qty": int(o["qty"] or 0), "buy_price": buy, "cur": cur,
+                    "pnl_pct": round((cur / buy - 1) * 100, 2) if buy and cur else None, "market": "NXT" if night else "KRX",
+                    "orderbook_imbalance": imbalance, "volume_power": volume_power})
+    return out
+
+@api_router.get("/n3/status")
+async def get_n3_status():
+    """N3 패널: 오늘 단계·마지막 판단·감시 후보(15:40~20:00)·보유 종목 시세"""
+    now = get_kst_now()
+    today, t = now.strftime("%Y%m%d"), now.time()
+    trading = not AsyncTradingBot.is_korean_market_holiday(now)
+    busy = trading and _engine_busy(t)
+    out: Dict[str, Any] = {"timeline": n3_trader.n3_timeline(t, trading), "last_judgment": None,
+                           "candidates": None, "holdings": [], "evaluated_at": now.strftime('%Y-%m-%d %H:%M:%S')}
+    if not ctx.db:
+        return out
+    try:
+        if hasattr(ctx.db, 'get_latest_log_like'):
+            out["last_judgment"] = await _cached("judgment", 60.0, lambda: ctx.db.get_latest_log_like("[N3/%] 19:50 판단%"))
+        if not trading:
+            out["candidates"] = {"note": "휴장일 — N3 없음"}
+        elif t < n3_trader.T_WATCH:
+            out["candidates"] = {"note": "15:40부터 후보 감시"}
+        elif t >= n3_trader.T_NIGHT_END:
+            out["candidates"] = {"note": "오늘 감시 종료 — 마지막 판단 결과 참고"}
+        else:
+            out["candidates"] = (await _cached(f"cand:{today}", 60.0, lambda: _n3_candidates(today), busy)
+                                 or {"note": "엔진 판단·주문 중 — 잠시 뒤 표시"})
+        night = t >= n3_trader.T_WATCH or t < n3_trader.T_EXIT  # 15:40~다음 날 08:55는 NXT 시세
+        out["holdings"] = await _cached(f"hold:{night}", 15.0, lambda: _n3_holdings(night), busy) or []
+    except Exception as e:
+        out["error"] = f"N3 상태 조회 실패: {e}"
+    return out
+
 @api_router.get("/quant/status")
 async def get_quant_status(code: Optional[str] = None):
     """실시간 거시(Macro) 시장 레짐 및 미시(Micro) 호가 불균형/체결강도 지표 조회"""
@@ -609,19 +739,7 @@ async def get_quant_status(code: Optional[str] = None):
 
     # 2. Micro Orderbook & Volume Indicators
     target_code = code or "005930"
-    imbalance = None      # 호가 응답을 해석하지 못하면 None (가짜 기본값 금지)
-    volume_power = None   # 체결강도 실데이터 수집 경로 없음 → None
-
-    # 실시간 호가/체결 데이터 조회 시도
-    if ctx.client and hasattr(ctx.client, 'get_orderbook'):
-        try:
-            ob = await ctx.client.get_orderbook(target_code, priority=RequestPriority.LOW)
-            if ob:
-                parsed = TechnicalIndicators.calculate_orderbook_imbalance(ob)
-                if (parsed.get('total_bid_qty', 0) or 0) + (parsed.get('total_ask_qty', 0) or 0) > 0:
-                    imbalance = parsed
-        except Exception:
-            pass
+    imbalance, volume_power = await _micro_indicators(target_code)
 
     return {
         "regime": regime_val,

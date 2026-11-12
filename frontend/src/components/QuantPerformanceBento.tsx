@@ -6,8 +6,6 @@ import {
   ShieldAlert,
   BarChart3,
   Globe,
-  Gauge,
-  Zap,
   Layers,
   ArrowUpRight,
   ArrowDownRight,
@@ -16,6 +14,7 @@ import {
   History
 } from 'lucide-react';
 import { QuantPerformanceMetrics, MacroStatus, ClosedTrade } from '../types';
+import { N3LivePanel } from './N3LivePanel';
 
 interface QuantPerformanceBentoProps {
   performance: QuantPerformanceMetrics;
@@ -87,17 +86,8 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
     regimeDotClass = 'bg-rose-500 animate-ping';
   }
 
-  // Micro Indicators (호가 불균형 & 체결강도)
-  // 실데이터가 없으면 '데이터 없음' 표시 (가짜 기본값 사용 금지)
-  const ob = safeMacro.orderbook_imbalance ?? null;
-  const totalDepth = ob ? (ob.total_bid_qty || 0) + (ob.total_ask_qty || 0) : 0;
-  const hasOrderbook = !!ob && totalDepth > 0;
-  const bidRatio = hasOrderbook ? Math.min(100, Math.max(0, (ob!.total_bid_qty / totalDepth) * 100)) : 0;
-  const askRatio = hasOrderbook ? 100 - bidRatio : 0;
-  const isBidDominant = (ob?.imbalance_ratio ?? 0) >= 0;
-
+  // 시장 체결강도 (/quant/status, 없으면 '데이터 없음' — 가짜 기본값 금지)
   const volumePower = safeMacro.volume_power ?? null;
-  const isStrongVolume = volumePower !== null && volumePower >= 120.0;
   const netRealizedPnl = safePerf.cumulative_realized_pnl ?? 0;
 
   // 당일(KST) 매도분만 표시 — timestamp는 서버가 준 KST 'MM-DD HH:MM'
@@ -261,65 +251,8 @@ export const QuantPerformanceBento: React.FC<QuantPerformanceBentoProps> = ({
 
       {/* 3. Sub Bottom Section: Micro Market Gauge & Recent Trades Feed */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-3 mt-1 pt-3 border-t border-white/5">
-        {/* Left (6/12): Real-time Orderbook Imbalance & Volume Power Gauge */}
-        <div className="lg:col-span-6 bg-slate-950/60 p-3 rounded-lg border border-slate-800 flex flex-col justify-between space-y-2.5">
-          <div className="flex items-center justify-between text-xs">
-            <span className="font-bold text-slate-300 flex items-center gap-1.5">
-              <Gauge className="w-3.5 h-3.5 text-cyan-400" />
-              실시간 호가 잔량 불균형 & 체결강도
-            </span>
-            {safeMacro.target_code && (
-              <span className="text-[10px] text-slate-400 font-mono">대상: {safeMacro.target_code}</span>
-            )}
-          </div>
-
-          {/* Orderbook Imbalance Bar */}
-          {!hasOrderbook ? (
-            <div className="text-[11px] text-slate-500 py-2">호가 잔량 데이터 없음 (호가 응답 미수신 또는 해석 불가)</div>
-          ) : (
-          <div>
-            <div className="flex justify-between text-[11px] mb-1">
-              <span className="text-slate-400">
-                매수 잔량: <strong className="text-rose-400 font-mono">{Math.round(ob.total_bid_qty || 0).toLocaleString()}</strong>주 ({bidRatio.toFixed(1)}%)
-              </span>
-              <span className={`font-bold font-mono ${isBidDominant ? 'text-rose-400' : 'text-blue-400'}`}>
-                불균형: {(ob.imbalance_ratio ?? 0) >= 0 ? '+' : ''}{(ob.imbalance_ratio ?? 0).toFixed(2)} ({isBidDominant ? '매수 지지' : '매도 우세'})
-              </span>
-              <span className="text-slate-400">
-                매도 잔량: <strong className="text-blue-400 font-mono">{Math.round(ob.total_ask_qty || 0).toLocaleString()}</strong>주 ({askRatio.toFixed(1)}%)
-              </span>
-            </div>
-            <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden flex">
-              <div
-                className="bg-gradient-to-r from-rose-500 to-red-500 h-full transition-all duration-500"
-                style={{ width: `${bidRatio}%` }}
-                title={`매수 잔량: ${bidRatio.toFixed(1)}%`}
-              />
-              <div
-                className="bg-gradient-to-r from-blue-600 to-indigo-500 h-full transition-all duration-500"
-                style={{ width: `${askRatio}%` }}
-                title={`매도 잔량: ${askRatio.toFixed(1)}%`}
-              />
-            </div>
-          </div>
-          )}
-
-          {/* Volume Power Indicator */}
-          <div className="flex items-center justify-between pt-1 text-xs">
-            <span className="text-slate-400 flex items-center gap-1 text-[11px]">
-              <Zap className="w-3.5 h-3.5 text-amber-400" />
-              실시간 체결강도:
-              <strong className={`ml-1 font-mono text-xs ${isStrongVolume ? 'text-amber-300 font-extrabold' : 'text-slate-200'}`}>
-                {volumePower !== null ? `${volumePower.toFixed(1)}%` : '데이터 없음'}
-              </strong>
-            </span>
-            {volumePower !== null && (
-              <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${isStrongVolume ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30' : 'bg-slate-800 text-slate-400'}`}>
-                {isStrongVolume ? '🔥 수급 모멘텀 급증' : '보통 수급'}
-              </span>
-            )}
-          </div>
-        </div>
+        {/* Left (6/12): N3 애프터마켓 패널 (단계·오늘 밤 후보·보유 종목) + 시장 체결강도 */}
+        <N3LivePanel colorMode={colorMode} marketVolumePower={volumePower} marketCode={safeMacro.target_code} />
 
         {/* Right (6/12): Recent Completed Trades Feed (최근 완료 매매) */}
         <div className="lg:col-span-6 bg-slate-950/60 p-3 rounded-lg border border-slate-800 flex flex-col justify-between">

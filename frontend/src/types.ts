@@ -140,6 +140,47 @@ export interface MacroStatus {
   evaluated_at?: string;
 }
 
+// ===== N3 애프터마켓 패널 (/api/n3/status) =====
+export interface OrderbookImbalance {
+  imbalance_ratio: number;
+  total_bid_qty: number;
+  total_ask_qty: number;
+  bid_ask_spread: number;
+}
+
+export interface N3Status {
+  timeline: {
+    trading_day: boolean;
+    current: string | null;
+    next: { time: string; label: string } | null;
+    steps: { time: string; label: string; status: 'done' | 'current' | 'upcoming' }[];
+  };
+  last_judgment: { message: string; timestamp: string } | null;
+  candidates: {
+    note?: string;
+    universe?: number;
+    quoted?: number;
+    signals?: number;
+    slots?: number;
+    budget?: number;
+    items?: { code: string; name: string; close: number; cur: number; a: number; tm: string; signal: boolean }[];
+    picks?: { code: string; name: string; qty: number; price: number }[];
+  } | null;
+  holdings: {
+    code: string;
+    name: string;
+    qty: number;
+    buy_price: number | null;
+    cur: number | null;
+    pnl_pct: number | null;
+    market: 'NXT' | 'KRX';
+    orderbook_imbalance: OrderbookImbalance | null;
+    volume_power: number | null;
+  }[];
+  evaluated_at: string;
+  error?: string;
+}
+
 export interface PortfolioSnapshot {
   total_asset: number;
   current_capital: number;

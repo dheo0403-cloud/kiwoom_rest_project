@@ -171,3 +171,93 @@ def test_protects_until_deadline():
     t = N3Trader(_Bot())
     t.exit_codes = {"111110": get_kst_now() + timedelta(minutes=1), "222220": get_kst_now() - timedelta(seconds=1)}
     assert t.protects("111110") and not t.protects("222220") and not t.protects("999990")
+
+
+# ===== 포털 N3 패널 (표시 전용) =====
+from datetime import time as dtime
+from n3_trader import n3_timeline, candidate_preview
+
+
+def test_n3_timeline_marks_current_step():
+    tl = n3_timeline(dtime(19, 50, 30), True)
+    assert tl["current"] == "판단" and tl["next"] == {"time": "19:51", "label": "매수"}
+    st = {s["label"]: s["status"] for s in tl["steps"]}
+    assert st["후보 감시"] == "done" and st["판단"] == "current" and st["미체결 취소"] == "upcoming"
+    assert n3_timeline(dtime(7, 0), True)["current"] == "장 시작 전"
+    assert n3_timeline(dtime(20, 30), True)["next"] is None
+    off = n3_timeline(dtime(19, 50), False)
+    assert off["trading_day"] is False and off["current"] is None
+
+
+def test_candidate_preview_sorted_with_signal_flags():
+    universe = [_u("111110", 10000, 900), _u("222220", 10000, 800), _u("333330", 10000, 700), _u("000880", 10000, 600)]
+    quotes = {"111110": {"cur": 9800, "ask": 9810, "tm": "190000"},   # −2% 신호 아님
+              "222220": {"cur": 9500, "ask": 9510, "tm": "190000"},   # −5% 신호
+              "333330": {"cur": 9400, "ask": 9410, "tm": "153900"},   # −6%지만 15:40 전 체결 → 신호 아님
+              "000880": {"cur": 9000, "ask": 9010, "tm": "190000"}}   # 제외 종목 → 신호 아님
+    p = candidate_preview(universe, quotes, top=3)
+    assert [r["code"] for r in p["items"]] == ["000880", "333330", "222220"]
+    assert [r["signal"] for r in p["items"]] == [False, False, True]
+    assert p["universe"] == 4 and p["quoted"] == 4 and p["signals"] == 1
+    assert p["items"][2]["a"] == -0.05
+
+
+def test_n3_status_endpoint(monkeypatch):
+    """/n3/status: 감시 시간에 후보·예상 주문, 보유 종목 시세·체결강도, 60초 재사용"""
+    from datetime import datetime
+    from fastapi.testclient import TestClient
+    import api_server
+    from api_server import app, ctx
+    from async_portfolio import AsyncPortfolioManager
+    from main_rest_async import AsyncTradingBot
+    from test_async_trading_loop import MockKiwoomClient, MockDatabaseManager
+
+    universe = [_u(f"{i:05d}0", 10000, 1000 - i) for i in range(1, 121)]
+    quote_calls = []
+
+    class Db(MockDatabaseManager):
+        async def get_n3_universe(self, date): return universe
+        async def get_n3_open(self): return [{"code": "000010", "name": "N000010", "qty": 3}]
+        async def get_latest_log_like(self, pattern): return {"message": "[N3/실거래] 19:50 판단: 신호 0건", "timestamp": "11-11 19:50"}
+
+    class Client(MockKiwoomClient):
+        async def get_watch_quotes(self, codes, priority=None):
+            quote_calls.append(len(codes))
+            return {"return_code": 0, "atn_stk_infr": [
+                {"stk_cd": c, "cur_prc": "9500" if c.startswith("000020") else "9900", "sel_bid": "9510", "cntr_tm": "190000"} for c in codes]}
+        async def get_volume_power(self, code, priority=None):
+            return {"cntr_str_tm": [{"cntr_str": "88.10"}]}
+
+    monkeypatch.delenv("API_AUTH_TOKEN", raising=False)
+    monkeypatch.setattr(api_server, "get_kst_now", lambda: datetime(2026, 11, 12, 19, 0))
+    monkeypatch.setattr(AsyncTradingBot, "is_korean_market_holiday", staticmethod(lambda dt: False))
+    ctx.client, ctx.db = Client(), Db()
+    ctx.portfolio = AsyncPortfolioManager(initial_capital=1_000_000, max_stocks=5)
+    ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=ctx.db)
+    api_server._n3_cache.clear(); api_server._micro_cache.clear()
+    c = TestClient(app)
+
+    body = c.get("/api/n3/status").json()
+    assert body["timeline"]["current"] == "후보 감시"
+    assert body["last_judgment"]["timestamp"] == "11-11 19:50"
+    cand = body["candidates"]
+    assert cand["universe"] == 120 and cand["signals"] == 1 and cand["items"][0]["code"] == "000020"
+    assert [p["code"] for p in cand["picks"]] == ["000020"]
+    h = body["holdings"][0]
+    assert h["code"] == "000010" and h["market"] == "NXT" and h["cur"] == 9900 and h["volume_power"] == 88.1
+    n = len(quote_calls)
+    c.get("/api/n3/status")
+    assert len(quote_calls) == n  # 재사용 시간 안이면 키움 재조회 없음
+
+    # 엔진 판단·주문 시각(19:50): 키움을 부르지 않고 직전 값을 그대로 보여준다
+    monkeypatch.setattr(api_server, "get_kst_now", lambda: datetime(2026, 11, 12, 19, 50, 20))
+    busy = c.get("/api/n3/status").json()
+    assert len(quote_calls) == n and busy["candidates"]["signals"] == 1 and busy["holdings"][0]["code"] == "000010"
+    api_server._n3_cache.clear(); api_server._micro_cache.clear()
+    busy = c.get("/api/n3/status").json()  # 직전 값도 없으면 안내 문구, 보유는 빈 목록
+    assert len(quote_calls) == n and busy["candidates"]["note"].startswith("엔진 판단") and busy["holdings"] == []
+    assert c.get("/api/quant/status").json()["volume_power"] is None
+
+    monkeypatch.setattr(api_server, "get_kst_now", lambda: datetime(2026, 11, 12, 10, 0))
+    assert c.get("/api/n3/status").json()["candidates"]["note"] == "15:40부터 후보 감시"
+    api_server._n3_cache.clear(); api_server._micro_cache.clear()

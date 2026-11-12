@@ -901,3 +901,36 @@ def test_signal_confirmed_needs_second_signal_next_minute():
     assert bot._signal_confirmed("005930", t(9, 46))
     bot.signal_confirm_sec = 0
     assert bot._signal_confirmed("000660", t(10, 0))           # 0이면 즉시 매수
+
+
+def test_parse_volume_power_from_ka10046():
+    """ka10046 첫 줄 cntr_str가 최신 체결강도, 없거나 0이면 None"""
+    from indicators import TechnicalIndicators as TI
+    data = {"cntr_str_tm": [{"cntr_tm": "153000", "cntr_str": "112.35"}, {"cntr_tm": "152900", "cntr_str": "99.00"}], "return_code": 0}
+    assert TI.parse_volume_power(data) == 112.35
+    assert TI.parse_volume_power({"cntr_str_tm": [], "return_code": 0}) is None
+    assert TI.parse_volume_power({"cntr_str_tm": [{"cntr_str": "0.00"}]}) is None
+    assert TI.parse_volume_power({"cntr_str_tm": [{"cntr_str": ""}]}) is None
+    assert TI.parse_volume_power(None) is None
+
+
+def test_quant_status_volume_power_cached(monkeypatch):
+    """/quant/status가 체결강도를 내려주고, 15초 안의 재호출은 키움을 다시 부르지 않는다"""
+    import api_server
+    monkeypatch.delenv("API_AUTH_TOKEN", raising=False)
+    calls = []
+
+    class Client(MockKiwoomClient):
+        async def get_volume_power(self, code, priority=None):
+            calls.append(code)
+            return {"cntr_str_tm": [{"cntr_str": "131.20"}], "return_code": 0}
+
+    ctx.client, ctx.db = Client(), MockDatabaseManager()
+    ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=ctx.db)
+    api_server._micro_cache.clear()
+    c = TestClient(app)
+    assert c.get("/api/quant/status?code=000660").json()["volume_power"] == 131.2
+    assert c.get("/api/quant/status?code=000660").json()["volume_power"] == 131.2
+    assert calls == ["000660"]
+    api_server._micro_cache.clear()

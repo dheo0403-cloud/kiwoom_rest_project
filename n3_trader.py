@@ -54,6 +54,44 @@ def parse_watch_quotes(data: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+# ===== 포털 표시용 (매매 판단에는 쓰지 않음) =====
+T_WATCH = dtime(15, 40)  # 후보 감시 시작 (AFTER_START와 같은 시각)
+TIMELINE = [  # (시각, 단계 이름) — 하루 순서
+    (T_EXIT, "장전 매도"), (T_FILL, "체결가 확인"), (T_WATCH, "후보 감시"),
+    (T_JUDGE, "판단"), (T_BUY, "매수"), (T_CANCEL, "미체결 취소"), (T_NIGHT_END, "종료"),
+]
+
+
+def n3_timeline(now_t: dtime, trading_day: bool) -> dict:
+    """하루 N3 단계와 현재 위치. 휴장일이면 current=None. 각 단계 status: done/current/upcoming"""
+    if not trading_day:
+        return {"trading_day": False, "current": None, "next": None,
+                "steps": [{"time": t.strftime("%H:%M"), "label": n, "status": "upcoming"} for t, n in TIMELINE]}
+    idx = -1
+    for i, (t, _) in enumerate(TIMELINE):
+        if now_t >= t:
+            idx = i
+    steps = [{"time": t.strftime("%H:%M"), "label": n,
+              "status": "done" if i < idx else "current" if i == idx else "upcoming"} for i, (t, n) in enumerate(TIMELINE)]
+    nxt = TIMELINE[idx + 1] if idx + 1 < len(TIMELINE) else None
+    return {"trading_day": True, "current": TIMELINE[idx][1] if idx >= 0 else "장 시작 전",
+            "next": {"time": nxt[0].strftime("%H:%M"), "label": nxt[1]} if nxt else None, "steps": steps}
+
+
+def candidate_preview(universe: List[dict], quotes: Dict[str, dict], top: int = 8) -> dict:
+    """감시 중 후보: A' = NXT 현재가 / KRX 종가 − 1 낮은 순 top개와 신호 수 (signal_drop 기준 그대로)"""
+    rows = []
+    for u in universe:
+        q = quotes.get(u["code"])
+        close = float(u.get("close") or 0)
+        if not q or close <= 0:
+            continue
+        rows.append({"code": u["code"], "name": u.get("name") or u["code"], "close": int(close), "cur": int(q["cur"]),
+                     "a": round(q["cur"] / close - 1, 4), "tm": q["tm"], "signal": signal_drop(u, q) is not None})
+    rows.sort(key=lambda r: r["a"])
+    return {"universe": len(universe), "quoted": len(rows), "signals": sum(r["signal"] for r in rows), "items": rows[:top]}
+
+
 ONE_SHARE_CAP = 0.7  # 종목당 예산으로 1주도 못 살 때 1주는 허용하되, 한 종목에 주문가능금액의 이 비율까지 (10/15 50% → 10/20 사용자 결정 70%)
 
 

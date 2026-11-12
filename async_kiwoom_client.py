@@ -590,6 +590,13 @@ class AsyncKiwoomClient:
         data, _ = await self.request("ka10004", url, payload, priority=priority)
         return data
 
+    async def get_volume_power(self, code: str, priority: RequestPriority = RequestPriority.LOW) -> Optional[Dict[str, Any]]:
+        """체결강도 추이 시간별 조회 (ka10046) — 응답 cntr_str_tm 첫 줄이 최신"""
+        clean_code = str(code).replace('A', '').strip()
+        url = f"{self.base_url}/api/dostk/mrkcond"
+        data, _ = await self.request("ka10046", url, {"stk_cd": clean_code}, priority=priority)
+        return data
+
     async def get_deposit_info(self, priority: RequestPriority = RequestPriority.MEDIUM) -> Optional[Dict[str, Any]]:
         """
         예수금 상세 현황 조회 (kt00001 / OPW00001 다중 qry_tp 자동 순차 조회)
