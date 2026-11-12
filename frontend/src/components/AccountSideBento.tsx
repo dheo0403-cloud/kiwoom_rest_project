@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { createChart, ColorType, IChartApi } from 'lightweight-charts';
 import { LineChart, Clock } from 'lucide-react';
 import { EquityHistoryPoint, PendingOrder } from '../types';
-import { getApiUrl } from '../utils/apiConfig';
+import { getApi } from '../utils/apiConfig';
 
 interface AccountSideBentoProps {
   equityHistory: EquityHistoryPoint[];
@@ -49,7 +49,7 @@ export const AccountSideBento: React.FC<AccountSideBentoProps> = ({ equityHistor
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch(getApiUrl('/orders/pending'));
+        const res = await getApi('/orders/pending');
         if (!res.ok) throw new Error(String(res.status));
         const data = await res.json();
         if (alive) { setOrders(Array.isArray(data.orders) ? data.orders : []); setOrdersError(false); }

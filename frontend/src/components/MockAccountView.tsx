@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { FlaskConical, CalendarClock, Wallet, ListOrdered, ScrollText } from 'lucide-react';
 import { MockSummary, MockRehearsal } from '../types';
-import { getApiUrl } from '../utils/apiConfig';
+import { getApi } from '../utils/apiConfig';
 
 interface MockAccountViewProps {
   colorMode: 'KRX' | 'GLOBAL';
@@ -18,7 +18,7 @@ export const MockAccountView: React.FC<MockAccountViewProps> = ({ colorMode }) =
     let alive = true;
     const load = async () => {
       try {
-        const res = await fetch(getApiUrl('/mock/summary'));
+        const res = await getApi('/mock/summary');
         if (!res.ok) throw new Error(String(res.status));
         const body: MockSummary = await res.json();
         if (alive) { setData(body); setFailed(false); }

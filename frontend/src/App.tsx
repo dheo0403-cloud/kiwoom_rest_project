@@ -13,7 +13,7 @@ import { ParamsModal } from './components/ParamsModal';
 import { MockAccountView } from './components/MockAccountView';
 import { useTradingWebSocket } from './hooks/useWebSocket';
 import { WatchlistItem } from './types';
-import { getApiUrl, postApi } from './utils/apiConfig';
+import { getApi, postApi } from './utils/apiConfig';
 
 export function App() {
   const {
@@ -49,7 +49,7 @@ export function App() {
   // Fetch watchlist from REST API
   const fetchWatchlist = async () => {
     try {
-      const res = await fetch(getApiUrl('/watchlist'));
+      const res = await getApi('/watchlist');
       if (res.ok) {
         const data = await res.json();
         let items: WatchlistItem[] = [];

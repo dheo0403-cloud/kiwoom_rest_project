@@ -454,16 +454,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-async def require_api_token(x_api_token: Optional[str] = Header(default=None)):
-    """변경성(주문/제어) API 인증: API_AUTH_TOKEN이 설정된 경우 X-API-Token 헤더가 일치해야 한다."""
+def _api_token_ok(token: Optional[str]) -> bool:
+    """API_AUTH_TOKEN 미설정이면 항상 통과, 설정되면 값이 일치해야 한다."""
     expected = os.getenv("API_AUTH_TOKEN", "")
     if not expected:
-        return
-    if not x_api_token or not secrets.compare_digest(x_api_token, expected):
+        return True
+    return bool(token) and secrets.compare_digest(token.encode(), expected.encode())
+
+async def require_api_token(x_api_token: Optional[str] = Header(default=None)):
+    """REST API 인증(조회·변경 모두): API_AUTH_TOKEN이 설정된 경우 X-API-Token 헤더가 일치해야 한다."""
+    if not _api_token_ok(x_api_token):
         raise HTTPException(status_code=401, detail="인증 토큰이 유효하지 않습니다.")
 
+async def _ws_authorized(websocket: WebSocket) -> bool:
+    """WebSocket 인증: 브라우저는 헤더를 못 붙이므로 ?token= 쿼리로 받는다. 실패 시 accept 전에 닫는다(1008)."""
+    if _api_token_ok(websocket.query_params.get("token")):
+        return True
+    await websocket.close(code=1008)
+    return False
+
 # ================= REST 엔드포인트 라우터 정의 =================
-api_router = APIRouter()
+# api_router: 모든 엔드포인트에 토큰 인증 적용 (계좌·보유·로그 노출 방지)
+# public_router: 인증 없이 열어 두는 헬스체크만
+api_router = APIRouter(dependencies=[Depends(require_api_token)])
+public_router = APIRouter()
 
 async def _engine_running() -> bool:
     """화면 표시용 매매 엔진 상태 — 엔진이 따르는 오늘 bot_state.paused 기준
@@ -474,7 +488,7 @@ async def _engine_running() -> bool:
         return ctx.bot.running
     return not await ctx.bot._remote_paused()
 
-@api_router.get("/health")
+@public_router.get("/health")
 async def health_check():
     """서버 및 핵심 컴포넌트 헬스체크"""
     return {
@@ -867,7 +881,7 @@ async def get_mock_summary():
             "next_month_end": tom_trader.next_month_end(today, hol).isoformat(), **data}
 
 
-@api_router.post("/order/manual", dependencies=[Depends(require_api_token)])
+@api_router.post("/order/manual")
 async def create_manual_order(req: ManualOrderRequest):
     """대시보드 수동 주문 접수 (HIGH 우선순위 발주)"""
     if not ctx.bot or not ctx.client:
@@ -943,7 +957,7 @@ async def _set_trading_paused(paused: bool):
     if ok is False:
         raise HTTPException(status_code=500, detail="매매 엔진에 일시정지/재개 전달 실패 (DB bot_state 저장 오류)")
 
-@api_router.post("/bot/control", dependencies=[Depends(require_api_token)])
+@api_router.post("/bot/control")
 async def control_bot(req: BotControlRequest):
     """트레이딩 봇 제어 (시작, 정지, 잔고/감시목록 갱신)
     - START/STOP은 DB로 매매 엔진에 전달하고, 여기 ctx.bot은 화면 표시 상태만 맞춘다 (API 서버는 매매 루프를 돌리지 않음)"""
@@ -982,7 +996,7 @@ async def control_bot(req: BotControlRequest):
     else:
         raise HTTPException(status_code=400, detail=f"알 수 없는 제어 액션: {req.action}")
 
-@api_router.post("/bot/reset-circuit-breaker", dependencies=[Depends(require_api_token)])
+@api_router.post("/bot/reset-circuit-breaker")
 async def reset_circuit_breaker_endpoint():
     """
     🔓 서킷 브레이커 수동 해제 및 현재 정상 계좌 잔고 기준 재캘리브레이션
@@ -1010,7 +1024,7 @@ async def reset_circuit_breaker_endpoint():
     })
     return {"status": "success", "message": "서킷 브레이커가 성공적으로 해제되었습니다."}
 
-@api_router.post("/bot/emergency-stop", dependencies=[Depends(require_api_token)])
+@api_router.post("/bot/emergency-stop")
 async def emergency_kill_switch():
     """
     🚨 긴급 비상 킬스위치 (Emergency Kill-Switch)
@@ -1069,7 +1083,7 @@ async def emergency_kill_switch():
         "orders": executed_orders
     }
 
-@api_router.post("/bot/params", dependencies=[Depends(require_api_token)])
+@api_router.post("/bot/params")
 async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fraction: Optional[float] = None):
     """런타임 무중단 매매 파라미터 동적 조정"""
     if not ctx.bot:
@@ -1098,6 +1112,8 @@ async def update_bot_parameters(k_breakout: Optional[float] = None, kelly_fracti
     }
 
 # ================= REST 라우터 등록 (루트 및 /kiwoom 서브패스 동시 지원) =================
+app.include_router(public_router, prefix="/api")
+app.include_router(public_router, prefix="/kiwoom/api")
 app.include_router(api_router, prefix="/api")
 app.include_router(api_router, prefix="/kiwoom/api")
 
@@ -1107,6 +1123,8 @@ app.include_router(api_router, prefix="/kiwoom/api")
 @app.websocket("/kiwoom/ws/portfolio")
 async def ws_portfolio_endpoint(websocket: WebSocket):
     """실시간 포트폴리오 스냅샷 WebSocket 스트리밍"""
+    if not await _ws_authorized(websocket):
+        return
     await ws_manager.connect_portfolio(websocket)
     try:
         # 최초 연결 시 단일 진실 소스 기반 스냅샷 1회 전송
@@ -1126,6 +1144,8 @@ async def ws_portfolio_endpoint(websocket: WebSocket):
 @app.websocket("/kiwoom/ws/logs")
 async def ws_logs_endpoint(websocket: WebSocket):
     """실시간 로그 스트리밍 WebSocket (연결 즉시 최근 100건 전송)"""
+    if not await _ws_authorized(websocket):
+        return
     await ws_manager.connect_log(websocket)
     try:
         if ctx.db and hasattr(ctx.db, 'get_recent_logs'):

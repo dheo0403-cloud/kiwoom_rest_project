@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { PortfolioSnapshot, Position, LogMessage, BotStatus, QuantPerformanceMetrics, MacroStatus } from '../types';
-import { getApiUrl, getWsUrl } from '../utils/apiConfig';
+import { getApi, getWsUrl } from '../utils/apiConfig';
 
 export function useTradingWebSocket() {
   // 1. 실시간 계좌 상태 (Realtime Portfolio State)
@@ -203,16 +203,16 @@ export function useTradingWebSocket() {
     try {
       const isWsActive = isConnectedRef.current;
       const fetchList: Promise<any>[] = [
-        fetch(getApiUrl('/status')),
-        fetch(getApiUrl('/watchlist')),
-        fetch(getApiUrl('/logs?limit=100')),
-        fetch(getApiUrl('/quant/performance')),
-        fetch(getApiUrl('/quant/status'))
+        getApi('/status'),
+        getApi('/watchlist'),
+        getApi('/logs?limit=100'),
+        getApi('/quant/performance'),
+        getApi('/quant/status')
       ];
 
       // WebSocket이 끊겼거나 초기 로드일 때만 REST /portfolio를 폴백으로 요청
       if (!isWsActive) {
-        fetchList.unshift(fetch(getApiUrl('/portfolio')));
+        fetchList.unshift(getApi('/portfolio'));
       }
 
       const results = await Promise.allSettled(fetchList);

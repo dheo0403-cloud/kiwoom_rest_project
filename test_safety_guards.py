@@ -12,20 +12,47 @@ from test_async_trading_loop import MockKiwoomClient, MockDatabaseManager
 
 
 def test_mutating_api_requires_token_when_configured(monkeypatch):
-    """API_AUTH_TOKEN 설정 시 변경성 API는 토큰 없으면 401, 조회 API는 영향 없음"""
+    """API_AUTH_TOKEN 설정 시 변경성·조회 API 모두 토큰 없으면 401, 헬스체크만 공개"""
+    ctx.client, ctx.db = MockKiwoomClient(), MockDatabaseManager()
+    ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
+    ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=ctx.db)
+    c = TestClient(app)
+    ok = {"X-API-Token": "secret-token"}
+
+    monkeypatch.setenv("API_AUTH_TOKEN", "secret-token")
+    assert c.post("/api/bot/reset-circuit-breaker").status_code == 401
+    assert c.post("/api/bot/reset-circuit-breaker", headers={"X-API-Token": "wrong"}).status_code == 401
+    assert c.post("/api/bot/reset-circuit-breaker", headers=ok).status_code != 401
+    # 조회 API도 막힘 (두 경로 모두)
+    for path in ("/api/portfolio", "/api/status", "/api/logs", "/api/orders/pending", "/kiwoom/api/portfolio"):
+        assert c.get(path).status_code == 401, path
+        assert c.get(path, headers={"X-API-Token": "wrong"}).status_code == 401, path
+    assert c.get("/api/portfolio", headers=ok).status_code == 200
+    assert c.get("/api/health").status_code == 200
+    assert c.get("/kiwoom/api/health").status_code == 200
+
+    monkeypatch.delenv("API_AUTH_TOKEN")  # 미설정 시 기존 동작 유지
+    assert c.post("/api/bot/reset-circuit-breaker").status_code != 401
+    assert c.get("/api/portfolio").status_code == 200
+
+
+def test_websocket_requires_token_when_configured(monkeypatch):
+    """WebSocket은 ?token= 쿼리로 인증, 틀리면 accept 전에 닫힘"""
+    import pytest
+    from starlette.websockets import WebSocketDisconnect
     ctx.client, ctx.db = MockKiwoomClient(), MockDatabaseManager()
     ctx.portfolio = AsyncPortfolioManager(initial_capital=10_000_000, max_stocks=5)
     ctx.bot = AsyncTradingBot(is_demo=True, client=ctx.client, portfolio=ctx.portfolio, db=ctx.db)
     c = TestClient(app)
 
     monkeypatch.setenv("API_AUTH_TOKEN", "secret-token")
-    assert c.post("/api/bot/reset-circuit-breaker").status_code == 401
-    assert c.post("/api/bot/reset-circuit-breaker", headers={"X-API-Token": "wrong"}).status_code == 401
-    assert c.post("/api/bot/reset-circuit-breaker", headers={"X-API-Token": "secret-token"}).status_code != 401
-    assert c.get("/api/health").status_code == 200
-
-    monkeypatch.delenv("API_AUTH_TOKEN")  # 미설정 시 기존 동작 유지
-    assert c.post("/api/bot/reset-circuit-breaker").status_code != 401
+    for url in ("/ws/logs", "/ws/logs?token=wrong", "/kiwoom/ws/portfolio"):
+        with pytest.raises(WebSocketDisconnect) as e:
+            with c.websocket_connect(url):
+                pass
+        assert e.value.code == 1008, url
+    with c.websocket_connect("/kiwoom/ws/portfolio?token=secret-token") as ws:
+        assert ws.receive_json()["type"] == "PORTFOLIO_INIT"  # 맞는 토큰이면 정상 연결
 
 
 async def test_concurrent_buy_evaluation_places_single_order():
